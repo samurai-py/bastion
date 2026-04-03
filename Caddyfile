@@ -1,0 +1,8 @@
+{
+	email admin@example.com
+}
+
+# Substitua pelo seu domínio quando subir em produção
+# your-domain.com {
+# 	reverse_proxy localhost:18789
+# }

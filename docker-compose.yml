@@ -1,0 +1,30 @@
+services:
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    ports:
+      - "127.0.0.1:18789:18789"
+    volumes:
+      - ./config:/home/node/.openclaw:rw
+      - ./personas:/home/node/personas:rw
+      - ./skills:/home/node/skills:ro
+      - ./tmp:/tmp:rw
+    env_file: .env
+
+  caddy:
+    image: caddy:alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [openclaw]
+
+volumes:
+  caddy_data:
