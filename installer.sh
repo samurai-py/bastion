@@ -226,6 +226,24 @@ else
   success "Telegram já configurado no .env."
 fi
 
+EXISTING_TG_USER=$(_env_get "TELEGRAM_USER_ID")
+
+if [ -z "$EXISTING_TG_USER" ] && [ -n "$(_env_get "TELEGRAM_BOT_TOKEN")" ]; then
+  echo ""
+  info "Para autorizar seu acesso, preciso do seu Telegram user ID."
+  info "Você pode obter o seu ID enviando uma mensagem para @userinfobot no Telegram."
+  echo ""
+  _ask "$(echo -e "${CYAN}Cole seu Telegram user ID (ou Enter para pular): ${RESET}")" tg_user_id
+  if [ -n "$tg_user_id" ]; then
+    _env_set "TELEGRAM_USER_ID" "$tg_user_id"
+    success "Telegram user ID configurado."
+  else
+    warn "Telegram user ID não configurado. Você precisará aprovar manualmente no primeiro acesso."
+  fi
+else
+  [ -n "$EXISTING_TG_USER" ] && success "Telegram user ID já configurado no .env."
+fi
+
 # ── 6. Read .env values ───────────────────────────────────────────
 ANTHROPIC_KEY=$(_env_get "ANTHROPIC_API_KEY")
 OPENAI_KEY=$(_env_get "OPENAI_API_KEY")
@@ -333,6 +351,22 @@ fi
 mkdir -p "$INSTALL_DIR/personas" "$INSTALL_DIR/tmp"
 chmod 1777 "$INSTALL_DIR/tmp"
 docker run --rm -v "$INSTALL_DIR/config:/data" alpine chown -R 1000:1000 /data 2>/dev/null || true
+
+# ── 10b. Pre-authorize Telegram user in USER.md ───────────────────
+TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
+USER_MD="$INSTALL_DIR/USER.md"
+
+if [ -n "$TELEGRAM_USER_ID" ]; then
+  # Only update if not already authorized
+  if ! grep -q "\"${TELEGRAM_USER_ID}\"" "$USER_MD" 2>/dev/null && \
+     ! grep -q "'${TELEGRAM_USER_ID}'" "$USER_MD" 2>/dev/null && \
+     ! grep -q "- ${TELEGRAM_USER_ID}" "$USER_MD" 2>/dev/null; then
+    sed -i "s/authorized_user_ids: \[\]/authorized_user_ids:\n  - \"${TELEGRAM_USER_ID}\"/" "$USER_MD"
+    success "Telegram user ID pré-autorizado no USER.md."
+  else
+    success "Telegram user ID já autorizado no USER.md."
+  fi
+fi
 
 # ── 11. Start / restart Bastion ──────────────────────────────────
 step "Starting Bastion..."
