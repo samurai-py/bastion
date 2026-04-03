@@ -35,7 +35,7 @@ install_docker() {
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
     if command -v brew &>/dev/null; then
-      read -rp "$(echo -e "${YELLOW}Instalar Docker Desktop via Homebrew? [s/N]:${RESET} ")" confirm
+      read -rp "$(echo -e "${YELLOW}Instalar Docker Desktop via Homebrew? [s/N]:${RESET} ")" confirm </dev/tty
       if [[ "$confirm" =~ ^[sS]$ ]]; then
         brew install --cask docker
         info "Abrindo Docker Desktop..."
@@ -53,7 +53,7 @@ install_docker() {
     fi
 
   elif grep -qi microsoft /proc/version 2>/dev/null; then
-    read -rp "$(echo -e "${YELLOW}Instalar Docker Engine no WSL2? [s/N]:${RESET} ")" confirm
+    read -rp "$(echo -e "${YELLOW}Instalar Docker Engine no WSL2? [s/N]:${RESET} ")" confirm </dev/tty
     if [[ "$confirm" =~ ^[sS]$ ]]; then
       curl -fsSL https://get.docker.com | sh
       sudo usermod -aG docker "$USER"
@@ -65,7 +65,7 @@ install_docker() {
     fi
 
   else
-    read -rp "$(echo -e "${YELLOW}Instalar Docker automaticamente? [s/N]:${RESET} ")" confirm
+    read -rp "$(echo -e "${YELLOW}Instalar Docker automaticamente? [s/N]:${RESET} ")" confirm </dev/tty
     if [[ "$confirm" =~ ^[sS]$ ]]; then
       curl -fsSL https://get.docker.com | sh
       sudo usermod -aG docker "$USER"
@@ -148,30 +148,30 @@ if [ -z "$EXISTING_LLM" ]; then
   echo "  3) Anthropic Claude — melhor qualidade, pago"
   echo "  4) OpenAI GPT    — popular, pago"
   echo ""
-  read -rp "$(echo -e "${CYAN}Escolha [1-4]:${RESET} ")" llm_choice
+  read -rp "$(echo -e "${CYAN}Escolha [1-4]:${RESET} ")" llm_choice </dev/tty
 
   case "$llm_choice" in
     1)
       info "Crie sua chave gratuita em: https://console.groq.com"
-      read -rp "$(echo -e "${CYAN}Cole sua GROQ_API_KEY:${RESET} ")" llm_key
+      read -rp "$(echo -e "${CYAN}Cole sua GROQ_API_KEY:${RESET} ")" llm_key </dev/tty
       sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=${llm_key}|" .env
       success "Groq configurado."
       ;;
     2)
       info "Crie sua chave em: https://aistudio.google.com/app/apikey"
-      read -rp "$(echo -e "${CYAN}Cole sua GEMINI_API_KEY:${RESET} ")" llm_key
+      read -rp "$(echo -e "${CYAN}Cole sua GEMINI_API_KEY:${RESET} ")" llm_key </dev/tty
       sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${llm_key}|" .env
       success "Gemini configurado."
       ;;
     3)
       info "Crie sua chave em: https://console.anthropic.com"
-      read -rp "$(echo -e "${CYAN}Cole sua ANTHROPIC_API_KEY:${RESET} ")" llm_key
+      read -rp "$(echo -e "${CYAN}Cole sua ANTHROPIC_API_KEY:${RESET} ")" llm_key </dev/tty
       sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${llm_key}|" .env
       success "Anthropic configurado."
       ;;
     4)
       info "Crie sua chave em: https://platform.openai.com/api-keys"
-      read -rp "$(echo -e "${CYAN}Cole sua OPENAI_API_KEY:${RESET} ")" llm_key
+      read -rp "$(echo -e "${CYAN}Cole sua OPENAI_API_KEY:${RESET} ")" llm_key </dev/tty
       sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${llm_key}|" .env
       success "OpenAI configurado."
       ;;
@@ -193,7 +193,7 @@ if [ -z "$EXISTING_TG" ]; then
   echo "Você tem um bot no Telegram?"
   echo "  Se não tiver: abra o Telegram, fale com @BotFather e crie um bot."
   echo ""
-  read -rp "$(echo -e "${CYAN}Cole seu TELEGRAM_BOT_TOKEN (ou Enter para pular):${RESET} ")" tg_token
+  read -rp "$(echo -e "${CYAN}Cole seu TELEGRAM_BOT_TOKEN (ou Enter para pular):${RESET} ")" tg_token </dev/tty
   if [ -n "$tg_token" ]; then
     sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${tg_token}|" .env
     success "Telegram configurado."
