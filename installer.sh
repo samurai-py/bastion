@@ -340,7 +340,6 @@ fi
 # ── 8. Generate openclaw.json ─────────────────────────────────────
 step "Generating OpenClaw configuration..."
 
-GATEWAY_TOKEN=$(openssl rand -hex 20 2>/dev/null || cat /proc/sys/kernel/random/uuid | tr -d '-')
 CONFIG_DIR="$INSTALL_DIR/config"
 mkdir -p "$CONFIG_DIR"
 
@@ -356,7 +355,6 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
     }
   },
   "gateway": {
-    "auth": { "mode": "token", "token": "${GATEWAY_TOKEN}" },
     "mode": "local"
   },
   "models": {
