@@ -142,6 +142,11 @@ fi
 
 cd "$INSTALL_DIR"
 
+# Stop any running containers before reconfiguring
+if [ -f "docker-compose.yml" ]; then
+  docker compose down --remove-orphans 2>/dev/null || true
+fi
+
 # ── 3. Copy .env.example → .env (idempotent) ─────────────────────
 step "Configuring environment..."
 
@@ -334,7 +339,6 @@ step "Starting Bastion..."
 
 cd "$INSTALL_DIR"
 docker compose pull --quiet
-docker compose down --remove-orphans 2>/dev/null || true
 docker compose up -d
 success "Bastion is running."
 
