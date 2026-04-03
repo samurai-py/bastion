@@ -1,0 +1,85 @@
+name: Deploy Bastion
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${VPS_USER}@${VPS_HOST} << 'ENDSSH'
+            # Configurar variáveis de ambiente
+            export BASTION_WIZARD=false
+            export BASTION_DIR="/opt/bastion"
+            export LLM_PROVIDER="OpenRouter (recomendado — modelos gratuitos)"
+            export OPENROUTER_API_KEY="${OPENROUTER_API_KEY}"
+            export OPENROUTER_MODEL="openai/gpt-oss-20b:free"
+            export PRIMARY_CHANNEL="Telegram"
+            export TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
+            export TELEGRAM_USER_ID="${TELEGRAM_USER_ID}"
+            
+            # Baixar e executar instalador
+            curl -fsSL https://raw.githubusercontent.com/samurai-py/bastion/main/installer.sh | bash
+            
+            # Verificar status
+            cd /opt/bastion
+            docker compose ps
+          ENDSSH
+      
+      - name: Health Check
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh ${VPS_USER}@${VPS_HOST} << 'ENDSSH'
+            cd /opt/bastion
+            
+            # Aguardar container ficar saudável
+            for i in {1..30}; do
+              if docker ps --filter "name=openclaw" --format "{{.Status}}" | grep -q "Up"; then
+                echo "✓ Bastion está rodando!"
+                exit 0
+              fi
+              echo "Aguardando... ($i/30)"
+              sleep 2
+            done
+            
+            echo "✗ Timeout aguardando Bastion iniciar"
+            docker compose logs --tail=50
+            exit 1
+          ENDSSH
+      
+      - name: Notify Success
+        if: success()
+        run: |
+          echo "🎉 Bastion deployed successfully to ${{ inputs.environment }}"
+      
+      - name: Notify Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed. Check logs above."

@@ -2,96 +2,132 @@
 
 Seu assistente pessoal de IA, rodando 100% no seu computador ou servidor. O Bastion aprende como você trabalha, se adapta às diferentes áreas da sua vida e te ajuda a manter o foco no que importa — sem compartilhar seus dados com ninguém.
 
----
+## O que é?
 
-## O que é o Bastion?
-
-O Bastion é um agente de IA self-hosted construído sobre o [OpenClaw](https://openclaw.ai). Você instala uma vez, configura suas chaves de API, e ele fica disponível no seu Telegram ou WhatsApp — como um assistente particular que só você acessa.
-
-Ele funciona com **personas**: perfis de comportamento para cada área da sua vida. Você pode ter uma persona para trabalho, outra para estudos, outra para projetos pessoais. O Bastion detecta automaticamente qual persona usar com base no contexto da conversa.
+Agente de IA self-hosted construído sobre o [OpenClaw](https://openclaw.ai). Funciona com **personas** — perfis de comportamento para cada área da sua vida (trabalho, estudos, projetos pessoais). O Bastion detecta automaticamente qual persona usar com base no contexto.
 
 Seus dados ficam 100% com você. Nada vai para servidores externos além das chamadas ao LLM que você escolher.
 
 ---
 
-## Pré-requisitos
+## Instalação
 
-Antes de instalar, você vai precisar de:
-
-- **Docker + Docker Compose** — para rodar o Bastion ([instalar Docker](https://docs.docker.com/get-docker/))
-- **API key de pelo menos 1 LLM** — Anthropic (Claude), OpenAI (GPT), Google (Gemini) ou Groq
-- **Conta Maton gratuita** — crie em [maton.ai](https://maton.ai) e gere uma API key (é grátis)
-- **Canal de mensagens** — token do seu bot no Telegram **ou** conta Twilio para WhatsApp
-
----
-
-## Instalação em 3 passos
-
-### Passo 1 — Rode o instalador
+### TL;DR
 
 ```bash
 bash <(curl -fsSL https://bastion.run/install)
 ```
 
-O instalador verifica se o Docker está instalado, baixa os arquivos do Bastion e cria o arquivo `.env` para você preencher.
+Siga o wizard e pronto. Leva 5 minutos.
 
-### Passo 2 — Preencha o `.env`
+### Pré-requisitos
 
-Abra o arquivo `.env` que foi criado na pasta `bastion/` e preencha suas chaves:
+- **Docker** ([instalar](https://docs.docker.com/get-docker/))
+- **API key de LLM** (pelo menos uma):
+  - [OpenRouter](https://openrouter.ai/keys) — recomendado, tem modelos gratuitos
+  - [Groq](https://console.groq.com) — gratuito, rápido
+  - [Google Gemini](https://aistudio.google.com/app/apikey) — gratuito
+  - [Anthropic](https://console.anthropic.com) — pago, melhor qualidade
+  - [OpenAI](https://platform.openai.com/api-keys) — pago, popular
+- **Canal de mensagens** (pelo menos um):
+  - Bot do Telegram (via [@BotFather](https://t.me/BotFather))
+  - Evolution API para WhatsApp
+  - Bot do Discord
+  - App do Slack
 
-```env
-# LLM — preencha pelo menos uma
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=...
-GROQ_API_KEY=...
-
-# Maton (obrigatório)
-MATON_API_KEY=...
-
-# Canal de mensagens — escolha um
-TELEGRAM_BOT_TOKEN=...
-# ou
-TWILIO_ACCOUNT_SID=...
-TWILIO_AUTH_TOKEN=...
-TWILIO_WHATSAPP_NUMBER=...
-```
-
-### Passo 3 — Suba o Bastion
+### Instalação Interativa
 
 ```bash
+bash <(curl -fsSL https://bastion.run/install)
+```
+
+O instalador vai perguntar:
+1. Qual LLM usar (recomendamos OpenRouter com modelos gratuitos)
+2. Qual canal configurar (Telegram é o mais fácil)
+3. Suas credenciais (API keys, tokens)
+
+Depois disso, ele:
+- Verifica/instala Docker se necessário
+- Gera todas as configurações automaticamente
+- Inicia o Bastion
+
+### Instalação Automatizada (CI/CD)
+
+```bash
+export BASTION_WIZARD=false
+export OPENROUTER_API_KEY="sk-or-v1-..."
+export OPENROUTER_MODEL="openai/gpt-oss-20b:free"
+export TELEGRAM_BOT_TOKEN="123456:ABC..."
+export TELEGRAM_USER_ID="987654321"
+
+bash <(curl -fsSL https://bastion.run/install)
+```
+
+Veja todas as variáveis suportadas em [docs/installer-guide.md](docs/installer-guide.md).
+
+### Instalação Manual
+
+Se preferir configurar na mão:
+
+```bash
+git clone https://github.com/samurai-py/bastion.git
 cd bastion
+cp .env.example .env
+nano .env  # preencha suas chaves
 docker compose up -d
 ```
 
-Pronto. O Bastion está rodando.
+---
+
+## Primeiros Passos
+
+1. Envie `/start` para seu bot no canal configurado
+2. Complete o onboarding (nome, personas, TOTP)
+3. Comece a usar!
+
+O Bastion vai criar suas personas automaticamente com base no que você faz. Depois disso, é só conversar normalmente — ele detecta o contexto e responde com a persona certa.
 
 ---
 
-## Primeiros passos
+## Troubleshooting
 
-Abra o Telegram (ou WhatsApp) e envie `/start` para o seu bot.
+### Docker não encontrado
 
-O Bastion vai te guiar por um onboarding de alguns minutos:
+O instalador oferece instalação automática. Se recusar:
+- **Linux:** `curl -fsSL https://get.docker.com | sh`
+- **macOS/Windows:** [Docker Desktop](https://docs.docker.com/get-docker/)
 
-1. Vai perguntar seu nome e o que você faz
-2. Vai criar personas para cada área da sua vida que você informar
-3. Vai configurar autenticação por código TOTP (via Authy) para proteger seu acesso
-4. No final, vai mostrar um resumo das suas personas e você já pode começar a usar
+### Bot não responde
 
-A partir daí, é só conversar normalmente. O Bastion detecta o contexto e usa a persona certa automaticamente.
+```bash
+cd ~/bastion
+docker compose logs -f
+```
+
+Verifique se:
+- O container está rodando: `docker ps`
+- Seu user_id está correto: `grep authorized_user_ids USER.md`
+- Para Telegram, obtenha seu ID com [@userinfobot](https://t.me/userinfobot)
+
+### Reconfigurar do zero
+
+```bash
+cd ~/bastion
+docker compose down -v
+rm -rf config/
+bash installer.sh
+```
 
 ---
 
 ## Documentação
 
-- [Instalação local — passo a passo](docs/getting-started.md)
-- [Subindo numa VPS do zero](docs/vps-setup.md)
-- [Guia de segurança](docs/security.md)
-- [Conectar o app mobile](docs/connect-app.md)
-- [Personas — o que são e como criar](docs/personas.md)
-- [Modo Crise — replanejamento automático de agenda](docs/crisis-mode.md)
-- [Perguntas frequentes](docs/faq.md)
+- [Guia do Instalador](docs/installer-guide.md) — referência técnica completa
+- [VPS Setup](docs/vps-setup.md) — subir numa VPS do zero
+- [Segurança](docs/security.md) — guardrails e autenticação
+- [Personas](docs/personas.md) — como funcionam
+- [Modo Crise](docs/crisis-mode.md) — replanejamento automático
+- [FAQ](docs/faq.md) — perguntas frequentes
 
 ---
 
