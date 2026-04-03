@@ -160,38 +160,45 @@ fi
 # ── 4. Interactive LLM setup ─────────────────────────────────────
 step "Configurando LLM..."
 
-EXISTING_LLM=$(_env_get "ANTHROPIC_API_KEY")$(_env_get "OPENAI_API_KEY")$(_env_get "GEMINI_API_KEY")$(_env_get "GROQ_API_KEY")
+EXISTING_LLM=$(_env_get "OPENROUTER_API_KEY")$(_env_get "ANTHROPIC_API_KEY")$(_env_get "OPENAI_API_KEY")$(_env_get "GEMINI_API_KEY")$(_env_get "GROQ_API_KEY")
 
 if [ -z "$EXISTING_LLM" ]; then
   echo ""
   echo "Qual LLM você quer usar?"
-  echo "  1) Groq          — gratuito, rápido (recomendado para começar)"
-  echo "  2) Google Gemini — gratuito com limites generosos"
-  echo "  3) Anthropic Claude — melhor qualidade, pago"
-  echo "  4) OpenAI GPT    — popular, pago"
+  echo "  1) OpenRouter    — acesso a dezenas de modelos, incluindo gratuitos (recomendado)"
+  echo "  2) Groq          — gratuito, rápido, mas com limítes rígidos de contexto no plano free."
+  echo "  3) Google Gemini — gratuito com limites generosos"
+  echo "  4) Anthropic Claude — melhor qualidade, pago"
+  echo "  5) OpenAI GPT    — popular, pago"
   echo ""
-  _ask "$(echo -e "${CYAN}Escolha [1-4]: ${RESET}")" llm_choice
+  _ask "$(echo -e "${CYAN}Escolha [1-5]: ${RESET}")" llm_choice
 
   case "$llm_choice" in
     1)
+      info "Crie sua chave gratuita em: https://openrouter.ai/keys"
+      _ask "$(echo -e "${CYAN}Cole sua OPENROUTER_API_KEY: ${RESET}")" llm_key
+      _env_set "OPENROUTER_API_KEY" "$llm_key"
+      success "OpenRouter configurado."
+      ;;
+    2)
       info "Crie sua chave gratuita em: https://console.groq.com"
       _ask "$(echo -e "${CYAN}Cole sua GROQ_API_KEY: ${RESET}")" llm_key
       _env_set "GROQ_API_KEY" "$llm_key"
       success "Groq configurado."
       ;;
-    2)
+    3)
       info "Crie sua chave em: https://aistudio.google.com/app/apikey"
       _ask "$(echo -e "${CYAN}Cole sua GEMINI_API_KEY: ${RESET}")" llm_key
       _env_set "GEMINI_API_KEY" "$llm_key"
       success "Gemini configurado."
       ;;
-    3)
+    4)
       info "Crie sua chave em: https://console.anthropic.com"
       _ask "$(echo -e "${CYAN}Cole sua ANTHROPIC_API_KEY: ${RESET}")" llm_key
       _env_set "ANTHROPIC_API_KEY" "$llm_key"
       success "Anthropic configurado."
       ;;
-    4)
+    5)
       info "Crie sua chave em: https://platform.openai.com/api-keys"
       _ask "$(echo -e "${CYAN}Cole sua OPENAI_API_KEY: ${RESET}")" llm_key
       _env_set "OPENAI_API_KEY" "$llm_key"
@@ -249,17 +256,27 @@ ANTHROPIC_KEY=$(_env_get "ANTHROPIC_API_KEY")
 OPENAI_KEY=$(_env_get "OPENAI_API_KEY")
 GEMINI_KEY=$(_env_get "GEMINI_API_KEY")
 GROQ_KEY=$(_env_get "GROQ_API_KEY")
+OPENROUTER_KEY=$(_env_get "OPENROUTER_API_KEY")
 TELEGRAM_TOKEN=$(_env_get "TELEGRAM_BOT_TOKEN")
 
 # ── 7. Detect LLM provider ────────────────────────────────────────
 step "Detecting LLM provider..."
 
-if [ -n "$ANTHROPIC_KEY" ]; then
+if [ -n "$OPENROUTER_KEY" ]; then
+  PROVIDER_ID="openrouter"
+  PROVIDER_BASE_URL="https://openrouter.ai/api/v1"
+  PROVIDER_API_KEY="$OPENROUTER_KEY"
+  MODEL_ID="openai/gpt-oss-20b:free"
+  MODEL_NAME="GPT-OSS 20B Free (OpenRouter)"
+  PROVIDER_HEADERS='"headers": { "HTTP-Referer": "https://github.com/samurai-py/bastion", "X-Title": "Bastion" },'
+  success "Using OpenRouter (GPT-OSS 20B Free)"
+elif [ -n "$ANTHROPIC_KEY" ]; then
   PROVIDER_ID="anthropic"
   PROVIDER_BASE_URL="https://api.anthropic.com"
   PROVIDER_API_KEY="$ANTHROPIC_KEY"
   MODEL_ID="claude-sonnet-4-5"
   MODEL_NAME="Claude Sonnet"
+  PROVIDER_HEADERS=""
   success "Using Anthropic (Claude)"
 elif [ -n "$OPENAI_KEY" ]; then
   PROVIDER_ID="openai"
@@ -267,6 +284,7 @@ elif [ -n "$OPENAI_KEY" ]; then
   PROVIDER_API_KEY="$OPENAI_KEY"
   MODEL_ID="gpt-4o"
   MODEL_NAME="GPT-4o"
+  PROVIDER_HEADERS=""
   success "Using OpenAI (GPT-4o)"
 elif [ -n "$GEMINI_KEY" ]; then
   PROVIDER_ID="google-gemini"
@@ -274,6 +292,7 @@ elif [ -n "$GEMINI_KEY" ]; then
   PROVIDER_API_KEY="$GEMINI_KEY"
   MODEL_ID="gemini-2.0-flash"
   MODEL_NAME="Gemini 2.0 Flash"
+  PROVIDER_HEADERS=""
   success "Using Google Gemini"
 elif [ -n "$GROQ_KEY" ]; then
   PROVIDER_ID="groq"
@@ -281,6 +300,7 @@ elif [ -n "$GROQ_KEY" ]; then
   PROVIDER_API_KEY="$GROQ_KEY"
   MODEL_ID="llama-3.3-70b-versatile"
   MODEL_NAME="Llama 3.3 70B (Groq)"
+  PROVIDER_HEADERS=""
   success "Using Groq (Llama 3.3)"
 else
   error "Nenhuma API key de LLM encontrada. Configure em .env e rode novamente."
@@ -316,6 +336,7 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
         "baseUrl": "${PROVIDER_BASE_URL}",
         "api": "openai-completions",
         "apiKey": "${PROVIDER_API_KEY}",
+        ${PROVIDER_HEADERS}
         "models": [
           {
             "id": "${MODEL_ID}",
@@ -337,11 +358,21 @@ success "OpenClaw configuration generated."
 
 # ── 9. Configure Telegram channel ────────────────────────────────
 if [ -n "$TELEGRAM_TOKEN" ]; then
+  TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
   mkdir -p "$CONFIG_DIR/channels"
+
+  if [ -n "$TELEGRAM_USER_ID" ]; then
+    ALLOW_FROM="\"allowFrom\": [\"${TELEGRAM_USER_ID}\"],"
+  else
+    ALLOW_FROM=""
+  fi
+
   cat > "$CONFIG_DIR/channels/telegram.json" <<EOF
 {
   "enabled": true,
-  "token": "${TELEGRAM_TOKEN}"
+  "token": "${TELEGRAM_TOKEN}",
+  ${ALLOW_FROM}
+  "dmPolicy": "allowlist"
 }
 EOF
   success "Telegram channel configured."
@@ -357,7 +388,6 @@ TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
 USER_MD="$INSTALL_DIR/USER.md"
 
 if [ -n "$TELEGRAM_USER_ID" ]; then
-  # Only update if not already authorized
   if ! grep -q "\"${TELEGRAM_USER_ID}\"" "$USER_MD" 2>/dev/null && \
      ! grep -q "'${TELEGRAM_USER_ID}'" "$USER_MD" 2>/dev/null && \
      ! grep -q "- ${TELEGRAM_USER_ID}" "$USER_MD" 2>/dev/null; then
@@ -367,6 +397,21 @@ if [ -n "$TELEGRAM_USER_ID" ]; then
     success "Telegram user ID já autorizado no USER.md."
   fi
 fi
+
+# ── 10c. Sync Bastion files into OpenClaw workspace ───────────────
+WORKSPACE_DIR="$INSTALL_DIR/config/workspace"
+mkdir -p "$WORKSPACE_DIR/skills"
+
+for f in SOUL.md USER.md AGENTS.md HEARTBEAT.md; do
+  [ -f "$INSTALL_DIR/$f" ] && cp "$INSTALL_DIR/$f" "$WORKSPACE_DIR/$f"
+done
+
+for skill_dir in "$INSTALL_DIR/skills/"/*/; do
+  skill_name=$(basename "$skill_dir")
+  [ -f "$skill_dir/SKILL.md" ] && cp "$skill_dir/SKILL.md" "$WORKSPACE_DIR/skills/${skill_name}.md"
+done
+
+success "Bastion context synced to OpenClaw workspace."
 
 # ── 11. Start / restart Bastion ──────────────────────────────────
 step "Starting Bastion..."

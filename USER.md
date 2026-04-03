@@ -1,5 +1,6 @@
 ---
 name: ""
+language: "pt-BR"
 authorized_user_ids: []
 personas: []
 totp_configured: false
