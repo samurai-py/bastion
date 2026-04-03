@@ -21,6 +21,11 @@ warn()    { echo -e "${YELLOW}[bastion]${RESET} $*"; }
 error()   { echo -e "${RED}[bastion] ERROR:${RESET} $*" >&2; }
 step()    { echo -e "\n${BOLD}▶ $*${RESET}"; }
 
+_env_get() {
+  local key="$1"
+  grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true
+}
+
 # ── 1. Check prerequisites ────────────────────────────────────────
 step "Checking prerequisites..."
 
@@ -29,7 +34,6 @@ install_docker() {
   echo ""
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS
     if command -v brew &>/dev/null; then
       read -rp "$(echo -e "${YELLOW}Instalar Docker Desktop via Homebrew? [s/N]:${RESET} ")" confirm
       if [[ "$confirm" =~ ^[sS]$ ]]; then
@@ -49,7 +53,6 @@ install_docker() {
     fi
 
   elif grep -qi microsoft /proc/version 2>/dev/null; then
-    # WSL2
     read -rp "$(echo -e "${YELLOW}Instalar Docker Engine no WSL2? [s/N]:${RESET} ")" confirm
     if [[ "$confirm" =~ ^[sS]$ ]]; then
       curl -fsSL https://get.docker.com | sh
@@ -62,7 +65,6 @@ install_docker() {
     fi
 
   else
-    # Linux genérico
     read -rp "$(echo -e "${YELLOW}Instalar Docker automaticamente? [s/N]:${RESET} ")" confirm
     if [[ "$confirm" =~ ^[sS]$ ]]; then
       curl -fsSL https://get.docker.com | sh
@@ -91,8 +93,6 @@ check_docker_compose() {
     success "Docker Compose found: $(command -v docker-compose)"
   else
     warn "Docker Compose plugin not found — installing..."
-    # Compose v2 is bundled with Docker Engine >= 20.10 via get.docker.com
-    # If still missing, install manually
     COMPOSE_VERSION="v2.27.0"
     COMPOSE_DIR="${HOME}/.docker/cli-plugins"
     mkdir -p "$COMPOSE_DIR"
@@ -138,43 +138,38 @@ fi
 # ── 4. Interactive LLM setup ─────────────────────────────────────
 step "Configurando LLM..."
 
-# Check if any LLM key is already set
 EXISTING_LLM=$(_env_get "ANTHROPIC_API_KEY")$(_env_get "OPENAI_API_KEY")$(_env_get "GEMINI_API_KEY")$(_env_get "GROQ_API_KEY")
 
 if [ -z "$EXISTING_LLM" ]; then
   echo ""
   echo "Qual LLM você quer usar?"
-  echo "  1) Groq       — gratuito, rápido (recomendado para começar)"
+  echo "  1) Groq          — gratuito, rápido (recomendado para começar)"
   echo "  2) Google Gemini — gratuito com limites generosos"
   echo "  3) Anthropic Claude — melhor qualidade, pago"
-  echo "  4) OpenAI GPT — popular, pago"
+  echo "  4) OpenAI GPT    — popular, pago"
   echo ""
   read -rp "$(echo -e "${CYAN}Escolha [1-4]:${RESET} ")" llm_choice
 
   case "$llm_choice" in
     1)
-      echo ""
       info "Crie sua chave gratuita em: https://console.groq.com"
       read -rp "$(echo -e "${CYAN}Cole sua GROQ_API_KEY:${RESET} ")" llm_key
       sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=${llm_key}|" .env
       success "Groq configurado."
       ;;
     2)
-      echo ""
       info "Crie sua chave em: https://aistudio.google.com/app/apikey"
       read -rp "$(echo -e "${CYAN}Cole sua GEMINI_API_KEY:${RESET} ")" llm_key
       sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${llm_key}|" .env
       success "Gemini configurado."
       ;;
     3)
-      echo ""
       info "Crie sua chave em: https://console.anthropic.com"
       read -rp "$(echo -e "${CYAN}Cole sua ANTHROPIC_API_KEY:${RESET} ")" llm_key
       sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${llm_key}|" .env
       success "Anthropic configurado."
       ;;
     4)
-      echo ""
       info "Crie sua chave em: https://platform.openai.com/api-keys"
       read -rp "$(echo -e "${CYAN}Cole sua OPENAI_API_KEY:${RESET} ")" llm_key
       sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${llm_key}|" .env
@@ -208,25 +203,16 @@ if [ -z "$EXISTING_TG" ]; then
 else
   success "Telegram já configurado no .env."
 fi
-_env_get() {
-  local key="$1"
-  grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true
-}
 
+# ── 6. Read .env values ───────────────────────────────────────────
 ANTHROPIC_KEY=$(_env_get "ANTHROPIC_API_KEY")
 OPENAI_KEY=$(_env_get "OPENAI_API_KEY")
 GEMINI_KEY=$(_env_get "GEMINI_API_KEY")
 GROQ_KEY=$(_env_get "GROQ_API_KEY")
 TELEGRAM_TOKEN=$(_env_get "TELEGRAM_BOT_TOKEN")
 
-# ── 5. Detect LLM provider ────────────────────────────────────────
+# ── 7. Detect LLM provider ────────────────────────────────────────
 step "Detecting LLM provider..."
-
-PROVIDER_ID=""
-PROVIDER_BASE_URL=""
-PROVIDER_API_KEY=""
-MODEL_ID=""
-MODEL_NAME=""
 
 if [ -n "$ANTHROPIC_KEY" ]; then
   PROVIDER_ID="anthropic"
@@ -257,12 +243,11 @@ elif [ -n "$GROQ_KEY" ]; then
   MODEL_NAME="Llama 3.3 70B (Groq)"
   success "Using Groq (Llama 3.3)"
 else
-  error "No LLM API key found in .env."
-  error "Add at least one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GROQ_API_KEY"
+  error "Nenhuma API key de LLM encontrada. Configure em .env e rode novamente."
   exit 1
 fi
 
-# ── 6. Generate openclaw.json ─────────────────────────────────────
+# ── 8. Generate openclaw.json ─────────────────────────────────────
 step "Generating OpenClaw configuration..."
 
 GATEWAY_TOKEN=$(openssl rand -hex 20 2>/dev/null || cat /proc/sys/kernel/random/uuid | tr -d '-')
@@ -276,12 +261,8 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
       "maxConcurrent": 4,
       "subagents": { "maxConcurrent": 8 },
       "compaction": { "mode": "safeguard" },
-      "model": {
-        "primary": "${PROVIDER_ID}/${MODEL_ID}"
-      },
-      "models": {
-        "${PROVIDER_ID}/${MODEL_ID}": { "alias": "${PROVIDER_ID}" }
-      }
+      "model": { "primary": "${PROVIDER_ID}/${MODEL_ID}" },
+      "models": { "${PROVIDER_ID}/${MODEL_ID}": { "alias": "${PROVIDER_ID}" } }
     }
   },
   "gateway": {
@@ -314,10 +295,8 @@ EOF
 
 success "OpenClaw configuration generated."
 
-# ── 7. Configure Telegram channel (if token present) ─────────────
+# ── 9. Configure Telegram channel ────────────────────────────────
 if [ -n "$TELEGRAM_TOKEN" ]; then
-  step "Configuring Telegram channel..."
-  # Telegram config is stored separately — will be picked up on first start
   mkdir -p "$CONFIG_DIR/channels"
   cat > "$CONFIG_DIR/channels/telegram.json" <<EOF
 {
@@ -328,14 +307,12 @@ EOF
   success "Telegram channel configured."
 fi
 
-# ── 8. Create required directories ───────────────────────────────
+# ── 10. Create required directories and fix permissions ───────────
 mkdir -p "$INSTALL_DIR/personas" "$INSTALL_DIR/tmp"
-
-# Fix tmp permissions for container user (uid 1000)
 docker run --rm -v "$INSTALL_DIR/tmp:/tmp" alpine chown -R 1000:1000 /tmp 2>/dev/null || true
 docker run --rm -v "$INSTALL_DIR/config:/data" alpine chown -R 1000:1000 /data 2>/dev/null || true
 
-# ── 9. Done ───────────────────────────────────────────────────────
+# ── 11. Done ──────────────────────────────────────────────────────
 step "Installation complete"
 
 echo ""
