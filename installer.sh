@@ -623,7 +623,110 @@ else
   echo "  cd $INSTALL_DIR && docker compose logs -f"
 fi
 
-# ── 10. Resumo Final ──────────────────────────────────────────────
+# ── 10. Verificação Final ────────────────────────────────────────
+step "Verificando instalação..."
+
+VALIDATION_FAILED=false
+
+# Verificar se o .env tem as variáveis necessárias
+if [ ! -f "$INSTALL_DIR/.env" ]; then
+  error "Arquivo .env não encontrado"
+  VALIDATION_FAILED=true
+fi
+
+# Verificar se tem pelo menos um LLM configurado
+LLM_FOUND=false
+for key in OPENROUTER_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GROQ_API_KEY; do
+  val=$(_env_get "$key")
+  if [ -n "$val" ]; then
+    LLM_FOUND=true
+    break
+  fi
+done
+
+if [ "$LLM_FOUND" = false ]; then
+  warn "Nenhum LLM configurado no .env"
+  VALIDATION_FAILED=true
+fi
+
+# Verificar se tem pelo menos um canal configurado
+CHANNEL_FOUND=false
+for key in TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN SLACK_BOT_TOKEN WHATSAPP_API_URL; do
+  val=$(_env_get "$key")
+  if [ -n "$val" ]; then
+    CHANNEL_FOUND=true
+    break
+  fi
+done
+
+if [ "$CHANNEL_FOUND" = false ]; then
+  warn "Nenhum canal configurado no .env"
+  VALIDATION_FAILED=true
+fi
+
+# Verificar se o openclaw.json foi criado
+if [ ! -f "$CONFIG_DIR/openclaw.json" ]; then
+  error "Arquivo openclaw.json não foi criado"
+  VALIDATION_FAILED=true
+else
+  # Verificar se tem a seção channels no openclaw.json
+  if ! grep -q '"channels"' "$CONFIG_DIR/openclaw.json"; then
+    warn "Seção 'channels' não encontrada no openclaw.json"
+    VALIDATION_FAILED=true
+  fi
+  
+  # Verificar se tem a seção models
+  if ! grep -q '"models"' "$CONFIG_DIR/openclaw.json"; then
+    error "Seção 'models' não encontrada no openclaw.json"
+    VALIDATION_FAILED=true
+  fi
+fi
+
+# Verificar se o workspace foi criado
+if [ ! -d "$INSTALL_DIR/config/workspace" ]; then
+  error "Workspace não foi criado"
+  VALIDATION_FAILED=true
+else
+  # Verificar arquivos essenciais
+  for f in SOUL.md USER.md AGENTS.md; do
+    if [ ! -f "$INSTALL_DIR/config/workspace/$f" ]; then
+      warn "Arquivo $f não encontrado no workspace"
+      VALIDATION_FAILED=true
+    fi
+  done
+  
+  # Verificar se tem skills
+  if [ ! -d "$INSTALL_DIR/config/workspace/skills" ]; then
+    warn "Pasta skills não encontrada no workspace"
+    VALIDATION_FAILED=true
+  fi
+fi
+
+# Verificar se o container está rodando
+if docker ps --filter "name=openclaw" --format "{{.Status}}" | grep -q "Up"; then
+  success "Container OpenClaw está rodando"
+  
+  # Verificar se o Telegram conectou (se configurado)
+  if [ -n "$(_env_get TELEGRAM_BOT_TOKEN)" ]; then
+    sleep 3
+    if docker compose -f "$INSTALL_DIR/docker-compose.yml" logs openclaw 2>&1 | grep -q "starting provider (@"; then
+      success "Telegram conectado com sucesso"
+    else
+      warn "Telegram pode não ter conectado. Verifique os logs."
+    fi
+  fi
+else
+  error "Container OpenClaw não está rodando"
+  VALIDATION_FAILED=true
+fi
+
+if [ "$VALIDATION_FAILED" = true ]; then
+  echo ""
+  warn "Algumas verificações falharam. Revise a configuração."
+  echo ""
+fi
+
+# ── 11. Resumo Final ──────────────────────────────────────────────
 step "Instalação concluída!"
 
 echo ""
