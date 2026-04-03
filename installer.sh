@@ -26,6 +26,16 @@ _env_get() {
   grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true
 }
 
+_env_set() {
+  local key="$1"
+  local val="$2"
+  if grep -qE "^${key}=" .env 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" .env
+  else
+    echo "${key}=${val}" >> .env
+  fi
+}
+
 _ask() {
   # Portable prompt — works on bash and sh
   local prompt="$1"
@@ -161,25 +171,25 @@ if [ -z "$EXISTING_LLM" ]; then
     1)
       info "Crie sua chave gratuita em: https://console.groq.com"
       _ask "$(echo -e "${CYAN}Cole sua GROQ_API_KEY: ${RESET}")" llm_key
-      sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=${llm_key}|" .env
+      _env_set "GROQ_API_KEY" "$llm_key"
       success "Groq configurado."
       ;;
     2)
       info "Crie sua chave em: https://aistudio.google.com/app/apikey"
       _ask "$(echo -e "${CYAN}Cole sua GEMINI_API_KEY: ${RESET}")" llm_key
-      sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${llm_key}|" .env
+      _env_set "GEMINI_API_KEY" "$llm_key"
       success "Gemini configurado."
       ;;
     3)
       info "Crie sua chave em: https://console.anthropic.com"
       _ask "$(echo -e "${CYAN}Cole sua ANTHROPIC_API_KEY: ${RESET}")" llm_key
-      sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${llm_key}|" .env
+      _env_set "ANTHROPIC_API_KEY" "$llm_key"
       success "Anthropic configurado."
       ;;
     4)
       info "Crie sua chave em: https://platform.openai.com/api-keys"
       _ask "$(echo -e "${CYAN}Cole sua OPENAI_API_KEY: ${RESET}")" llm_key
-      sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${llm_key}|" .env
+      _env_set "OPENAI_API_KEY" "$llm_key"
       success "OpenAI configurado."
       ;;
     *)
@@ -202,7 +212,7 @@ if [ -z "$EXISTING_TG" ]; then
   echo ""
   _ask "$(echo -e "${CYAN}Cole seu TELEGRAM_BOT_TOKEN (ou Enter para pular): ${RESET}")" tg_token
   if [ -n "$tg_token" ]; then
-    sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${tg_token}|" .env
+    _env_set "TELEGRAM_BOT_TOKEN" "$tg_token"
     success "Telegram configurado."
   else
     warn "Telegram não configurado. Configure em .env depois."
