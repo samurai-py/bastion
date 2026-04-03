@@ -512,7 +512,7 @@ step "Starting Bastion..."
 
 cd "$INSTALL_DIR"
 docker compose pull --quiet
-docker compose up -d
+docker compose up -d --force-recreate
 success "Bastion is running."
 
 # ── 12. Done ──────────────────────────────────────────────────────
