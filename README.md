@@ -30,7 +30,7 @@ Antes de instalar, você vai precisar de:
 ### Passo 1 — Rode o instalador
 
 ```bash
-curl -fsSL https://bastion.run/install | bash
+bash <(curl -fsSL https://bastion.run/install)
 ```
 
 O instalador verifica se o Docker está instalado, baixa os arquivos do Bastion e cria o arquivo `.env` para você preencher.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bastion v2 — Installer Script
-# Usage: curl -fsSL https://bastion.run/install | bash
+# Usage: bash <(curl -fsSL https://bastion.run/install)
 
 set -euo pipefail
 
@@ -26,6 +26,14 @@ _env_get() {
   grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true
 }
 
+_ask() {
+  # Portable prompt — works on bash and sh
+  local prompt="$1"
+  local varname="$2"
+  printf "%b" "$prompt"
+  read -r "$varname"
+}
+
 # ── 1. Check prerequisites ────────────────────────────────────────
 step "Checking prerequisites..."
 
@@ -35,7 +43,7 @@ install_docker() {
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
     if command -v brew &>/dev/null; then
-      read -rp "$(echo -e "${YELLOW}Instalar Docker Desktop via Homebrew? [s/N]:${RESET} ")" confirm </dev/tty
+      _ask "$(echo -e "${YELLOW}Instalar Docker Desktop via Homebrew? [s/N]: ${RESET}")" confirm
       if [[ "$confirm" =~ ^[sS]$ ]]; then
         brew install --cask docker
         info "Abrindo Docker Desktop..."
@@ -48,12 +56,11 @@ install_docker() {
       fi
     else
       error "Instale o Docker Desktop para Mac: https://docs.docker.com/desktop/mac/install/"
-      open "https://docs.docker.com/desktop/mac/install/" 2>/dev/null || true
       exit 1
     fi
 
   elif grep -qi microsoft /proc/version 2>/dev/null; then
-    read -rp "$(echo -e "${YELLOW}Instalar Docker Engine no WSL2? [s/N]:${RESET} ")" confirm </dev/tty
+    _ask "$(echo -e "${YELLOW}Instalar Docker Engine no WSL2? [s/N]: ${RESET}")" confirm
     if [[ "$confirm" =~ ^[sS]$ ]]; then
       curl -fsSL https://get.docker.com | sh
       sudo usermod -aG docker "$USER"
@@ -65,7 +72,7 @@ install_docker() {
     fi
 
   else
-    read -rp "$(echo -e "${YELLOW}Instalar Docker automaticamente? [s/N]:${RESET} ")" confirm </dev/tty
+    _ask "$(echo -e "${YELLOW}Instalar Docker automaticamente? [s/N]: ${RESET}")" confirm
     if [[ "$confirm" =~ ^[sS]$ ]]; then
       curl -fsSL https://get.docker.com | sh
       sudo usermod -aG docker "$USER"
@@ -92,7 +99,7 @@ check_docker_compose() {
   elif command -v docker-compose &>/dev/null; then
     success "Docker Compose found: $(command -v docker-compose)"
   else
-    warn "Docker Compose plugin not found — installing..."
+    warn "Docker Compose não encontrado — instalando..."
     COMPOSE_VERSION="v2.27.0"
     COMPOSE_DIR="${HOME}/.docker/cli-plugins"
     mkdir -p "$COMPOSE_DIR"
@@ -148,30 +155,30 @@ if [ -z "$EXISTING_LLM" ]; then
   echo "  3) Anthropic Claude — melhor qualidade, pago"
   echo "  4) OpenAI GPT    — popular, pago"
   echo ""
-  read -rp "$(echo -e "${CYAN}Escolha [1-4]:${RESET} ")" llm_choice </dev/tty
+  _ask "$(echo -e "${CYAN}Escolha [1-4]: ${RESET}")" llm_choice
 
   case "$llm_choice" in
     1)
       info "Crie sua chave gratuita em: https://console.groq.com"
-      read -rp "$(echo -e "${CYAN}Cole sua GROQ_API_KEY:${RESET} ")" llm_key </dev/tty
+      _ask "$(echo -e "${CYAN}Cole sua GROQ_API_KEY: ${RESET}")" llm_key
       sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=${llm_key}|" .env
       success "Groq configurado."
       ;;
     2)
       info "Crie sua chave em: https://aistudio.google.com/app/apikey"
-      read -rp "$(echo -e "${CYAN}Cole sua GEMINI_API_KEY:${RESET} ")" llm_key </dev/tty
+      _ask "$(echo -e "${CYAN}Cole sua GEMINI_API_KEY: ${RESET}")" llm_key
       sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${llm_key}|" .env
       success "Gemini configurado."
       ;;
     3)
       info "Crie sua chave em: https://console.anthropic.com"
-      read -rp "$(echo -e "${CYAN}Cole sua ANTHROPIC_API_KEY:${RESET} ")" llm_key </dev/tty
+      _ask "$(echo -e "${CYAN}Cole sua ANTHROPIC_API_KEY: ${RESET}")" llm_key
       sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${llm_key}|" .env
       success "Anthropic configurado."
       ;;
     4)
       info "Crie sua chave em: https://platform.openai.com/api-keys"
-      read -rp "$(echo -e "${CYAN}Cole sua OPENAI_API_KEY:${RESET} ")" llm_key </dev/tty
+      _ask "$(echo -e "${CYAN}Cole sua OPENAI_API_KEY: ${RESET}")" llm_key
       sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${llm_key}|" .env
       success "OpenAI configurado."
       ;;
@@ -193,7 +200,7 @@ if [ -z "$EXISTING_TG" ]; then
   echo "Você tem um bot no Telegram?"
   echo "  Se não tiver: abra o Telegram, fale com @BotFather e crie um bot."
   echo ""
-  read -rp "$(echo -e "${CYAN}Cole seu TELEGRAM_BOT_TOKEN (ou Enter para pular):${RESET} ")" tg_token </dev/tty
+  _ask "$(echo -e "${CYAN}Cole seu TELEGRAM_BOT_TOKEN (ou Enter para pular): ${RESET}")" tg_token
   if [ -n "$tg_token" ]; then
     sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${tg_token}|" .env
     success "Telegram configurado."
