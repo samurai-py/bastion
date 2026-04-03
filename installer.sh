@@ -481,16 +481,16 @@ mkdir -p "$CONFIG_DIR/channels"
 
 case "$PRIMARY_CHANNEL" in
   telegram)
-    TELEGRAM_TOKEN=$(_env_get "TELEGRAM_BOT_TOKEN")
+    TELEGRAM_BOT_TOKEN=$(_env_get "TELEGRAM_BOT_TOKEN")
     TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
-    if [ -n "$TELEGRAM_TOKEN" ]; then
+    if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
       # Fix: dmPolicy allowlist evita problemas de pairing
+      # O token é lido da variável de ambiente TELEGRAM_BOT_TOKEN automaticamente
       ALLOW_FROM=""
       [ -n "$TELEGRAM_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${TELEGRAM_USER_ID}\"],"
       cat > "$CONFIG_DIR/channels/telegram.json" <<EOF
 {
   "enabled": true,
-  "token": "${TELEGRAM_TOKEN}",
   ${ALLOW_FROM}
   "dmPolicy": "allowlist"
 }
@@ -516,15 +516,15 @@ EOF
     fi
     ;;
   discord)
-    DISCORD_TOKEN=$(_env_get "DISCORD_BOT_TOKEN")
+    DISCORD_BOT_TOKEN=$(_env_get "DISCORD_BOT_TOKEN")
     DISCORD_USER_ID=$(_env_get "DISCORD_USER_ID")
-    if [ -n "$DISCORD_TOKEN" ]; then
+    if [ -n "$DISCORD_BOT_TOKEN" ]; then
+      # O token é lido da variável de ambiente DISCORD_BOT_TOKEN automaticamente
       ALLOW_FROM=""
       [ -n "$DISCORD_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${DISCORD_USER_ID}\"],"
       cat > "$CONFIG_DIR/channels/discord.json" <<EOF
 {
   "enabled": true,
-  "token": "${DISCORD_TOKEN}",
   ${ALLOW_FROM}
   "dmPolicy": "allowlist"
 }
@@ -533,15 +533,15 @@ EOF
     fi
     ;;
   slack)
-    SLACK_TOKEN=$(_env_get "SLACK_BOT_TOKEN")
+    SLACK_BOT_TOKEN=$(_env_get "SLACK_BOT_TOKEN")
     SLACK_USER_ID=$(_env_get "SLACK_USER_ID")
-    if [ -n "$SLACK_TOKEN" ]; then
+    if [ -n "$SLACK_BOT_TOKEN" ]; then
+      # O token é lido da variável de ambiente SLACK_BOT_TOKEN automaticamente
       ALLOW_FROM=""
       [ -n "$SLACK_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${SLACK_USER_ID}\"],"
       cat > "$CONFIG_DIR/channels/slack.json" <<EOF
 {
   "enabled": true,
-  "token": "${SLACK_TOKEN}",
   ${ALLOW_FROM}
   "dmPolicy": "allowlist"
 }
