@@ -431,7 +431,75 @@ step "Gerando configuração OpenClaw..."
 CONFIG_DIR="$INSTALL_DIR/config"
 mkdir -p "$CONFIG_DIR"
 
-# Fix: Configuração robusta que evita problemas de autenticação
+# Ler configurações de canais do .env
+TELEGRAM_BOT_TOKEN=$(_env_get "TELEGRAM_BOT_TOKEN")
+TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
+DISCORD_BOT_TOKEN=$(_env_get "DISCORD_BOT_TOKEN")
+DISCORD_USER_ID=$(_env_get "DISCORD_USER_ID")
+SLACK_BOT_TOKEN=$(_env_get "SLACK_BOT_TOKEN")
+SLACK_USER_ID=$(_env_get "SLACK_USER_ID")
+WA_URL=$(_env_get "WHATSAPP_API_URL")
+WA_KEY=$(_env_get "WHATSAPP_API_KEY")
+WA_NUMBER=$(_env_get "WHATSAPP_NUMBER")
+
+# Construir seção de channels dinamicamente
+CHANNELS_CONFIG=""
+
+if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+  TELEGRAM_ALLOW=""
+  [ -n "$TELEGRAM_USER_ID" ] && TELEGRAM_ALLOW="\"allowFrom\": [\"${TELEGRAM_USER_ID}\"],"
+  CHANNELS_CONFIG="${CHANNELS_CONFIG}
+    \"telegram\": {
+      \"enabled\": true,
+      ${TELEGRAM_ALLOW}
+      \"dmPolicy\": \"allowlist\"
+    },"
+fi
+
+if [ -n "$DISCORD_BOT_TOKEN" ]; then
+  DISCORD_ALLOW=""
+  [ -n "$DISCORD_USER_ID" ] && DISCORD_ALLOW="\"allowFrom\": [\"${DISCORD_USER_ID}\"],"
+  CHANNELS_CONFIG="${CHANNELS_CONFIG}
+    \"discord\": {
+      \"enabled\": true,
+      ${DISCORD_ALLOW}
+      \"dmPolicy\": \"allowlist\"
+    },"
+fi
+
+if [ -n "$SLACK_BOT_TOKEN" ]; then
+  SLACK_ALLOW=""
+  [ -n "$SLACK_USER_ID" ] && SLACK_ALLOW="\"allowFrom\": [\"${SLACK_USER_ID}\"],"
+  CHANNELS_CONFIG="${CHANNELS_CONFIG}
+    \"slack\": {
+      \"enabled\": true,
+      ${SLACK_ALLOW}
+      \"dmPolicy\": \"allowlist\"
+    },"
+fi
+
+if [ -n "$WA_URL" ] && [ -n "$WA_KEY" ]; then
+  CHANNELS_CONFIG="${CHANNELS_CONFIG}
+    \"whatsapp\": {
+      \"enabled\": true,
+      \"apiUrl\": \"${WA_URL}\",
+      \"apiKey\": \"${WA_KEY}\",
+      \"allowFrom\": [\"${WA_NUMBER}\"],
+      \"dmPolicy\": \"allowlist\"
+    },"
+fi
+
+# Remover última vírgula se houver canais
+if [ -n "$CHANNELS_CONFIG" ]; then
+  CHANNELS_CONFIG=$(echo "$CHANNELS_CONFIG" | sed 's/,$//')
+  CHANNELS_SECTION=",
+  \"channels\": {${CHANNELS_CONFIG}
+  }"
+else
+  CHANNELS_SECTION=""
+fi
+
+# Gerar openclaw.json com channels integrados
 cat > "$CONFIG_DIR/openclaw.json" <<EOF
 {
   "agents": {
@@ -445,7 +513,7 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
   },
   "gateway": {
     "mode": "local",
-    "auth": { "mode": "none" }
+    "auth": { "mode": "none" }${CHANNELS_SECTION}
   },
   "models": {
     "mode": "merge",
@@ -474,84 +542,7 @@ EOF
 
 success "OpenClaw configurado com ${MODEL_NAME}"
 
-# ── 8. Configurar Canais com dmPolicy Allowlist ──────────────────
-step "Configurando canais de mensagens..."
-
-mkdir -p "$CONFIG_DIR/channels"
-
-case "$PRIMARY_CHANNEL" in
-  telegram)
-    TELEGRAM_BOT_TOKEN=$(_env_get "TELEGRAM_BOT_TOKEN")
-    TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
-    if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
-      # Fix: dmPolicy allowlist evita problemas de pairing
-      # O token é lido da variável de ambiente TELEGRAM_BOT_TOKEN automaticamente
-      ALLOW_FROM=""
-      [ -n "$TELEGRAM_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${TELEGRAM_USER_ID}\"],"
-      cat > "$CONFIG_DIR/channels/telegram.json" <<EOF
-{
-  "enabled": true,
-  ${ALLOW_FROM}
-  "dmPolicy": "allowlist"
-}
-EOF
-      success "Telegram configurado com allowlist."
-    fi
-    ;;
-  whatsapp)
-    WA_URL=$(_env_get "WHATSAPP_API_URL")
-    WA_KEY=$(_env_get "WHATSAPP_API_KEY")
-    WA_NUMBER=$(_env_get "WHATSAPP_NUMBER")
-    if [ -n "$WA_URL" ] && [ -n "$WA_KEY" ]; then
-      cat > "$CONFIG_DIR/channels/whatsapp.json" <<EOF
-{
-  "enabled": true,
-  "apiUrl": "${WA_URL}",
-  "apiKey": "${WA_KEY}",
-  "allowFrom": ["${WA_NUMBER}"],
-  "dmPolicy": "allowlist"
-}
-EOF
-      success "WhatsApp configurado."
-    fi
-    ;;
-  discord)
-    DISCORD_BOT_TOKEN=$(_env_get "DISCORD_BOT_TOKEN")
-    DISCORD_USER_ID=$(_env_get "DISCORD_USER_ID")
-    if [ -n "$DISCORD_BOT_TOKEN" ]; then
-      # O token é lido da variável de ambiente DISCORD_BOT_TOKEN automaticamente
-      ALLOW_FROM=""
-      [ -n "$DISCORD_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${DISCORD_USER_ID}\"],"
-      cat > "$CONFIG_DIR/channels/discord.json" <<EOF
-{
-  "enabled": true,
-  ${ALLOW_FROM}
-  "dmPolicy": "allowlist"
-}
-EOF
-      success "Discord configurado."
-    fi
-    ;;
-  slack)
-    SLACK_BOT_TOKEN=$(_env_get "SLACK_BOT_TOKEN")
-    SLACK_USER_ID=$(_env_get "SLACK_USER_ID")
-    if [ -n "$SLACK_BOT_TOKEN" ]; then
-      # O token é lido da variável de ambiente SLACK_BOT_TOKEN automaticamente
-      ALLOW_FROM=""
-      [ -n "$SLACK_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${SLACK_USER_ID}\"],"
-      cat > "$CONFIG_DIR/channels/slack.json" <<EOF
-{
-  "enabled": true,
-  ${ALLOW_FROM}
-  "dmPolicy": "allowlist"
-}
-EOF
-      success "Slack configurado."
-    fi
-    ;;
-esac
-
-# ── 9. Preparar Workspace e Sincronizar Contexto do Bastion ──────
+# ── 8. Preparar Workspace e Sincronizar Contexto do Bastion ──────
 step "Preparando workspace do Bastion..."
 
 # Criar diretórios necessários
@@ -591,26 +582,26 @@ fi
 
 # Sincronizar arquivos do Bastion para o workspace do OpenClaw
 WORKSPACE_DIR="$INSTALL_DIR/config/workspace"
-mkdir -p "$WORKSPACE_DIR/app/skills"
+mkdir -p "$WORKSPACE_DIR/skills"
 
 for f in SOUL.md USER.md AGENTS.md HEARTBEAT.md; do
   [ -f "$INSTALL_DIR/$f" ] && cp "$INSTALL_DIR/$f" "$WORKSPACE_DIR/$f"
 done
 
-# Copiar skills mantendo a estrutura de diretórios
+# Copiar skills mantendo a estrutura que o OpenClaw espera
 for skill_dir in "$INSTALL_DIR/skills/"/*/; do
   skill_name=$(basename "$skill_dir")
-  mkdir -p "$WORKSPACE_DIR/app/skills/${skill_name}"
-  [ -f "$skill_dir/SKILL.md" ] && cp "$skill_dir/SKILL.md" "$WORKSPACE_DIR/app/skills/${skill_name}/SKILL.md"
+  mkdir -p "$WORKSPACE_DIR/skills/${skill_name}"
+  [ -f "$skill_dir/SKILL.md" ] && cp "$skill_dir/SKILL.md" "$WORKSPACE_DIR/skills/${skill_name}/SKILL.md"
   # Copiar outros arquivos Python se existirem
   for py_file in "$skill_dir"/*.py; do
-    [ -f "$py_file" ] && cp "$py_file" "$WORKSPACE_DIR/app/skills/${skill_name}/"
+    [ -f "$py_file" ] && cp "$py_file" "$WORKSPACE_DIR/skills/${skill_name}/"
   done
 done
 
 success "Contexto do Bastion sincronizado com OpenClaw."
 
-# ── 10. Iniciar Bastion com Healthcheck ──────────────────────────
+# ── 9. Iniciar Bastion com Healthcheck ──────────────────────────
 step "Iniciando Bastion..."
 
 cd "$INSTALL_DIR"
@@ -632,7 +623,7 @@ else
   echo "  cd $INSTALL_DIR && docker compose logs -f"
 fi
 
-# ── 11. Resumo Final ──────────────────────────────────────────────
+# ── 10. Resumo Final ──────────────────────────────────────────────
 step "Instalação concluída!"
 
 echo ""
