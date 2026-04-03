@@ -329,7 +329,16 @@ mkdir -p "$INSTALL_DIR/personas" "$INSTALL_DIR/tmp"
 chmod 1777 "$INSTALL_DIR/tmp"
 docker run --rm -v "$INSTALL_DIR/config:/data" alpine chown -R 1000:1000 /data 2>/dev/null || true
 
-# ── 11. Done ──────────────────────────────────────────────────────
+# ── 11. Start / restart Bastion ──────────────────────────────────
+step "Starting Bastion..."
+
+cd "$INSTALL_DIR"
+docker compose pull --quiet
+docker compose down --remove-orphans 2>/dev/null || true
+docker compose up -d
+success "Bastion is running."
+
+# ── 12. Done ──────────────────────────────────────────────────────
 step "Installation complete"
 
 echo ""
@@ -337,9 +346,6 @@ echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━�
 echo -e "  Model:    ${BOLD}${MODEL_NAME}${RESET}"
 [ -n "$TELEGRAM_TOKEN" ] && echo -e "  Channel:  ${BOLD}Telegram ✓${RESET}"
 echo ""
-echo -e "  Start Bastion:"
-echo -e "  ${CYAN}cd ${INSTALL_DIR} && docker compose up -d${RESET}"
-echo ""
-[ -n "$TELEGRAM_TOKEN" ] && echo -e "  Then open your Telegram bot and send ${BOLD}/start${RESET}"
+[ -n "$TELEGRAM_TOKEN" ] && echo -e "  Open your Telegram bot and send ${BOLD}/start${RESET}"
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo ""
