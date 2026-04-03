@@ -355,7 +355,8 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
     }
   },
   "gateway": {
-    "mode": "local"
+    "mode": "local",
+    "auth": { "mode": "none" }
   },
   "models": {
     "mode": "merge",
