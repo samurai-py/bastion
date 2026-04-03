@@ -212,44 +212,74 @@ else
   success "LLM já configurado no .env."
 fi
 
-# ── 5. Interactive Telegram setup ────────────────────────────────
-step "Configurando canal de mensagens..."
+# ── 5. Interactive channel setup ─────────────────────────────────
+step "Configurando canais de mensagens..."
 
-EXISTING_TG=$(_env_get "TELEGRAM_BOT_TOKEN")
+echo ""
+echo "Qual canal você quer configurar primeiro?"
+echo "  1) Telegram"
+echo "  2) WhatsApp (via Evolution API)"
+echo "  3) Discord"
+echo "  4) Slack"
+echo "  5) Pular (configurar depois)"
+echo ""
+_ask "$(echo -e "${CYAN}Escolha [1-5]: ${RESET}")" channel_choice
 
-if [ -z "$EXISTING_TG" ]; then
-  echo ""
-  echo "Você tem um bot no Telegram?"
-  echo "  Se não tiver: abra o Telegram, fale com @BotFather e crie um bot."
-  echo ""
-  _ask "$(echo -e "${CYAN}Cole seu TELEGRAM_BOT_TOKEN (ou Enter para pular): ${RESET}")" tg_token
-  if [ -n "$tg_token" ]; then
-    _env_set "TELEGRAM_BOT_TOKEN" "$tg_token"
-    success "Telegram configurado."
-  else
-    warn "Telegram não configurado. Configure em .env depois."
-  fi
-else
-  success "Telegram já configurado no .env."
-fi
-
-EXISTING_TG_USER=$(_env_get "TELEGRAM_USER_ID")
-
-if [ -z "$EXISTING_TG_USER" ] && [ -n "$(_env_get "TELEGRAM_BOT_TOKEN")" ]; then
-  echo ""
-  info "Para autorizar seu acesso, preciso do seu Telegram user ID."
-  info "Você pode obter o seu ID enviando uma mensagem para @userinfobot no Telegram."
-  echo ""
-  _ask "$(echo -e "${CYAN}Cole seu Telegram user ID (ou Enter para pular): ${RESET}")" tg_user_id
-  if [ -n "$tg_user_id" ]; then
-    _env_set "TELEGRAM_USER_ID" "$tg_user_id"
-    success "Telegram user ID configurado."
-  else
-    warn "Telegram user ID não configurado. Você precisará aprovar manualmente no primeiro acesso."
-  fi
-else
-  [ -n "$EXISTING_TG_USER" ] && success "Telegram user ID já configurado no .env."
-fi
+case "$channel_choice" in
+  1)
+    info "Crie um bot no Telegram: abra @BotFather e use /newbot"
+    _ask "$(echo -e "${CYAN}Cole seu TELEGRAM_BOT_TOKEN: ${RESET}")" tg_token
+    if [ -n "$tg_token" ]; then
+      _env_set "TELEGRAM_BOT_TOKEN" "$tg_token"
+      info "Obtenha seu Telegram user ID: envie uma mensagem para @userinfobot"
+      _ask "$(echo -e "${CYAN}Cole seu Telegram user ID: ${RESET}")" tg_user_id
+      _env_set "TELEGRAM_USER_ID" "$tg_user_id"
+      _env_set "PRIMARY_CHANNEL" "telegram"
+      success "Telegram configurado."
+    fi
+    ;;
+  2)
+    info "Configure Evolution API: https://doc.evolution-api.com/v2/pt/get-started/introduction"
+    _ask "$(echo -e "${CYAN}Cole a URL da sua Evolution API: ${RESET}")" wa_url
+    _ask "$(echo -e "${CYAN}Cole sua Evolution API Key: ${RESET}")" wa_key
+    _ask "$(echo -e "${CYAN}Cole seu número WhatsApp (com DDI, ex: 5521999999999): ${RESET}")" wa_number
+    if [ -n "$wa_url" ] && [ -n "$wa_key" ] && [ -n "$wa_number" ]; then
+      _env_set "WHATSAPP_API_URL" "$wa_url"
+      _env_set "WHATSAPP_API_KEY" "$wa_key"
+      _env_set "WHATSAPP_NUMBER" "$wa_number"
+      _env_set "PRIMARY_CHANNEL" "whatsapp"
+      success "WhatsApp configurado."
+    fi
+    ;;
+  3)
+    info "Crie um bot no Discord: https://discord.com/developers/applications"
+    _ask "$(echo -e "${CYAN}Cole seu DISCORD_BOT_TOKEN: ${RESET}")" dc_token
+    _ask "$(echo -e "${CYAN}Cole seu Discord user ID: ${RESET}")" dc_user_id
+    if [ -n "$dc_token" ] && [ -n "$dc_user_id" ]; then
+      _env_set "DISCORD_BOT_TOKEN" "$dc_token"
+      _env_set "DISCORD_USER_ID" "$dc_user_id"
+      _env_set "PRIMARY_CHANNEL" "discord"
+      success "Discord configurado."
+    fi
+    ;;
+  4)
+    info "Configure Slack App: https://api.slack.com/apps"
+    _ask "$(echo -e "${CYAN}Cole seu SLACK_BOT_TOKEN: ${RESET}")" slack_token
+    _ask "$(echo -e "${CYAN}Cole seu Slack user ID: ${RESET}")" slack_user_id
+    if [ -n "$slack_token" ] && [ -n "$slack_user_id" ]; then
+      _env_set "SLACK_BOT_TOKEN" "$slack_token"
+      _env_set "SLACK_USER_ID" "$slack_user_id"
+      _env_set "PRIMARY_CHANNEL" "slack"
+      success "Slack configurado."
+    fi
+    ;;
+  5)
+    warn "Nenhum canal configurado. Configure em .env depois."
+    ;;
+  *)
+    warn "Opção inválida. Configure manualmente em .env depois."
+    ;;
+esac
 
 # ── 6. Read .env values ───────────────────────────────────────────
 ANTHROPIC_KEY=$(_env_get "ANTHROPIC_API_KEY")
@@ -257,7 +287,7 @@ OPENAI_KEY=$(_env_get "OPENAI_API_KEY")
 GEMINI_KEY=$(_env_get "GEMINI_API_KEY")
 GROQ_KEY=$(_env_get "GROQ_API_KEY")
 OPENROUTER_KEY=$(_env_get "OPENROUTER_API_KEY")
-TELEGRAM_TOKEN=$(_env_get "TELEGRAM_BOT_TOKEN")
+PRIMARY_CHANNEL=$(_env_get "PRIMARY_CHANNEL")
 
 # ── 7. Detect LLM provider ────────────────────────────────────────
 step "Detecting LLM provider..."
@@ -356,18 +386,17 @@ EOF
 
 success "OpenClaw configuration generated."
 
-# ── 9. Configure Telegram channel ────────────────────────────────
-if [ -n "$TELEGRAM_TOKEN" ]; then
-  TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
-  mkdir -p "$CONFIG_DIR/channels"
+# ── 9. Configure messaging channels ──────────────────────────────
+mkdir -p "$CONFIG_DIR/channels"
 
-  if [ -n "$TELEGRAM_USER_ID" ]; then
-    ALLOW_FROM="\"allowFrom\": [\"${TELEGRAM_USER_ID}\"],"
-  else
-    ALLOW_FROM=""
-  fi
-
-  cat > "$CONFIG_DIR/channels/telegram.json" <<EOF
+case "$PRIMARY_CHANNEL" in
+  telegram)
+    TELEGRAM_TOKEN=$(_env_get "TELEGRAM_BOT_TOKEN")
+    TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
+    if [ -n "$TELEGRAM_TOKEN" ]; then
+      ALLOW_FROM=""
+      [ -n "$TELEGRAM_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${TELEGRAM_USER_ID}\"],"
+      cat > "$CONFIG_DIR/channels/telegram.json" <<EOF
 {
   "enabled": true,
   "token": "${TELEGRAM_TOKEN}",
@@ -375,27 +404,92 @@ if [ -n "$TELEGRAM_TOKEN" ]; then
   "dmPolicy": "allowlist"
 }
 EOF
-  success "Telegram channel configured."
-fi
+      success "Telegram channel configured."
+    fi
+    ;;
+  whatsapp)
+    WA_URL=$(_env_get "WHATSAPP_API_URL")
+    WA_KEY=$(_env_get "WHATSAPP_API_KEY")
+    WA_NUMBER=$(_env_get "WHATSAPP_NUMBER")
+    if [ -n "$WA_URL" ] && [ -n "$WA_KEY" ]; then
+      cat > "$CONFIG_DIR/channels/whatsapp.json" <<EOF
+{
+  "enabled": true,
+  "apiUrl": "${WA_URL}",
+  "apiKey": "${WA_KEY}",
+  "allowFrom": ["${WA_NUMBER}"],
+  "dmPolicy": "allowlist"
+}
+EOF
+      success "WhatsApp channel configured."
+    fi
+    ;;
+  discord)
+    DISCORD_TOKEN=$(_env_get "DISCORD_BOT_TOKEN")
+    DISCORD_USER_ID=$(_env_get "DISCORD_USER_ID")
+    if [ -n "$DISCORD_TOKEN" ]; then
+      ALLOW_FROM=""
+      [ -n "$DISCORD_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${DISCORD_USER_ID}\"],"
+      cat > "$CONFIG_DIR/channels/discord.json" <<EOF
+{
+  "enabled": true,
+  "token": "${DISCORD_TOKEN}",
+  ${ALLOW_FROM}
+  "dmPolicy": "allowlist"
+}
+EOF
+      success "Discord channel configured."
+    fi
+    ;;
+  slack)
+    SLACK_TOKEN=$(_env_get "SLACK_BOT_TOKEN")
+    SLACK_USER_ID=$(_env_get "SLACK_USER_ID")
+    if [ -n "$SLACK_TOKEN" ]; then
+      ALLOW_FROM=""
+      [ -n "$SLACK_USER_ID" ] && ALLOW_FROM="\"allowFrom\": [\"${SLACK_USER_ID}\"],"
+      cat > "$CONFIG_DIR/channels/slack.json" <<EOF
+{
+  "enabled": true,
+  "token": "${SLACK_TOKEN}",
+  ${ALLOW_FROM}
+  "dmPolicy": "allowlist"
+}
+EOF
+      success "Slack channel configured."
+    fi
+    ;;
+esac
 
 # ── 10. Create required directories and fix permissions ───────────
 mkdir -p "$INSTALL_DIR/personas" "$INSTALL_DIR/tmp"
 chmod 1777 "$INSTALL_DIR/tmp"
 docker run --rm -v "$INSTALL_DIR/config:/data" alpine chown -R 1000:1000 /data 2>/dev/null || true
 
-# ── 10b. Pre-authorize Telegram user in USER.md ───────────────────
-TELEGRAM_USER_ID=$(_env_get "TELEGRAM_USER_ID")
-USER_MD="$INSTALL_DIR/USER.md"
+# ── 10b. Pre-authorize primary channel user in USER.md ───────────
+PRIMARY_CHANNEL=$(_env_get "PRIMARY_CHANNEL")
+USER_ID=""
 
-if [ -n "$TELEGRAM_USER_ID" ]; then
-  if ! grep -q "\"${TELEGRAM_USER_ID}\"" "$USER_MD" 2>/dev/null && \
-     ! grep -q "'${TELEGRAM_USER_ID}'" "$USER_MD" 2>/dev/null && \
-     ! grep -q "- ${TELEGRAM_USER_ID}" "$USER_MD" 2>/dev/null; then
-    sed -i "s/authorized_user_ids: \[\]/authorized_user_ids:\n  - \"${TELEGRAM_USER_ID}\"/" "$USER_MD"
-    success "Telegram user ID pré-autorizado no USER.md."
-  else
-    success "Telegram user ID já autorizado no USER.md."
-  fi
+case "$PRIMARY_CHANNEL" in
+  telegram) USER_ID=$(_env_get "TELEGRAM_USER_ID") ;;
+  whatsapp) USER_ID=$(_env_get "WHATSAPP_NUMBER") ;;
+  discord) USER_ID=$(_env_get "DISCORD_USER_ID") ;;
+  slack) USER_ID=$(_env_get "SLACK_USER_ID") ;;
+esac
+
+if [ -n "$USER_ID" ]; then
+  cat > "$INSTALL_DIR/USER.md" <<EOF
+---
+name: ""
+language: "pt-BR"
+authorized_user_ids:
+  - "${USER_ID}"
+personas: []
+totp_configured: false
+---
+
+<!-- Este arquivo é gerado automaticamente pelo skill bastion/onboarding. -->
+EOF
+  success "User ID pré-autorizado no USER.md."
 fi
 
 # ── 10c. Sync Bastion files into OpenClaw workspace ───────────────
@@ -427,8 +521,13 @@ step "Installation complete"
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo -e "  Model:    ${BOLD}${MODEL_NAME}${RESET}"
-[ -n "$TELEGRAM_TOKEN" ] && echo -e "  Channel:  ${BOLD}Telegram ✓${RESET}"
+[ -n "$PRIMARY_CHANNEL" ] && echo -e "  Channel:  ${BOLD}${PRIMARY_CHANNEL} ✓${RESET}"
 echo ""
-[ -n "$TELEGRAM_TOKEN" ] && echo -e "  Open your Telegram bot and send ${BOLD}/start${RESET}"
+case "$PRIMARY_CHANNEL" in
+  telegram) echo -e "  Open your Telegram bot and send ${BOLD}/start${RESET}" ;;
+  whatsapp) echo -e "  Send a message to your WhatsApp number to start" ;;
+  discord) echo -e "  Send a DM to your Discord bot to start" ;;
+  slack) echo -e "  Send a DM to your Slack bot to start" ;;
+esac
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo ""

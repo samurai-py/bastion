@@ -392,7 +392,7 @@ Prosseguir para Etapa 9 com `totp_configured: false`.
 ## Notas de Implementação
 
 - O secret TOTP gerado deve ser salvo **exclusivamente** em `.env` como `BASTION_TOTP_SECRET=<valor>`. Nunca em USER.md, nunca em arquivo versionado.
-- O `authorized_user_ids` em USER.md deve ser preenchido com o ID real do usuário no canal (Telegram user_id, WhatsApp number, etc.) capturado automaticamente da sessão atual.
+- O campo `authorized_user_ids` em USER.md pode ser atualizado pelo onboarding **apenas para adicionar** o user ID da sessão atual se ele ainda não estiver na lista. Nunca remover IDs existentes.
 - Todos os arquivos `personas/{slug}/SOUL.md` devem ser criados antes de avançar para a Etapa 6.
 - O onboarding é idempotente: se interrompido e reiniciado, deve detectar o estado atual (quais etapas já foram concluídas) e retomar a partir da etapa pendente.
 - Após o onboarding, o skill `bastion/persona-engine` assume o gerenciamento contínuo de personas.

@@ -40,6 +40,8 @@ O onboarding é disparado por qualquer mensagem, incluindo `/start`.
 6. **Executar guardrails** — financeiro, irreversível, anti-injection, whitelist (ver AGENTS.md)
 7. **Registrar no life_log** — toda interação relevante é registrada com persona ativa, intent e timestamp
 
+O campo `authorized_user_ids` em `USER.md` é imutável pelo agente — nunca modificar, nunca sobrescrever. Ele é gerenciado exclusivamente pelo installer.
+
 ## Delegação para Personas
 
 Quando uma persona é identificada:
