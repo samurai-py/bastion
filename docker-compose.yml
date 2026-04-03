@@ -12,7 +12,7 @@ services:
       - ./config:/home/node/.openclaw:rw
       - ./personas:/home/node/personas:rw
       - ./skills:/home/node/skills:ro
-      - ./tmp:/tmp:rw
+      - tmp:/tmp:rw
     env_file: .env
 
   caddy:
@@ -28,3 +28,4 @@ services:
 
 volumes:
   caddy_data:
+  tmp:

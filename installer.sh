@@ -326,7 +326,7 @@ fi
 
 # ── 10. Create required directories and fix permissions ───────────
 mkdir -p "$INSTALL_DIR/personas" "$INSTALL_DIR/tmp"
-docker run --rm -v "$INSTALL_DIR/tmp:/tmp" alpine chown -R 1000:1000 /tmp 2>/dev/null || true
+chmod 1777 "$INSTALL_DIR/tmp"
 docker run --rm -v "$INSTALL_DIR/config:/data" alpine chown -R 1000:1000 /data 2>/dev/null || true
 
 # ── 11. Done ──────────────────────────────────────────────────────
