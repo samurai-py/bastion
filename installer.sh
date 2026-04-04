@@ -582,21 +582,10 @@ fi
 
 # Sincronizar arquivos do Bastion para o workspace do OpenClaw
 WORKSPACE_DIR="$INSTALL_DIR/config/workspace"
-mkdir -p "$WORKSPACE_DIR/skills"
+mkdir -p "$WORKSPACE_DIR"
 
 for f in SOUL.md USER.md AGENTS.md HEARTBEAT.md; do
   [ -f "$INSTALL_DIR/$f" ] && cp "$INSTALL_DIR/$f" "$WORKSPACE_DIR/$f"
-done
-
-# Copiar skills mantendo a estrutura que o OpenClaw espera
-for skill_dir in "$INSTALL_DIR/skills/"/*/; do
-  skill_name=$(basename "$skill_dir")
-  mkdir -p "$WORKSPACE_DIR/skills/${skill_name}"
-  [ -f "$skill_dir/SKILL.md" ] && cp "$skill_dir/SKILL.md" "$WORKSPACE_DIR/skills/${skill_name}/SKILL.md"
-  # Copiar outros arquivos Python se existirem
-  for py_file in "$skill_dir"/*.py; do
-    [ -f "$py_file" ] && cp "$py_file" "$WORKSPACE_DIR/skills/${skill_name}/"
-  done
 done
 
 success "Contexto do Bastion sincronizado com OpenClaw."

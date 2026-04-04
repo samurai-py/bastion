@@ -11,7 +11,7 @@ services:
     volumes:
       - ./config:/home/node/.openclaw:rw
       - ./personas:/home/node/personas:rw
-      - ./skills:/home/node/skills:ro
+      - ./skills:/home/node/.openclaw/skills:rw
       - tmp:/tmp:rw
     env_file: .env
 

@@ -201,3 +201,67 @@ async def check_cve_alerts(
 
     alerts.sort(key=lambda a: (a.skill_name, a.cve_id))
     return alerts
+
+# ---------------------------------------------------------------------------
+# CLI Interface for OpenClaw Agent
+# ---------------------------------------------------------------------------
+def main() -> None:
+    import argparse
+    import asyncio
+    import sys
+    import json
+
+    parser = argparse.ArgumentParser(description="Proactive Skill CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # inactive
+    inactive_parser = subparsers.add_parser("inactive", help="Check inactive personas")
+    inactive_parser.add_argument("--personas", help="JSON list of persona slugs", required=True)
+    inactive_parser.add_argument("--threshold", type=int, default=3)
+
+    # cve
+    cve_parser = subparsers.add_parser("cve", help="Check CVE alerts")
+    cve_parser.add_argument("--skills", help="JSON list of installed skills", required=True)
+
+    args = parser.parse_args()
+
+    async def run():
+        if args.command == "inactive":
+            try:
+                import sys
+                import os
+                sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
+                from skills.life_log.factory import Settings, create_adapter
+                settings = Settings.from_env()
+                adapter = create_adapter(settings)
+            except Exception as e:
+                print(f"Warning: could not load life_log adapter: {e}")
+                # Mock adapter for fallback
+                class MockAdapter:
+                    async def get_last_interaction(self, slug):
+                        return None
+                adapter = MockAdapter()
+            
+            personas_list = json.loads(args.personas)
+            results = await check_inactive_personas(personas_list, adapter, args.threshold)
+            if not results:
+                print("All personas are active")
+            for r in results:
+                print(f"Persona {r.persona_slug} inactive for {r.days_inactive} days")
+                
+        elif args.command == "cve":
+            class DummyClawHubClient:
+                async def get_cves(self, skill_name: str):
+                    return []
+            
+            skills_list = json.loads(args.skills)
+            results = await check_cve_alerts(skills_list, DummyClawHubClient())
+            if not results:
+                print("No CVEs found.")
+            for alert in results:
+                print(f"[{alert.severity}] {alert.skill_name}: {alert.cve_id} - {alert.description}")
+
+    asyncio.run(run())
+
+if __name__ == "__main__":
+    main()

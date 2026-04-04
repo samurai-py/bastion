@@ -131,7 +131,12 @@ que satisfaça o `PromotionPersistenceProtocol` — sem alterar `promote_pattern
 
 ---
 
-## Interface Python
+## Comandos CLI
+
+> IMPORTANTE: Comando CLI
+> Como você é um agente OpenClaw, você deve invocar todas as operações via linha de comando (`exec python3 ...`). Não tente interpretar o código Python nativamente.
+
+
 
 ```python
 from pathlib import Path

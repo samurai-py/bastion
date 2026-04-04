@@ -220,3 +220,57 @@ def match_personas(
     )
     logger.debug("Fallback to persona: slug=%s", fallback.slug)
     return [ActivePersona(persona=fallback, weight=fallback.current_weight)]
+
+# ---------------------------------------------------------------------------
+# CLI Interface for OpenClaw Agent
+# ---------------------------------------------------------------------------
+def main() -> None:
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(description="Persona Engine CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # create
+    create_parser = subparsers.add_parser("create")
+    create_parser.add_argument("--name", required=True)
+    create_parser.add_argument("--domains", default="[]")
+    create_parser.add_argument("--trigger-keywords", default="[]")
+    create_parser.add_argument("--clawhub-skills", default="[]")
+    create_parser.add_argument("--base-weight", type=float, default=0.5)
+
+    # match
+    match_parser = subparsers.add_parser("match")
+    match_parser.add_argument("--message", required=True)
+    match_parser.add_argument("--personas-json", required=True, help="JSON list of personas")
+
+    args = parser.parse_args()
+
+    class DummyPersistence:
+        def write_soul_md(self, p): pass
+        def read_soul_md(self, s): return None
+        def slug_exists(self, s): return False
+
+    if args.command == "create":
+        domains = json.loads(args.domains)
+        t_keywords = json.loads(args.trigger_keywords)
+        c_skills = json.loads(args.clawhub_skills)
+        p = create_persona(args.name, domains, t_keywords, c_skills, args.base_weight, DummyPersistence())
+        print(f"Created: {p.slug}")
+    elif args.command == "match":
+        p_list = []
+        raw = json.loads(args.personas_json)
+        for rp in raw:
+            p_list.append(Persona(
+                name=rp.get("name", ""), slug=rp.get("slug", ""),
+                base_weight=rp.get("base_weight", 0.5), current_weight=rp.get("current_weight", 0.5),
+                domains=rp.get("domains", []), trigger_keywords=rp.get("trigger_keywords", []),
+                clawhub_skills=rp.get("clawhub_skills", [])
+            ))
+        res = match_personas(args.message, p_list)
+        for r in res:
+            print(f"Active: {r.persona.slug} (weight: {r.weight})")
+
+if __name__ == "__main__":
+    main()

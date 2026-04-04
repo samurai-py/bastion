@@ -312,3 +312,44 @@ class SessionManager:
                 "Call start_session() before authenticate()."
             )
         return self._sessions[user_id]
+
+
+# ---------------------------------------------------------------------------
+# CLI Interface for OpenClaw Agent
+# ---------------------------------------------------------------------------
+def main() -> None:
+    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Bastion TOTP CLI helper")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # Command: generate
+    subparsers.add_parser("generate", help="Generate a new TOTP secret")
+
+    # Command: qr
+    qr_parser = subparsers.add_parser("qr", help="Generate QR URI")
+    qr_parser.add_argument("secret", help="The TOTP secret")
+    qr_parser.add_argument("user", help="The user name")
+
+    # Command: verify
+    verify_parser = subparsers.add_parser("verify", help="Verify a TOTP code")
+    verify_parser.add_argument("secret", help="The TOTP secret")
+    verify_parser.add_argument("code", help="The 6-digit code")
+
+    args = parser.parse_args()
+
+    if args.command == "generate":
+        print(generate_secret().strip())
+    elif args.command == "qr":
+        print(generate_qr_uri(args.secret, args.user).strip())
+    elif args.command == "verify":
+        if verify_code(args.secret, args.code):
+            print("OK")
+            sys.exit(0)
+        else:
+            print("FAIL")
+            sys.exit(1)
+
+if __name__ == "__main__":
+    main()

@@ -231,8 +231,8 @@ Se "não": informar que o TOTP pode ser configurado depois com `/setup-totp`, ma
 
 Se "sim":
 
-1. Gerar TOTP secret via `pyotp.random_base32()`.
-2. Gerar URI para QR code: `pyotp.TOTP(secret).provisioning_uri(name=user.name, issuer_name="Bastion")`.
+1. Gerar TOTP secret executando no shell: `python3 ~/.openclaw/skills/onboarding/totp.py generate`.
+2. Gerar URI para QR code executando no shell: `python3 ~/.openclaw/skills/onboarding/totp.py qr <secret> <user.name>`.
 3. Renderizar o QR code (como imagem ou link para geração de QR).
 4. Enviar ao usuário:
 
@@ -247,9 +247,9 @@ Após escanear, digite o código de 6 dígitos que aparecer no app:
 ```
 
 5. Aguardar o código de 6 dígitos do usuário.
-6. Validar com `pyotp.TOTP(secret).verify(code)`.
-   - **Válido:** prosseguir para Etapa 9.
-   - **Inválido:** ver Edge Case C.
+6. Validar executando no shell: `python3 ~/.openclaw/skills/onboarding/totp.py verify <secret> <code>`.
+   - **Válido (saída OK):** prosseguir para Etapa 9.
+   - **Inválido (saída FAIL):** ver Edge Case C.
 
 7. Salvar o secret **apenas** na variável de ambiente `BASTION_TOTP_SECRET` no arquivo `.env`. Nunca em USER.md ou em qualquer arquivo versionado.
 

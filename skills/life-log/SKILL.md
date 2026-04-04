@@ -28,7 +28,12 @@ Bastion:
 
 ---
 
-## Interface Python
+## Comandos CLI
+
+> IMPORTANTE: Comando CLI
+> Como você é um agente OpenClaw, você deve invocar todas as operações via linha de comando (`exec python3 ...`). Não tente interpretar o código Python nativamente.
+
+
 
 ```python
 from skills.life_log.factory import Settings, create_adapter
