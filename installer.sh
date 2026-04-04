@@ -442,59 +442,42 @@ WA_URL=$(_env_get "WHATSAPP_API_URL")
 WA_KEY=$(_env_get "WHATSAPP_API_KEY")
 WA_NUMBER=$(_env_get "WHATSAPP_NUMBER")
 
-# Construir seção de channels dinamicamente
-CHANNELS_CONFIG=""
+# Construir seção de channels dinamicamente (usando um separador temporário)
+CHANNELS_LIST=""
 
 if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
   TELEGRAM_ALLOW=""
-  [ -n "$TELEGRAM_USER_ID" ] && TELEGRAM_ALLOW=",
-      \"allowFrom\": [\"${TELEGRAM_USER_ID}\"]"
-  CHANNELS_CONFIG="${CHANNELS_CONFIG}
-    \"telegram\": {
-      \"enabled\": true${TELEGRAM_ALLOW},
-      \"dmPolicy\": \"allowlist\"
-    },"
+  [ -n "$TELEGRAM_USER_ID" ] && TELEGRAM_ALLOW=", \"allowFrom\": [\"${TELEGRAM_USER_ID}\"]"
+  CHANNELS_LIST="${CHANNELS_LIST}---
+    \"telegram\": { \"enabled\": true${TELEGRAM_ALLOW}, \"dmPolicy\": \"allowlist\" }"
 fi
 
 if [ -n "$DISCORD_BOT_TOKEN" ]; then
   DISCORD_ALLOW=""
-  [ -n "$DISCORD_USER_ID" ] && DISCORD_ALLOW=",
-      \"allowFrom\": [\"${DISCORD_USER_ID}\"]"
-  CHANNELS_CONFIG="${CHANNELS_CONFIG}
-    \"discord\": {
-      \"enabled\": true${DISCORD_ALLOW},
-      \"dmPolicy\": \"allowlist\"
-    },"
+  [ -n "$DISCORD_USER_ID" ] && DISCORD_ALLOW=", \"allowFrom\": [\"${DISCORD_USER_ID}\"]"
+  CHANNELS_LIST="${CHANNELS_LIST}---
+    \"discord\": { \"enabled\": true${DISCORD_ALLOW}, \"dmPolicy\": \"allowlist\" }"
 fi
 
 if [ -n "$SLACK_BOT_TOKEN" ]; then
   SLACK_ALLOW=""
-  [ -n "$SLACK_USER_ID" ] && SLACK_ALLOW=",
-      \"allowFrom\": [\"${SLACK_USER_ID}\"]"
-  CHANNELS_CONFIG="${CHANNELS_CONFIG}
-    \"slack\": {
-      \"enabled\": true${SLACK_ALLOW},
-      \"dmPolicy\": \"allowlist\"
-    },"
+  [ -n "$SLACK_USER_ID" ] && SLACK_ALLOW=", \"allowFrom\": [\"${SLACK_USER_ID}\"]"
+  CHANNELS_LIST="${CHANNELS_LIST}---
+    \"slack\": { \"enabled\": true${SLACK_ALLOW}, \"dmPolicy\": \"allowlist\" }"
 fi
 
 if [ -n "$WA_URL" ] && [ -n "$WA_KEY" ]; then
-  CHANNELS_CONFIG="${CHANNELS_CONFIG}
-    \"whatsapp\": {
-      \"enabled\": true,
-      \"apiUrl\": \"${WA_URL}\",
-      \"apiKey\": \"${WA_KEY}\",
-      \"allowFrom\": [\"${WA_NUMBER}\"],
-      \"dmPolicy\": \"allowlist\"
-    },"
+  CHANNELS_LIST="${CHANNELS_LIST}---
+    \"whatsapp\": { \"enabled\": true, \"apiUrl\": \"${WA_URL}\", \"apiKey\": \"${WA_KEY}\", \"allowFrom\": [\"${WA_NUMBER}\"], \"dmPolicy\": \"allowlist\" }"
 fi
 
-# Remover última vírgula se houver canais
-if [ -n "$CHANNELS_CONFIG" ]; then
-  CHANNELS_CONFIG=$(echo "$CHANNELS_CONFIG" | sed 's/,$//')
+# Unir a lista usando vírgulas (usando python para garantir JSON limpo)
+if [ -n "$CHANNELS_LIST" ]; then
+  CHANNELS_CONFIG=$(echo "$CHANNELS_LIST" | python3 -c "import sys; parts = [p.strip() for p in sys.stdin.read().split('---') if p.strip()]; print(',\n'.join(parts))")
   CHANNELS_SECTION=",
-    \"channels\": {${CHANNELS_CONFIG}
-    }"
+  \"channels\": {
+    ${CHANNELS_CONFIG}
+  }"
 else
   CHANNELS_SECTION=""
 fi
