@@ -21,6 +21,9 @@
       "exec",
       "read",
       "write"
-    ]
+    ],
+    "python": {
+      "dependencies": ["pyotp", "qrcode"]
+    }
   }
 }

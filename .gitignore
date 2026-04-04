@@ -233,3 +233,8 @@ tmp/
 
 # TypeScript / Node
 bastion/mobile-connect/node_modules/
+
+# Olllama data
+ollama_data/
+
+v1_cache/

@@ -15,7 +15,11 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/samurai-py/bastion.git"
-INSTALL_DIR="${BASTION_DIR:-$HOME/bastion}"
+if [ -f "AGENTS.md" ]; then
+  INSTALL_DIR="$(pwd)"
+else
+  INSTALL_DIR="${BASTION_DIR:-$HOME/bastion}"
+fi
 WIZARD_MODE="${BASTION_WIZARD:-true}"
 
 # ── Colors ────────────────────────────────────────────────────────
@@ -216,7 +220,19 @@ cd "$INSTALL_DIR"
 
 # Stop any running containers before reconfiguring
 if [ -f "docker-compose.yml" ]; then
-  docker compose down --remove-orphans 2>/dev/null || true
+  info "Deseja realizar uma instalação limpa (apagar volumes e configurações antigas)? [s/N]"
+  _ask "Confirma limpeza profunda? " clean_confirm
+  if [[ "$clean_confirm" =~ ^[sS]$ ]]; then
+    step "Limpando instalação anterior..."
+    # Mata os containers e remove os volumes
+    docker compose down -v --remove-orphans 2>/dev/null || true
+    # Usa o docker para recuperar a posse de pastas protegidas e apagá-las
+    info "Corrigindo permissões para deleção..."
+    docker run --rm -v "$(pwd):/app" alpine sh -c "chown -R $(id -u):$(id -g) /app/config && rm -rf /app/config /app/.env"
+    success "Limpeza concluída."
+  else
+    docker compose down --remove-orphans 2>/dev/null || true
+  fi
 fi
 
 # ── 3. Copy .env.example → .env (idempotent) ─────────────────────
@@ -249,19 +265,36 @@ if [ -z "$EXISTING_LLM" ]; then
       _env_set "OPENROUTER_API_KEY" "$llm_key"
       
       # Permite escolher o modelo do OpenRouter
-      if [ "$WIZARD_MODE" = "true" ]; then
-        _select_or_env "Qual modelo do OpenRouter?" model_choice OPENROUTER_MODEL \
-          "openai/gpt-oss-20b:free (gratuito)" \
-          "meta-llama/llama-3.3-70b-instruct:free (gratuito)" \
-          "anthropic/claude-3.5-sonnet (pago)" \
-          "openai/gpt-4o (pago)"
+      if [ "$WIZARD_MODE" = "true" ] && [ -n "$llm_key" ]; then
+        info "Buscando modelos disponíveis na OpenRouter..."
         
-        case "$model_choice" in
-          *gpt-oss*) _env_set "OPENROUTER_MODEL" "openai/gpt-oss-20b:free" ;;
-          *llama*) _env_set "OPENROUTER_MODEL" "meta-llama/llama-3.3-70b-instruct:free" ;;
-          *claude*) _env_set "OPENROUTER_MODEL" "anthropic/claude-3.5-sonnet" ;;
-          *gpt-4o*) _env_set "OPENROUTER_MODEL" "openai/gpt-4o" ;;
-        esac
+        # Busca modelos, filtra os que possuem os nomes fornecidos ou os top 10 por uso se não houver filtro
+        OR_MODELS_JSON=$(curl -s "https://openrouter.ai/api/v1/models")
+        
+        # Se falhar, usa os básicos como fallback
+        if [ $? -eq 0 ] && [ -n "$OR_MODELS_JSON" ]; then
+          # Seleciona os 15 modelos mais relevantes (simplificado)
+          mapfile -t OR_OPTIONS < <(echo "$OR_MODELS_JSON" | jq -r '.data[0:15] | .[] | "\(.id) (\(.name))"')
+          OR_OPTIONS+=("Outro (digitar manualmente)")
+          
+          _select_or_env "Qual modelo do OpenRouter você quer usar?" or_model_select OPENROUTER_MODEL "${OR_OPTIONS[@]}"
+          
+          if [[ "$or_model_select" == *"Outro"* ]]; then
+             _ask "$(echo -e "${CYAN}Digite o ID completo do modelo (ex: google/gemini-2.0-flash-lite-001): ${RESET}")" or_custom_id
+             _env_set "OPENROUTER_MODEL" "$or_custom_id"
+          else
+             # Extrai apenas o ID (parte antes do espaço e parênteses)
+             selected_id=$(echo "$or_model_select" | cut -d' ' -f1)
+             _env_set "OPENROUTER_MODEL" "$selected_id"
+          fi
+        else
+          warn "Falha ao buscar modelos dinamicamente. Usando padrões."
+          _select_or_env "Qual modelo do OpenRouter?" model_choice OPENROUTER_MODEL \
+            "openai/gpt-oss-20b:free" \
+            "meta-llama/llama-3.3-70b-instruct:free" \
+            "google/gemini-2.0-flash-lite-001"
+          _env_set "OPENROUTER_MODEL" "$(echo "$model_choice" | cut -d' ' -f1)"
+        fi
       fi
       success "OpenRouter configurado."
       ;;
