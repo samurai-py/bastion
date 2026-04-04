@@ -447,33 +447,33 @@ CHANNELS_CONFIG=""
 
 if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
   TELEGRAM_ALLOW=""
-  [ -n "$TELEGRAM_USER_ID" ] && TELEGRAM_ALLOW="\"allowFrom\": [\"${TELEGRAM_USER_ID}\"],"
+  [ -n "$TELEGRAM_USER_ID" ] && TELEGRAM_ALLOW=",
+      \"allowFrom\": [\"${TELEGRAM_USER_ID}\"]"
   CHANNELS_CONFIG="${CHANNELS_CONFIG}
     \"telegram\": {
-      \"enabled\": true,
-      ${TELEGRAM_ALLOW}
+      \"enabled\": true${TELEGRAM_ALLOW},
       \"dmPolicy\": \"allowlist\"
     },"
 fi
 
 if [ -n "$DISCORD_BOT_TOKEN" ]; then
   DISCORD_ALLOW=""
-  [ -n "$DISCORD_USER_ID" ] && DISCORD_ALLOW="\"allowFrom\": [\"${DISCORD_USER_ID}\"],"
+  [ -n "$DISCORD_USER_ID" ] && DISCORD_ALLOW=",
+      \"allowFrom\": [\"${DISCORD_USER_ID}\"]"
   CHANNELS_CONFIG="${CHANNELS_CONFIG}
     \"discord\": {
-      \"enabled\": true,
-      ${DISCORD_ALLOW}
+      \"enabled\": true${DISCORD_ALLOW},
       \"dmPolicy\": \"allowlist\"
     },"
 fi
 
 if [ -n "$SLACK_BOT_TOKEN" ]; then
   SLACK_ALLOW=""
-  [ -n "$SLACK_USER_ID" ] && SLACK_ALLOW="\"allowFrom\": [\"${SLACK_USER_ID}\"],"
+  [ -n "$SLACK_USER_ID" ] && SLACK_ALLOW=",
+      \"allowFrom\": [\"${SLACK_USER_ID}\"]"
   CHANNELS_CONFIG="${CHANNELS_CONFIG}
     \"slack\": {
-      \"enabled\": true,
-      ${SLACK_ALLOW}
+      \"enabled\": true${SLACK_ALLOW},
       \"dmPolicy\": \"allowlist\"
     },"
 fi
@@ -493,8 +493,8 @@ fi
 if [ -n "$CHANNELS_CONFIG" ]; then
   CHANNELS_CONFIG=$(echo "$CHANNELS_CONFIG" | sed 's/,$//')
   CHANNELS_SECTION=",
-  \"channels\": {${CHANNELS_CONFIG}
-  }"
+    \"channels\": {${CHANNELS_CONFIG}
+    }"
 else
   CHANNELS_SECTION=""
 fi
@@ -513,8 +513,8 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
   },
   "gateway": {
     "mode": "local",
-    "auth": { "mode": "none" }${CHANNELS_SECTION}
-  },
+    "auth": { "mode": "none" }
+  }${CHANNELS_SECTION},
   "models": {
     "mode": "merge",
     "providers": {
