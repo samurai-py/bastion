@@ -4,14 +4,14 @@
   "permissions": {
     "fs": {
       "read": [
-        "~/.openclaw/skills/life-log/**",
-        "~/.openclaw/workspace/**",
+        "~/.openclaw/workspace/app/skills/life-log/**",
+        "~/.openclaw/workspace/app/**",
         "~/.env",
         "./.env",
         "./**"
       ],
       "write": [
-        "~/.openclaw/workspace/**",
+        "~/.openclaw/workspace/app/**",
         "~/.env",
         "./.env",
         "./**"

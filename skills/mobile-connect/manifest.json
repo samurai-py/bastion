@@ -4,14 +4,14 @@
   "permissions": {
     "fs": {
       "read": [
-        "~/.openclaw/skills/mobile-connect/**",
-        "~/.openclaw/workspace/**",
+        "~/.openclaw/workspace/app/skills/mobile-connect/**",
+        "~/.openclaw/workspace/app/**",
         "~/.env",
         "./.env",
         "./**"
       ],
       "write": [
-        "~/.openclaw/workspace/**",
+        "~/.openclaw/workspace/app/**",
         "~/.env",
         "./.env",
         "./**"

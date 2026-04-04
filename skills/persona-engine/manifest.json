@@ -4,14 +4,14 @@
   "permissions": {
     "fs": {
       "read": [
-        "~/.openclaw/skills/persona-engine/**",
-        "~/.openclaw/workspace/**",
+        "~/.openclaw/workspace/app/skills/persona-engine/**",
+        "~/.openclaw/workspace/app/**",
         "~/.env",
         "./.env",
         "./**"
       ],
       "write": [
-        "~/.openclaw/workspace/**",
+        "~/.openclaw/workspace/app/**",
         "~/.env",
         "./.env",
         "./**"
