@@ -267,3 +267,17 @@ O orquestrador deve tratar este caso e responder sem contexto histórico.
 
 `get_persona_summary` retorna lista vazia para personas sem interações no período.
 Não é um erro — indica persona nova ou inativa.
+
+---
+
+## Output Example
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "persona": "tech-lead",
+  "intent": "code-review",
+  "tools": ["github-integration", "code-review-helper"],
+  "timestamp": "2024-01-15T10:30:00Z"
+}
+```

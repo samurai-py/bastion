@@ -640,11 +640,19 @@ step "Instalando skills core..."
 install_skill "mcporter"
 install_skill "https://clawhub.ai/ivangdavila/stock-images"
 
+# Install output-validator dependencies
+if command -v pip3 &>/dev/null; then
+  pip3 install jsonschema click pyyaml --quiet 2>/dev/null || true
+fi
+
 # ── 8. Preparar USER.md e diretórios necessários ────────────────
 step "Preparando ambiente..."
 
 # Criar diretório de config (OpenClaw espera que exista)
-mkdir -p "$INSTALL_DIR/config"
+# workspace/ precisa existir com uid 1000 para o container poder escrever
+mkdir -p "$INSTALL_DIR/config/workspace"
+sudo chown -R 1000:1000 "$INSTALL_DIR/config" 2>/dev/null || \
+  chown -R 1000:1000 "$INSTALL_DIR/config" 2>/dev/null || true
 
 # Pré-autorizar o user_id no USER.md (repo root, bind-mounted no container)
 PRIMARY_CHANNEL=$(_env_get "PRIMARY_CHANNEL")
@@ -679,6 +687,11 @@ success "Ambiente preparado."
 step "Iniciando Bastion..."
 
 cd "$INSTALL_DIR"
+
+# Garantir que config/ pertence ao uid 1000 (user node dentro do container)
+# Necessário para que o OpenClaw possa criar/escrever TOOLS.md, IDENTITY.md, etc.
+sudo chown -R 1000:1000 "$INSTALL_DIR/config" 2>/dev/null || \
+  chown -R 1000:1000 "$INSTALL_DIR/config" 2>/dev/null || true
 
 # Pull da imagem mais recente para evitar cache corrompido
 docker compose pull --quiet

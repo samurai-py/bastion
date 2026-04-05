@@ -59,6 +59,8 @@ pythonpath = [
     "skills/mobile-connect/tests",
     "skills/onboarding",
     "skills/onboarding/tests",
+    "skills/output-validator",
+    "skills/output-validator/tests",
     "skills/persona-engine",
     "skills/persona-engine/tests",
     "skills/proactive",

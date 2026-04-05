@@ -46,6 +46,16 @@ O OpenClaw lê este arquivo a cada 30 minutos e executa as tarefas cujo interval
 - **Formato do alerta**: `⚠️ CVE detectado na skill [nome]: [descrição]. Recomendo desinstalar ou aguardar patch.`
 - **Prioridade**: máxima — este alerta tem precedência sobre qualquer outra mensagem pendente
 
+### validation-metrics-check
+- **Intervalo**: a cada 6 horas
+- **Skill**: `output-validator`
+- **Ação**: ler `config/logs/validation-metrics.json` e calcular taxa de sucesso recente por skill
+- **Condição de alerta**: se qualquer skill tiver taxa de sucesso recente abaixo de 90% (com mínimo de 20 amostras na janela), gerar alerta
+- **Formato do alerta**: `⚠️ Drift de validação em [skill]: taxa de sucesso = [X]% (últimas [N] execuções). Último erro: [mensagem]`
+- **Ação adicional**: se geração de schema falhar para qualquer skill (schema.json ausente e SKILL.md sem exemplo), alertar o usuário
+- **Formato do alerta de schema**: `⚠️ Skill [nome] sem schema de validação configurado. Adicione ## Output Example ao SKILL.md.`
+- **Prioridade**: normal — exibir na próxima interação após o alerta de CVE (se houver)
+
 ---
 
 ## Estado

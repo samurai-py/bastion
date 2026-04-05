@@ -542,6 +542,24 @@ Repetir até receber um valor válido.
 
 ---
 
+## Output Example
+
+```json
+{
+  "name": "Tech Lead",
+  "slug": "tech-lead",
+  "base_weight": 0.9,
+  "current_weight": 0.9,
+  "domains": ["code", "architecture", "team"],
+  "trigger_keywords": ["PR", "review", "deploy", "bug", "arquitetura"],
+  "clawhub_skills": ["github-integration", "code-review-helper"],
+  "voice_tone": "técnico, direto, com exemplos de código quando relevante",
+  "created_at": "2024-01-15T10:30:00Z"
+}
+```
+
+---
+
 ## Notas de Implementação
 
 - O `current_weight` é inicializado igual ao `base_weight` na criação e gerenciado pelo skill `bastion/weight-system` após isso. O `persona-engine` não altera `current_weight` diretamente — apenas lê para matching e fallback.
