@@ -2,7 +2,7 @@
 name: ""
 language: "pt-BR"
 authorized_user_ids:
-  - "REDACTED"
+  - ""
 personas: []
 totp_configured: false
 ---
