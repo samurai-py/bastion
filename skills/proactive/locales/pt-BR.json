@@ -1,0 +1,7 @@
+{
+  "warning_adapter": "Aviso: não foi possível carregar o adaptador life_log: {error}",
+  "all_active": "Todas as personas estão ativas",
+  "persona_inactive": "Persona {slug} inativa há {days} dias",
+  "no_cves": "Nenhum CVE encontrado.",
+  "cve_alert": "[{severity}] {skill}: {cve_id} - {description}"
+}

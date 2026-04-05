@@ -18,6 +18,9 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from i18n import get_string, load_locale
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,9 @@ class GuardrailEngine:
     is allowed, requires confirmation, and the reason.
     """
 
+    def __init__(self, language: str = "en") -> None:
+        self._locale = load_locale(language, skill_dir=Path(__file__).parent)
+
     # ------------------------------------------------------------------
     # Guardrail 1 — Financial (Req 11.1)
     # ------------------------------------------------------------------
@@ -191,11 +197,11 @@ class GuardrailEngine:
                 )
 
         # Financial action detected — always block autonomous execution
-        parts = [f"Ação financeira detectada: {action.description}"]
+        parts = [get_string(self._locale, "financial_detected", description=action.description)]
         if action.amount is not None:
-            parts.append(f"Valor: {action.amount}")
+            parts.append(get_string(self._locale, "financial_amount", amount=action.amount))
         if action.recipient:
-            parts.append(f"Destinatário: {action.recipient}")
+            parts.append(get_string(self._locale, "financial_recipient", recipient=action.recipient))
 
         reason = " | ".join(parts)
 
@@ -203,9 +209,7 @@ class GuardrailEngine:
             allowed=False,
             reason=reason,
             requires_confirmation=True,
-            confirmation_prompt=(
-                f"Vou {action.description}. Confirma? (sim/não)"
-            ),
+            confirmation_prompt=get_string(self._locale, "confirm_action", description=action.description),
         )
 
     # ------------------------------------------------------------------
@@ -225,9 +229,9 @@ class GuardrailEngine:
         """
         return GuardrailResult(
             allowed=False,
-            reason=f"Ação irreversível requer confirmação: {action.description}",
+            reason=get_string(self._locale, "irreversible_confirm", description=action.description),
             requires_confirmation=True,
-            confirmation_prompt=f"Vou {action.description}. Confirma? (sim/não)",
+            confirmation_prompt=get_string(self._locale, "confirm_action", description=action.description),
         )
 
     # ------------------------------------------------------------------
@@ -255,16 +259,13 @@ class GuardrailEngine:
                 )
                 return GuardrailResult(
                     allowed=False,
-                    reason=(
-                        f"Tentativa de prompt injection detectada no conteúdo externo. "
-                        f"Trecho: {detected_snippet!r}"
-                    ),
+                    reason=get_string(self._locale, "injection_detected", snippet=detected_snippet),
                     requires_confirmation=False,
                 )
 
         return GuardrailResult(
             allowed=True,
-            reason="Conteúdo externo tratado como dados — nenhuma instrução detectada.",
+            reason=get_string(self._locale, "content_safe"),
             requires_confirmation=False,
         )
 
@@ -292,13 +293,13 @@ class GuardrailEngine:
         if user_id in authorized_ids:
             return GuardrailResult(
                 allowed=True,
-                reason=f"Usuário {user_id!r} autorizado.",
+                reason=get_string(self._locale, "user_authorized", user_id=repr(user_id)),
                 requires_confirmation=False,
             )
 
         return GuardrailResult(
             allowed=False,
-            reason="Usuário não autorizado — mensagem ignorada silenciosamente.",
+            reason=get_string(self._locale, "user_unauthorized"),
             requires_confirmation=False,
         )
 
@@ -325,7 +326,7 @@ class GuardrailEngine:
         if skill.family == "bastion" or skill.name.startswith("bastion/"):
             return GuardrailResult(
                 allowed=True,
-                reason=f"Skill {skill.name!r} é da família bastion/* — instalação permitida.",
+                reason=get_string(self._locale, "skill_bastion_exempt", name=repr(skill.name)),
                 requires_confirmation=False,
             )
 
@@ -334,24 +335,25 @@ class GuardrailEngine:
         # Check Verified badge (required for filesystem/network access)
         needs_verified = skill.has_filesystem_access or skill.has_network_access
         if needs_verified and not skill.verified:
-            failures.append(
-                f"Badge 'Verified' ausente (obrigatório para skills com acesso a filesystem ou rede)"
-            )
+            failures.append(get_string(self._locale, "badge_missing"))
 
         # Check minimum rating
         if skill.rating < SKILL_MIN_RATING:
             failures.append(
-                f"Avaliação {skill.rating:.1f} abaixo do mínimo de {SKILL_MIN_RATING:.1f}"
+                get_string(self._locale, "rating_below_min",
+                           rating=f"{skill.rating:.1f}", min_rating=f"{SKILL_MIN_RATING:.1f}")
             )
 
         # Check minimum review count
         if skill.review_count < SKILL_MIN_REVIEWS:
             failures.append(
-                f"Apenas {skill.review_count} avaliações (mínimo: {SKILL_MIN_REVIEWS})"
+                get_string(self._locale, "reviews_below_min",
+                           count=skill.review_count, min_reviews=SKILL_MIN_REVIEWS)
             )
 
         if failures:
-            reason = f"Instalação bloqueada para {skill.name!r}: " + "; ".join(failures)
+            reason = get_string(self._locale, "install_blocked",
+                                name=repr(skill.name), reasons="; ".join(failures))
             return GuardrailResult(
                 allowed=False,
                 reason=reason,
@@ -360,7 +362,7 @@ class GuardrailEngine:
 
         return GuardrailResult(
             allowed=True,
-            reason=f"Skill {skill.name!r} atende todos os critérios de instalação.",
+            reason=get_string(self._locale, "install_allowed", name=repr(skill.name)),
             requires_confirmation=False,
         )
 

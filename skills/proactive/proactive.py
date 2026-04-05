@@ -21,7 +21,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from i18n import get_string, load_locale
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +215,7 @@ def main() -> None:
     import json
 
     parser = argparse.ArgumentParser(description="Proactive Skill CLI")
+    parser.add_argument("--language", default="en", help="Locale language tag (e.g. en, pt-BR)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # inactive
@@ -226,6 +230,8 @@ def main() -> None:
     args = parser.parse_args()
 
     async def run():
+        locale = load_locale(args.language, skill_dir=Path(__file__).parent)
+
         if args.command == "inactive":
             try:
                 import sys
@@ -235,7 +241,7 @@ def main() -> None:
                 settings = Settings.from_env()
                 adapter = create_adapter(settings)
             except Exception as e:
-                print(f"Warning: could not load life_log adapter: {e}")
+                print(get_string(locale, "warning_adapter", error=e))
                 # Mock adapter for fallback
                 class MockAdapter:
                     async def get_last_interaction(self, slug):
@@ -245,21 +251,23 @@ def main() -> None:
             personas_list = json.loads(args.personas)
             results = await check_inactive_personas(personas_list, adapter, args.threshold)
             if not results:
-                print("All personas are active")
+                print(get_string(locale, "all_active"))
             for r in results:
-                print(f"Persona {r.persona_slug} inactive for {r.days_inactive} days")
-                
+                print(get_string(locale, "persona_inactive", slug=r.persona_slug, days=r.days_inactive))
+
         elif args.command == "cve":
             class DummyClawHubClient:
                 async def get_cves(self, skill_name: str):
                     return []
-            
+
             skills_list = json.loads(args.skills)
             results = await check_cve_alerts(skills_list, DummyClawHubClient())
             if not results:
-                print("No CVEs found.")
+                print(get_string(locale, "no_cves"))
             for alert in results:
-                print(f"[{alert.severity}] {alert.skill_name}: {alert.cve_id} - {alert.description}")
+                print(get_string(locale, "cve_alert",
+                                 severity=alert.severity, skill=alert.skill_name,
+                                 cve_id=alert.cve_id, description=alert.description))
 
     asyncio.run(run())
 

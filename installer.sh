@@ -127,11 +127,39 @@ CORE_SKILLS_FAILED=()
 
 install_plugin() {
   local plugin="$1"
+  local force="${2:-}"
+  local plugin_id_override="${3:-}"
   info "Instalando plugin ${plugin}..."
-  if openclaw plugins install "$plugin" --dangerously-force-unsafe-install; then
-    success "Plugin ${plugin} instalado."
+
+  # Usa override se fornecido, senão extrai do nome do pacote
+  local plugin_id
+  if [ -n "$plugin_id_override" ]; then
+    plugin_id="$plugin_id_override"
   else
-    error "Falha ao instalar plugin ${plugin}. Instalação abortada."
+    plugin_id=$(echo "$plugin" | sed 's|.*/||')
+  fi
+
+  local ext_dir="$HOME/.openclaw/extensions/${plugin_id}"
+
+  # Skip se já instalado
+  if [ -d "$ext_dir" ]; then
+    success "Plugin ${plugin_id} já instalado — pulando."
+    return 0
+  fi
+
+  # Tenta instalar sem forçar primeiro
+  if openclaw plugins install "$plugin" 2>/dev/null; then
+    success "Plugin ${plugin} instalado."
+  elif [ "$force" = "--force" ]; then
+    warn "Scanner detectou padrão suspeito em ${plugin} — forçando instalação (falso positivo conhecido)."
+    if openclaw plugins install "$plugin" --dangerously-force-unsafe-install; then
+      success "Plugin ${plugin} instalado."
+    else
+      error "Falha ao instalar plugin ${plugin}. Instalação abortada."
+      exit 1
+    fi
+  else
+    error "Falha ao instalar plugin ${plugin} — scanner bloqueou. Use --force se for falso positivo."
     exit 1
   fi
 }
@@ -249,7 +277,7 @@ check_node() {
 check_clawhub() {
   if ! command -v clawhub &>/dev/null; then
     info "Instalando clawhub CLI..."
-    npx clawhub@latest install sonoscli --force
+    npm install -g clawhub@latest
     success "clawhub instalado."
   else
     success "clawhub encontrado: $(clawhub --version 2>/dev/null || echo 'ok')"
@@ -294,6 +322,8 @@ if [ -f "docker-compose.yml" ]; then
     info "Removendo configuração antiga..."
     docker run --rm -v "$(pwd):/app" alpine sh -c \
       "chown -R $(id -u):$(id -g) /app/config 2>/dev/null; rm -rf /app/config /app/.env"
+    # Remover plugins instalados localmente
+    rm -rf "$HOME/.openclaw/extensions"
     success "Limpeza concluída."
   else
     docker compose down --remove-orphans 2>/dev/null || true
@@ -523,13 +553,39 @@ else
   exit 1
 fi
 
-# ── 6.5. Instalar Plugins de Segurança ───────────────────────────
-step "Instalando plugins de segurança..."
+# ── 6.5. Configurar Composio ─────────────────────────────────────
+step "Configurando Composio..."
 
-install_plugin "@gendigital/sage-openclaw"
+EXISTING_COMPOSIO=$(_env_get "COMPOSIO_CONSUMER_KEY")
+
+if [ -z "$EXISTING_COMPOSIO" ]; then
+  info "O Bastion usa o Composio para integrar com 850+ apps (Gmail, Calendar, GitHub, etc.)"
+  info "Crie sua chave gratuita em: https://dashboard.composio.dev"
+  _ask_or_env "$(echo -e "${CYAN}Cole sua COMPOSIO_CONSUMER_KEY (começa com ck_): ${RESET}")" composio_key COMPOSIO_CONSUMER_KEY
+  if [ -n "$composio_key" ]; then
+    _env_set "COMPOSIO_CONSUMER_KEY" "$composio_key"
+    success "Composio configurado."
+  else
+    warn "Composio não configurado. Algumas integrações não estarão disponíveis."
+  fi
+else
+  success "Composio já configurado no .env."
+fi
+
+# ── 6.6. Instalar Plugins ─────────────────────────────────────────
+step "Instalando plugins..."
+
+install_plugin "@gendigital/sage-openclaw" --force
 SAGE_INSTALLED=true
-install_plugin "@composio/openclaw-plugin"
+install_plugin "@composio/openclaw-plugin" --force composio
 COMPOSIO_INSTALLED=true
+
+# Configurar consumer key no OpenClaw se disponível
+COMPOSIO_KEY=$(_env_get "COMPOSIO_CONSUMER_KEY")
+if [ -n "$COMPOSIO_KEY" ]; then
+  openclaw config set plugins.entries.composio.config.consumerKey "$COMPOSIO_KEY" 2>/dev/null || true
+fi
+
 success "Scanner de segurança Sage ativo."
 
 # ── 7. Gerar openclaw.json com Configuração Robusta ───────────────
@@ -648,11 +704,24 @@ fi
 # ── 8. Preparar USER.md e diretórios necessários ────────────────
 step "Preparando ambiente..."
 
-# Criar diretório de config (OpenClaw espera que exista)
-# workspace/ precisa existir com uid 1000 para o container poder escrever
+# Detectar UID/GID do usuário atual e persistir no .env
+# O container irá rodar como este usuário para evitar arquivos root
+BASTION_UID=$(id -u)
+BASTION_GID=$(id -g)
+_env_set "BASTION_UID" "$BASTION_UID"
+_env_set "BASTION_GID" "$BASTION_GID"
+
+# Detectar timezone do sistema
+SYSTEM_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null \
+  || cat /etc/timezone 2>/dev/null \
+  || echo "UTC")
+_env_set "TIMEZONE" "$SYSTEM_TZ"
+info "Timezone detectado: $SYSTEM_TZ (ajuste TIMEZONE no .env se necessário)"
+
+# Criar diretórios antes do Docker — garante ownership do usuário atual (sem sudo)
 mkdir -p "$INSTALL_DIR/config/workspace"
-sudo chown -R 1000:1000 "$INSTALL_DIR/config" 2>/dev/null || \
-  chown -R 1000:1000 "$INSTALL_DIR/config" 2>/dev/null || true
+mkdir -p "$INSTALL_DIR/config/identity"
+mkdir -p "$INSTALL_DIR/personas"
 
 # Pré-autorizar o user_id no USER.md (repo root, bind-mounted no container)
 PRIMARY_CHANNEL=$(_env_get "PRIMARY_CHANNEL")
@@ -669,14 +738,18 @@ if [ -n "$USER_ID" ]; then
 ---
 name: ""
 language: "pt-BR"
+timezone: "${SYSTEM_TZ}"
 authorized_user_ids:
   - "${USER_ID}"
 personas: []
 totp_configured: false
+user_bio: ""
+pain_points_and_goals: ""
+onboarding_completed_at: ""
 ---
 
-<!-- Este arquivo é gerado automaticamente pelo skill bastion/onboarding. -->
-<!-- O campo authorized_user_ids é imutável pelo agente — gerenciado apenas pelo installer. -->
+<!-- This file is auto-generated by bastion/onboarding skill. -->
+<!-- authorized_user_ids is managed exclusively by the installer — never modified by the agent. -->
 EOF
   success "User ID ${USER_ID} pré-autorizado no USER.md."
 fi
@@ -688,10 +761,7 @@ step "Iniciando Bastion..."
 
 cd "$INSTALL_DIR"
 
-# Garantir que config/ pertence ao uid 1000 (user node dentro do container)
-# Necessário para que o OpenClaw possa criar/escrever TOOLS.md, IDENTITY.md, etc.
-sudo chown -R 1000:1000 "$INSTALL_DIR/config" 2>/dev/null || \
-  chown -R 1000:1000 "$INSTALL_DIR/config" 2>/dev/null || true
+# Diretórios já criados com ownership correto via mkdir-p acima — nenhum chown necessário
 
 # Pull da imagem mais recente para evitar cache corrompido
 docker compose pull --quiet

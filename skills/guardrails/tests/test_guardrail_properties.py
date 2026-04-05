@@ -199,14 +199,14 @@ def test_property26_confirmation_prompt_exact_format(description: str) -> None:
     **Property 26 (format variant): Confirmation prompt follows exact format**
 
     The confirmation_prompt must follow the exact format:
-        "Vou [ação exata]. Confirma? (sim/não)"
+        "I'll [exact action]. Confirm? (yes/no)"
 
     **Validates: Requirements 11.2**
     """
     action = IrreversibleAction(description=description)
     result = _engine.check_irreversible_action(action)
 
-    expected_prompt = f"Vou {description}. Confirma? (sim/não)"
+    expected_prompt = f"I'll {description}. Confirm? (yes/no)"
     assert result.confirmation_prompt == expected_prompt, (
         f"Expected confirmation_prompt={expected_prompt!r}, "
         f"got {result.confirmation_prompt!r}"
@@ -215,33 +215,33 @@ def test_property26_confirmation_prompt_exact_format(description: str) -> None:
 
 @given(description=_text)
 @settings(max_examples=100)
-def test_property26_confirmation_prompt_starts_with_vou(description: str) -> None:
+def test_property26_confirmation_prompt_starts_with_ill(description: str) -> None:
     """
-    **Property 26 (prefix variant): Prompt always starts with 'Vou'**
+    **Property 26 (prefix variant): Prompt always starts with "I'll"**
 
     **Validates: Requirements 11.2**
     """
     action = IrreversibleAction(description=description)
     result = _engine.check_irreversible_action(action)
 
-    assert result.confirmation_prompt.startswith("Vou "), (
-        f"Confirmation prompt must start with 'Vou ', got: {result.confirmation_prompt!r}"
+    assert result.confirmation_prompt.startswith("I'll "), (
+        f"Confirmation prompt must start with \"I'll \", got: {result.confirmation_prompt!r}"
     )
 
 
 @given(description=_text)
 @settings(max_examples=100)
-def test_property26_confirmation_prompt_ends_with_sim_nao(description: str) -> None:
+def test_property26_confirmation_prompt_ends_with_yes_no(description: str) -> None:
     """
-    **Property 26 (suffix variant): Prompt always ends with '(sim/não)'**
+    **Property 26 (suffix variant): Prompt always ends with '(yes/no)'**
 
     **Validates: Requirements 11.2**
     """
     action = IrreversibleAction(description=description)
     result = _engine.check_irreversible_action(action)
 
-    assert result.confirmation_prompt.endswith("(sim/não)"), (
-        f"Confirmation prompt must end with '(sim/não)', got: {result.confirmation_prompt!r}"
+    assert result.confirmation_prompt.endswith("(yes/no)"), (
+        f"Confirmation prompt must end with '(yes/no)', got: {result.confirmation_prompt!r}"
     )
 
 

@@ -1,0 +1,7 @@
+{
+  "warning_adapter": "Warning: could not load life_log adapter: {error}",
+  "all_active": "All personas are active",
+  "persona_inactive": "Persona {slug} inactive for {days} days",
+  "no_cves": "No CVEs found.",
+  "cve_alert": "[{severity}] {skill}: {cve_id} - {description}"
+}

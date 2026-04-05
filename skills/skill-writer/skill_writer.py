@@ -25,6 +25,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from i18n import get_string, load_locale
+
 # ---------------------------------------------------------------------------
 # Enums & dataclasses
 # ---------------------------------------------------------------------------
@@ -384,7 +386,7 @@ def _parse_skill_line(line: str, category: str) -> Optional[SkillDiscoveryResult
 # ---------------------------------------------------------------------------
 
 
-def run_quality_policy(skill: SkillDiscoveryResult) -> PolicyResult:
+def run_quality_policy(skill: SkillDiscoveryResult, locale: dict) -> PolicyResult:
     """
     Check the AGENTS.md quality policy for a skill before installation.
 
@@ -407,18 +409,18 @@ def run_quality_policy(skill: SkillDiscoveryResult) -> PolicyResult:
         return PolicyResult(approved=True)
 
     if skill.cves:
-        return PolicyResult(approved=False, reason=f"CVEs conhecidos: {', '.join(skill.cves)}")
+        return PolicyResult(approved=False, reason=get_string(locale, "known_cves", cves=", ".join(skill.cves)))
 
     if skill.rating < 4.0:
         return PolicyResult(
             approved=False,
-            reason=f"Avaliação insuficiente: {skill.rating:.1f} (mínimo 4.0)",
+            reason=get_string(locale, "rating_insufficient", rating=f"{skill.rating:.1f}"),
         )
 
     if skill.reviews < 50:
         return PolicyResult(
             approved=False,
-            reason=f"Poucas avaliações: {skill.reviews} (mínimo 50)",
+            reason=get_string(locale, "reviews_insufficient", count=skill.reviews),
         )
 
     return PolicyResult(approved=True)
@@ -429,7 +431,7 @@ def run_quality_policy(skill: SkillDiscoveryResult) -> PolicyResult:
 # ---------------------------------------------------------------------------
 
 
-def present_skills(skills: list[SkillDiscoveryResult]) -> str:
+def present_skills(skills: list[SkillDiscoveryResult], locale: dict) -> str:
     """
     Return a formatted string presenting skills to the user.
 
@@ -442,17 +444,17 @@ def present_skills(skills: list[SkillDiscoveryResult]) -> str:
         A formatted string ready to display.
     """
     if not skills:
-        return "Nenhuma skill encontrada para os critérios fornecidos."
+        return get_string(locale, "no_skills_found_criteria")
 
-    lines = ["**Skills encontradas:**\n"]
+    lines = [get_string(locale, "skills_found_header")]
     for i, skill in enumerate(skills, start=1):
         badge = " ✓ Verified" if skill.verified else ""
-        rating = f"⭐ {skill.rating:.1f}" if skill.rating > 0 else "sem avaliação"
+        rating = f"⭐ {skill.rating:.1f}" if skill.rating > 0 else get_string(locale, "no_rating")
         reviews = f" · {skill.reviews} reviews" if skill.reviews > 0 else ""
         lines.append(
             f"{i}. **{skill.name}**{badge}\n"
             f"   {skill.description}\n"
-            f"   Categoria: {skill.category} | {rating}{reviews}\n"
+            f"   {get_string(locale, 'category_label', category=skill.category)} | {rating}{reviews}\n"
         )
     return "\n".join(lines)
 
@@ -462,7 +464,7 @@ def present_skills(skills: list[SkillDiscoveryResult]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def sage_scan(skill: SkillDiscoveryResult) -> PolicyResult:
+def sage_scan(skill: SkillDiscoveryResult, locale: dict) -> PolicyResult:
     """
     Invoke the Sage plugin's before_tool_call hook before installing a skill.
 
@@ -483,7 +485,7 @@ def sage_scan(skill: SkillDiscoveryResult) -> PolicyResult:
     if result.returncode != 0:
         return PolicyResult(
             approved=False,
-            reason=f"Sage bloqueou: {result.stderr.strip() or result.stdout.strip()}",
+            reason=get_string(locale, "sage_blocked", reason=result.stderr.strip() or result.stdout.strip()),
         )
     return PolicyResult(approved=True)
 
@@ -493,7 +495,7 @@ def sage_scan(skill: SkillDiscoveryResult) -> PolicyResult:
 # ---------------------------------------------------------------------------
 
 
-def install_skill_for_persona(skill: SkillDiscoveryResult, persona_slug: str) -> bool:
+def install_skill_for_persona(skill: SkillDiscoveryResult, persona_slug: str, locale: dict) -> bool:
     """
     Install a skill via clawhub and update skills.json for the given persona.
 
@@ -508,12 +510,12 @@ def install_skill_for_persona(skill: SkillDiscoveryResult, persona_slug: str) ->
     Returns:
         True if the skill was installed successfully, False otherwise.
     """
-    policy = run_quality_policy(skill)
+    policy = run_quality_policy(skill, locale)
     if not policy.approved:
         log_skill_event(skill.name, "unknown", persona_slug, "blocked", policy.reason)
         return False
 
-    scan = sage_scan(skill)
+    scan = sage_scan(skill, locale)
     if not scan.approved:
         log_skill_event(skill.name, "unknown", persona_slug, "blocked_sage", scan.reason)
         return False
@@ -533,12 +535,12 @@ def install_skill_for_persona(skill: SkillDiscoveryResult, persona_slug: str) ->
         source=skill.url,
         installed_at=datetime.now(timezone.utc).isoformat(),
     )
-    update_skills_json(persona_slug, entry)
+    update_skills_json(persona_slug, entry, locale)
     log_skill_event(skill.name, entry.version, persona_slug, "installed")
     return True
 
 
-def update_skills_json(persona_slug: str, skill_entry: SkillEntry) -> None:
+def update_skills_json(persona_slug: str, skill_entry: SkillEntry, locale: dict) -> None:
     """
     Create or update config/workspace/personas/{slug}/skills.json.
 
@@ -558,7 +560,7 @@ def update_skills_json(persona_slug: str, skill_entry: SkillEntry) -> None:
         try:
             manifest = parse_skills_json(skills_path)
         except (ValueError, KeyError):
-            print(f"[skill-writer] ERRO: skills.json corrompido em {skills_path}. Recriando.")
+            print(get_string(locale, "skills_json_corrupt", path=skills_path))
             manifest = SkillsManifest(
                 persona=persona_slug,
                 updated_at=datetime.now(timezone.utc).isoformat(),
@@ -669,7 +671,7 @@ def log_skill_event(
 # ---------------------------------------------------------------------------
 
 
-def run_persona_skills_flow(persona_description: str, persona_slug: str) -> None:
+def run_persona_skills_flow(persona_description: str, persona_slug: str, language: str = "en") -> None:
     """
     Full skill import flow for a persona.
 
@@ -684,39 +686,41 @@ def run_persona_skills_flow(persona_description: str, persona_slug: str) -> None
         persona_description: Natural-language description of what the persona needs.
         persona_slug: The persona's slug (used for skills.json path).
     """
+    locale = load_locale(language, skill_dir=Path(__file__).parent)
+
     cache_path = CACHE_BASE / "awesome-openclaw-skills"
     clone_or_update_repo(AWESOME_SKILLS_REPO, cache_path)
 
     skills = search_skills(persona_description, cache_path)
     if not skills:
-        print("Nenhuma skill encontrada para essa persona.")
+        print(get_string(locale, "no_skills_for_persona"))
         return
 
-    print(present_skills(skills))
+    print(present_skills(skills, locale))
 
-    approved_input = input("Números das skills para instalar (ex: 1,3) ou 'todas' ou 'nenhuma': ").strip()
-    if approved_input.lower() == "nenhuma":
-        print("Nenhuma skill instalada.")
+    approved_input = input(get_string(locale, "install_prompt")).strip()
+    if approved_input.lower() in ("none", "nenhuma"):
+        print(get_string(locale, "none_installed"))
         return
 
-    if approved_input.lower() == "todas":
+    if approved_input.lower() in ("all", "todas"):
         selected = skills
     else:
         try:
             indices = [int(i.strip()) - 1 for i in approved_input.split(",")]
             selected = [skills[i] for i in indices if 0 <= i < len(skills)]
         except (ValueError, IndexError):
-            print("Seleção inválida. Nenhuma skill instalada.")
+            print(get_string(locale, "invalid_selection"))
             return
 
     installed, failed = [], []
     for skill in selected:
-        ok = install_skill_for_persona(skill, persona_slug)
+        ok = install_skill_for_persona(skill, persona_slug, locale)
         (installed if ok else failed).append(skill.name)
 
-    print(f"\nInstaladas: {', '.join(installed) or 'nenhuma'}")
+    print(get_string(locale, "installed_label", names=", ".join(installed) or "-"))
     if failed:
-        print(f"Falharam/bloqueadas: {', '.join(failed)}")
+        print(get_string(locale, "failed_label", names=", ".join(failed)))
 
 
 # ---------------------------------------------------------------------------

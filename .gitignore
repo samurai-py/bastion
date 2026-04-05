@@ -246,3 +246,5 @@ ollama_data/
 v1_cache/
 docs/BLUEPRINT.md
 USER.md
+CLAUDE.md
+GEMINI.md
