@@ -25,11 +25,12 @@ services:
       - "127.0.0.1:18789:18789"
     volumes:
       - ./config:/home/node/.openclaw:rw
-      - ./skills:/home/node/.openclaw/workspace/app/skills:ro
-      - ./personas:/home/node/.openclaw/workspace/app/personas:rw
-      - ./SOUL.md:/home/node/.openclaw/workspace/app/SOUL.md:ro
-      - ./USER.md:/home/node/.openclaw/workspace/app/USER.md:rw
-      - ./AGENTS.md:/home/node/.openclaw/workspace/app/AGENTS.md:ro
+      - ./skills:/home/node/.openclaw/workspace/skills:ro
+      - ./personas:/home/node/.openclaw/workspace/personas:rw
+      - ./SOUL.md:/home/node/.openclaw/workspace/SOUL.md:ro
+      - ./USER.md:/home/node/.openclaw/workspace/USER.md:rw
+      - ./AGENTS.md:/home/node/.openclaw/workspace/AGENTS.md:ro
+      - ./HEARTBEAT.md:/home/node/.openclaw/workspace/HEARTBEAT.md:ro
       - tmp:/tmp:rw
     env_file: .env
     # ── Ollama Local Setup (Gemma2 27B) ──────────────────────────────

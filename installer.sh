@@ -224,11 +224,11 @@ if [ -f "docker-compose.yml" ]; then
   _ask "Confirma limpeza profunda? " clean_confirm
   if [[ "$clean_confirm" =~ ^[sS]$ ]]; then
     step "Limpando instalação anterior..."
-    # Mata os containers e remove os volumes
     docker compose down -v --remove-orphans 2>/dev/null || true
-    # Usa o docker para recuperar a posse de pastas protegidas e apagá-las
-    info "Corrigindo permissões para deleção..."
-    docker run --rm -v "$(pwd):/app" alpine sh -c "chown -R $(id -u):$(id -g) /app/config && rm -rf /app/config /app/.env"
+    # Limpar config gerado pelo OpenClaw (preserva repo root)
+    info "Removendo configuração antiga..."
+    docker run --rm -v "$(pwd):/app" alpine sh -c \
+      "chown -R $(id -u):$(id -g) /app/config 2>/dev/null; rm -rf /app/config /app/.env"
     success "Limpeza concluída."
   else
     docker compose down --remove-orphans 2>/dev/null || true
@@ -475,41 +475,43 @@ WA_URL=$(_env_get "WHATSAPP_API_URL")
 WA_KEY=$(_env_get "WHATSAPP_API_KEY")
 WA_NUMBER=$(_env_get "WHATSAPP_NUMBER")
 
-# Construir seção de channels dinamicamente (usando um separador temporário)
-CHANNELS_LIST=""
+# Construir seção de channels dinamicamente
+CHANNEL_ENTRIES=()
 
 if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
-  TELEGRAM_ALLOW=""
-  [ -n "$TELEGRAM_USER_ID" ] && TELEGRAM_ALLOW=", \"allowFrom\": [\"${TELEGRAM_USER_ID}\"]"
-  CHANNELS_LIST="${CHANNELS_LIST}---
-    \"telegram\": { \"enabled\": true${TELEGRAM_ALLOW}, \"dmPolicy\": \"allowlist\" }"
+  TG_ENTRY="\"telegram\": { \"enabled\": true, \"botToken\": \"${TELEGRAM_BOT_TOKEN}\", \"dmPolicy\": \"allowlist\""
+  [ -n "$TELEGRAM_USER_ID" ] && TG_ENTRY="${TG_ENTRY}, \"allowFrom\": [\"tg:${TELEGRAM_USER_ID}\"]"
+  CHANNEL_ENTRIES+=("    ${TG_ENTRY} }")
 fi
 
 if [ -n "$DISCORD_BOT_TOKEN" ]; then
-  DISCORD_ALLOW=""
-  [ -n "$DISCORD_USER_ID" ] && DISCORD_ALLOW=", \"allowFrom\": [\"${DISCORD_USER_ID}\"]"
-  CHANNELS_LIST="${CHANNELS_LIST}---
-    \"discord\": { \"enabled\": true${DISCORD_ALLOW}, \"dmPolicy\": \"allowlist\" }"
+  DC_ENTRY="\"discord\": { \"enabled\": true, \"token\": \"${DISCORD_BOT_TOKEN}\", \"dmPolicy\": \"allowlist\""
+  [ -n "$DISCORD_USER_ID" ] && DC_ENTRY="${DC_ENTRY}, \"allowFrom\": [\"${DISCORD_USER_ID}\"]"
+  CHANNEL_ENTRIES+=("    ${DC_ENTRY} }")
 fi
 
 if [ -n "$SLACK_BOT_TOKEN" ]; then
-  SLACK_ALLOW=""
-  [ -n "$SLACK_USER_ID" ] && SLACK_ALLOW=", \"allowFrom\": [\"${SLACK_USER_ID}\"]"
-  CHANNELS_LIST="${CHANNELS_LIST}---
-    \"slack\": { \"enabled\": true${SLACK_ALLOW}, \"dmPolicy\": \"allowlist\" }"
+  SL_ENTRY="\"slack\": { \"enabled\": true, \"botToken\": \"${SLACK_BOT_TOKEN}\", \"dmPolicy\": \"allowlist\""
+  [ -n "$SLACK_USER_ID" ] && SL_ENTRY="${SL_ENTRY}, \"allowFrom\": [\"${SLACK_USER_ID}\"]"
+  CHANNEL_ENTRIES+=("    ${SL_ENTRY} }")
 fi
 
 if [ -n "$WA_URL" ] && [ -n "$WA_KEY" ]; then
-  CHANNELS_LIST="${CHANNELS_LIST}---
-    \"whatsapp\": { \"enabled\": true, \"apiUrl\": \"${WA_URL}\", \"apiKey\": \"${WA_KEY}\", \"allowFrom\": [\"${WA_NUMBER}\"], \"dmPolicy\": \"allowlist\" }"
+  WA_ENTRY="\"whatsapp\": { \"enabled\": true, \"apiUrl\": \"${WA_URL}\", \"apiKey\": \"${WA_KEY}\", \"dmPolicy\": \"allowlist\""
+  [ -n "$WA_NUMBER" ] && WA_ENTRY="${WA_ENTRY}, \"allowFrom\": [\"+${WA_NUMBER}\"]"
+  CHANNEL_ENTRIES+=("    ${WA_ENTRY} }")
 fi
 
-# Unir a lista usando vírgulas (usando python para garantir JSON limpo)
-if [ -n "$CHANNELS_LIST" ]; then
-  CHANNELS_CONFIG=$(echo "$CHANNELS_LIST" | python3 -c "import sys; parts = [p.strip() for p in sys.stdin.read().split('---') if p.strip()]; print(',\n'.join(parts))")
+# Montar seção channels com vírgulas entre entradas
+if [ ${#CHANNEL_ENTRIES[@]} -gt 0 ]; then
+  CHANNELS_BODY=""
+  for i in "${!CHANNEL_ENTRIES[@]}"; do
+    [ "$i" -gt 0 ] && CHANNELS_BODY="${CHANNELS_BODY},"$'\n'
+    CHANNELS_BODY="${CHANNELS_BODY}${CHANNEL_ENTRIES[$i]}"
+  done
   CHANNELS_SECTION=",
   \"channels\": {
-    ${CHANNELS_CONFIG}
+${CHANNELS_BODY}
   }"
 else
   CHANNELS_SECTION=""
@@ -531,6 +533,14 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
     "mode": "local",
     "auth": { "mode": "none" }
   }${CHANNELS_SECTION},
+  "skills": [
+    "samurai-py/google-search",
+    "samurai-py/whisper-audio",
+    "samurai-py/clawguard-juugaan",
+    "samurai-py/maton-gateway",
+    "clawhub/unsplash",
+    "clawhub/pexels"
+  ],
   "models": {
     "mode": "merge",
     "providers": {
@@ -558,25 +568,20 @@ EOF
 
 success "OpenClaw configurado com ${MODEL_NAME}"
 
-# ── 8. Preparar Workspace e Sincronizar Contexto do Bastion ──────
-step "Preparando workspace do Bastion..."
+# ── 8. Preparar USER.md e diretórios necessários ────────────────
+step "Preparando ambiente..."
 
-# Criar diretórios necessários
-mkdir -p "$INSTALL_DIR/personas" "$INSTALL_DIR/tmp"
-chmod 1777 "$INSTALL_DIR/tmp"
+# Criar diretório de config (OpenClaw espera que exista)
+mkdir -p "$INSTALL_DIR/config"
 
-# Corrigir permissões do config para o usuário do container
-docker run --rm -v "$INSTALL_DIR/config:/data" alpine chown -R 1000:1000 /data 2>/dev/null || true
-
-# Pré-autorizar o user_id no USER.md (respeitando AGENTS.md)
+# Pré-autorizar o user_id no USER.md (repo root, bind-mounted no container)
 PRIMARY_CHANNEL=$(_env_get "PRIMARY_CHANNEL")
 USER_ID=""
-
 case "$PRIMARY_CHANNEL" in
   telegram) USER_ID=$(_env_get "TELEGRAM_USER_ID") ;;
   whatsapp) USER_ID=$(_env_get "WHATSAPP_NUMBER") ;;
-  discord) USER_ID=$(_env_get "DISCORD_USER_ID") ;;
-  slack) USER_ID=$(_env_get "SLACK_USER_ID") ;;
+  discord)  USER_ID=$(_env_get "DISCORD_USER_ID") ;;
+  slack)    USER_ID=$(_env_get "SLACK_USER_ID") ;;
 esac
 
 if [ -n "$USER_ID" ]; then
@@ -596,15 +601,7 @@ EOF
   success "User ID ${USER_ID} pré-autorizado no USER.md."
 fi
 
-# Sincronizar arquivos do Bastion para o workspace do OpenClaw
-WORKSPACE_DIR="$INSTALL_DIR/config/workspace"
-mkdir -p "$WORKSPACE_DIR"
-
-for f in SOUL.md USER.md AGENTS.md HEARTBEAT.md; do
-  [ -f "$INSTALL_DIR/$f" ] && cp "$INSTALL_DIR/$f" "$WORKSPACE_DIR/$f"
-done
-
-success "Contexto do Bastion sincronizado com OpenClaw."
+success "Ambiente preparado."
 
 # ── 9. Iniciar Bastion com Healthcheck ──────────────────────────
 step "Iniciando Bastion..."
@@ -687,34 +684,42 @@ else
   fi
 fi
 
-# Verificar se o workspace foi criado
-if [ ! -d "$INSTALL_DIR/config/workspace" ]; then
-  error "Workspace não foi criado"
-  VALIDATION_FAILED=true
-else
-  # Verificar arquivos essenciais
-  for f in SOUL.md USER.md AGENTS.md; do
-    if [ ! -f "$INSTALL_DIR/config/workspace/$f" ]; then
-      warn "Arquivo $f não encontrado no workspace"
-      VALIDATION_FAILED=true
-    fi
-  done
-  
-  # Verificar se tem skills
-  if [ ! -d "$INSTALL_DIR/config/workspace/skills" ]; then
-    warn "Pasta skills não encontrada no workspace"
+# Verificar arquivos essenciais no repo root (fonte de verdade, bind-mounted)
+for f in SOUL.md USER.md AGENTS.md; do
+  if [ ! -f "$INSTALL_DIR/$f" ]; then
+    warn "Arquivo $f não encontrado"
     VALIDATION_FAILED=true
   fi
+done
+
+if [ ! -d "$INSTALL_DIR/skills" ]; then
+  warn "Pasta skills não encontrada"
+  VALIDATION_FAILED=true
 fi
 
 # Verificar se o container está rodando
-if docker ps --filter "name=openclaw" --format "{{.Status}}" | grep -q "Up"; then
+if docker ps --filter "name=bastion-openclaw" --format "{{.Status}}" | grep -q "Up"; then
   success "Container OpenClaw está rodando"
-  
+
+  # Verificar se os bind mounts estão corretos dentro do container
+  if docker exec bastion-openclaw test -f /home/node/.openclaw/workspace/SOUL.md; then
+    success "SOUL.md acessível no container"
+  else
+    warn "SOUL.md não encontrado dentro do container"
+    VALIDATION_FAILED=true
+  fi
+
+  if docker exec bastion-openclaw test -d /home/node/.openclaw/workspace/skills; then
+    success "Skills acessíveis no container"
+  else
+    warn "Pasta skills não encontrada dentro do container"
+    VALIDATION_FAILED=true
+  fi
+
   # Verificar se o Telegram conectou (se configurado)
   if [ -n "$(_env_get TELEGRAM_BOT_TOKEN)" ]; then
     sleep 3
-    if docker compose -f "$INSTALL_DIR/docker-compose.yml" logs openclaw 2>&1 | grep -q "starting provider (@"; then
+    if docker compose -f "$INSTALL_DIR/docker-compose.yml" logs openclaw 2>&1 | grep -q "starting provider"; then
       success "Telegram conectado com sucesso"
     else
       warn "Telegram pode não ter conectado. Verifique os logs."
