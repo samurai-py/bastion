@@ -68,6 +68,17 @@ Comportamento para mensagens não autorizadas:
 
 Grupos e canais não listados explicitamente em `authorized_user_ids` são tratados como não autorizados.
 
+## Scanner de Segurança — Sage
+
+O Bastion usa o plugin `@gendigital/sage-openclaw` como scanner de segurança oficial para todas as tool calls.
+
+O Sage intercepta toda `tool_call` via hook `before_tool_call` e:
+1. Bloqueia automaticamente tool calls suspeitas ou não autorizadas
+2. Registra o bloqueio com timestamp, ferramenta e motivo
+3. Reprovação do Sage em uma skill individual não aborta as demais instalações em andamento
+
+> **Nota:** O `samurai-py/clawguard-juugaan` foi substituído pelo Sage como scanner oficial.
+
 ## Política de Instalação de Skills do ClawHub
 
 Antes de instalar qualquer skill do ClawHub que **não** pertença à família `bastion/*`, verificar obrigatoriamente:

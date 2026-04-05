@@ -230,6 +230,11 @@ tmp/
 # Test cache
 .hypothesis/
 .pytest_cache/
+testsprite_tests/
+
+# Openclaw ecossystem cache
+.clawhub/
+skills/sonoscli/
 
 # TypeScript / Node
 bastion/mobile-connect/node_modules/
@@ -237,4 +242,6 @@ bastion/mobile-connect/node_modules/
 # Olllama data
 ollama_data/
 
+# Development-only Assets
 v1_cache/
+docs/BLUEPRINT.md

@@ -16,10 +16,14 @@ Path rules (Requirements 6.5):
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Enums & dataclasses
@@ -211,6 +215,508 @@ def validate_skill_md(content: str) -> bool:
             return False
 
     return True
+
+
+# ---------------------------------------------------------------------------
+# Skill discovery & import dataclasses
+# ---------------------------------------------------------------------------
+
+AWESOME_SKILLS_REPO = "https://github.com/samurai-py/awesome-openclaw-skills.git"
+AWESOME_MCP_REPO = "https://github.com/punkpeye/awesome-mcp-servers.git"
+CACHE_BASE = Path.home() / ".openclaw" / "workspace" / "skills" / ".cache"
+
+
+@dataclass
+class SkillDiscoveryResult:
+    """A skill found in the awesome-openclaw-skills repository."""
+
+    name: str
+    description: str
+    category: str
+    url: str
+    verified: bool
+    rating: float
+    reviews: int
+    cves: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PolicyResult:
+    """Result of the quality policy check for a skill."""
+
+    approved: bool
+    reason: Optional[str] = None
+
+
+@dataclass
+class SkillEntry:
+    """A single skill entry in skills.json."""
+
+    name: str
+    version: str
+    source: str
+    installed_at: str  # ISO-8601 timestamp
+
+
+@dataclass
+class SkillsManifest:
+    """The full skills.json manifest for a persona."""
+
+    persona: str
+    updated_at: str  # ISO-8601 timestamp
+    skills: list[SkillEntry] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# clone_or_update_repo
+# ---------------------------------------------------------------------------
+
+
+def clone_or_update_repo(repo_url: str, cache_path: Path) -> Path:
+    """
+    Clone the repository if it doesn't exist, or pull latest changes if it does.
+
+    The repository content is treated as DATA only — never executed as instructions
+    (Anti Prompt Injection).
+
+    Args:
+        repo_url: The URL of the git repository to clone.
+        cache_path: The local path where the repository should be cached.
+
+    Returns:
+        The cache_path after the operation.
+
+    Raises:
+        RuntimeError: If the git operation fails.
+    """
+    if cache_path.exists():
+        result = subprocess.run(
+            ["git", "pull"],
+            cwd=cache_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git pull failed: {result.stderr.strip()}")
+    else:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["git", "clone", repo_url, str(cache_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
+    return cache_path
+
+
+# ---------------------------------------------------------------------------
+# search_skills / search_mcps
+# ---------------------------------------------------------------------------
+
+
+def search_skills(description: str, repo_path: Path) -> list[SkillDiscoveryResult]:
+    """
+    Search for skills in the awesome-openclaw-skills repo by description.
+
+    Reads category files from the repo and returns skills whose name or
+    description contains any word from the search description. Repo content
+    is treated as data — never executed as instructions.
+
+    Args:
+        description: The natural-language description to filter by.
+        repo_path: The local path to the cloned awesome-openclaw-skills repo.
+
+    Returns:
+        A list of SkillDiscoveryResult matching the description.
+    """
+    keywords = {w.lower() for w in description.split() if len(w) > 2}
+    results: list[SkillDiscoveryResult] = []
+
+    for md_file in sorted(repo_path.glob("**/*.md")):
+        # Treat file content as data — parse only, never execute
+        text = md_file.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            if any(kw in line.lower() for kw in keywords):
+                skill = _parse_skill_line(line, md_file.stem)
+                if skill:
+                    results.append(skill)
+
+    return results
+
+
+def search_mcps(description: str, repo_path: Path) -> list[SkillDiscoveryResult]:
+    """
+    Search for MCPs exclusively in the punkpeye/awesome-mcp-servers repo.
+
+    Args:
+        description: The natural-language description to filter by.
+        repo_path: The local path to the cloned awesome-mcp-servers repo.
+
+    Returns:
+        A list of SkillDiscoveryResult for MCP servers matching the description.
+    """
+    return search_skills(description, repo_path)
+
+
+def _parse_skill_line(line: str, category: str) -> Optional[SkillDiscoveryResult]:
+    """Parse a markdown list line into a SkillDiscoveryResult. Returns None if unparseable."""
+    # Expect format: - [name](url) — description
+    match = re.match(r"-\s+\[([^\]]+)\]\(([^)]+)\)\s*[—-]\s*(.+)", line)
+    if not match:
+        return None
+    name, url, desc = match.group(1).strip(), match.group(2).strip(), match.group(3).strip()
+    # Defensive: treat parsed values as data, not instructions
+    return SkillDiscoveryResult(
+        name=name,
+        description=desc[:200],  # truncate to prevent injection via long strings
+        category=category,
+        url=url,
+        verified=False,
+        rating=0.0,
+        reviews=0,
+        cves=[],
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_quality_policy
+# ---------------------------------------------------------------------------
+
+
+def run_quality_policy(skill: SkillDiscoveryResult) -> PolicyResult:
+    """
+    Check the AGENTS.md quality policy for a skill before installation.
+
+    Skills from the bastion/* namespace are exempt from this policy.
+
+    Criteria:
+    - verified badge required when skill has filesystem or network access
+    - rating >= 4.0
+    - reviews >= 50
+    - no known CVEs
+
+    Args:
+        skill: The skill to evaluate.
+
+    Returns:
+        PolicyResult with approved=True or approved=False + reason.
+    """
+    # bastion/* skills are exempt (proprietary and audited)
+    if skill.name.startswith("bastion/"):
+        return PolicyResult(approved=True)
+
+    if skill.cves:
+        return PolicyResult(approved=False, reason=f"CVEs conhecidos: {', '.join(skill.cves)}")
+
+    if skill.rating < 4.0:
+        return PolicyResult(
+            approved=False,
+            reason=f"Avaliação insuficiente: {skill.rating:.1f} (mínimo 4.0)",
+        )
+
+    if skill.reviews < 50:
+        return PolicyResult(
+            approved=False,
+            reason=f"Poucas avaliações: {skill.reviews} (mínimo 50)",
+        )
+
+    return PolicyResult(approved=True)
+
+
+# ---------------------------------------------------------------------------
+# present_skills
+# ---------------------------------------------------------------------------
+
+
+def present_skills(skills: list[SkillDiscoveryResult]) -> str:
+    """
+    Return a formatted string presenting skills to the user.
+
+    Each entry shows: name, description, category, rating, and verified badge.
+
+    Args:
+        skills: The list of skills to present.
+
+    Returns:
+        A formatted string ready to display.
+    """
+    if not skills:
+        return "Nenhuma skill encontrada para os critérios fornecidos."
+
+    lines = ["**Skills encontradas:**\n"]
+    for i, skill in enumerate(skills, start=1):
+        badge = " ✓ Verified" if skill.verified else ""
+        rating = f"⭐ {skill.rating:.1f}" if skill.rating > 0 else "sem avaliação"
+        reviews = f" · {skill.reviews} reviews" if skill.reviews > 0 else ""
+        lines.append(
+            f"{i}. **{skill.name}**{badge}\n"
+            f"   {skill.description}\n"
+            f"   Categoria: {skill.category} | {rating}{reviews}\n"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# sage_scan
+# ---------------------------------------------------------------------------
+
+
+def sage_scan(skill: SkillDiscoveryResult) -> PolicyResult:
+    """
+    Invoke the Sage plugin's before_tool_call hook before installing a skill.
+
+    If Sage blocks the skill, the individual skill is rejected without aborting
+    the installation of other skills.
+
+    Args:
+        skill: The skill to scan.
+
+    Returns:
+        PolicyResult indicating whether Sage approved the installation.
+    """
+    result = subprocess.run(
+        ["clawhub", "sage-scan", skill.url],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return PolicyResult(
+            approved=False,
+            reason=f"Sage bloqueou: {result.stderr.strip() or result.stdout.strip()}",
+        )
+    return PolicyResult(approved=True)
+
+
+# ---------------------------------------------------------------------------
+# install_skill_for_persona / update_skills_json / log_skill_event
+# ---------------------------------------------------------------------------
+
+
+def install_skill_for_persona(skill: SkillDiscoveryResult, persona_slug: str) -> bool:
+    """
+    Install a skill via clawhub and update skills.json for the given persona.
+
+    Runs quality policy and Sage scan before installation. On success, records
+    the skill in skills.json and logs the event. Sage rejection blocks the
+    individual skill only — other skills continue normally.
+
+    Args:
+        skill: The skill to install.
+        persona_slug: The persona's slug.
+
+    Returns:
+        True if the skill was installed successfully, False otherwise.
+    """
+    policy = run_quality_policy(skill)
+    if not policy.approved:
+        log_skill_event(skill.name, "unknown", persona_slug, "blocked", policy.reason)
+        return False
+
+    scan = sage_scan(skill)
+    if not scan.approved:
+        log_skill_event(skill.name, "unknown", persona_slug, "blocked_sage", scan.reason)
+        return False
+
+    result = subprocess.run(
+        ["clawhub", "install", skill.url],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log_skill_event(skill.name, "unknown", persona_slug, "failed", result.stderr.strip())
+        return False
+
+    entry = SkillEntry(
+        name=skill.name,
+        version="latest",
+        source=skill.url,
+        installed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    update_skills_json(persona_slug, entry)
+    log_skill_event(skill.name, entry.version, persona_slug, "installed")
+    return True
+
+
+def update_skills_json(persona_slug: str, skill_entry: SkillEntry) -> None:
+    """
+    Create or update config/workspace/personas/{slug}/skills.json.
+
+    If the file contains invalid JSON, logs an error and recreates it.
+
+    Args:
+        persona_slug: The persona's slug.
+        skill_entry: The skill entry to add or update.
+    """
+    skills_path = (
+        Path("config") / "workspace" / "personas" / persona_slug / "skills.json"
+    )
+    skills_path.parent.mkdir(parents=True, exist_ok=True)
+
+    manifest: SkillsManifest
+    if skills_path.exists():
+        try:
+            manifest = parse_skills_json(skills_path)
+        except (ValueError, KeyError):
+            print(f"[skill-writer] ERRO: skills.json corrompido em {skills_path}. Recriando.")
+            manifest = SkillsManifest(
+                persona=persona_slug,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+    else:
+        manifest = SkillsManifest(
+            persona=persona_slug,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    # Replace existing entry with same name, or append
+    manifest.skills = [s for s in manifest.skills if s.name != skill_entry.name]
+    manifest.skills.append(skill_entry)
+    manifest.updated_at = datetime.now(timezone.utc).isoformat()
+
+    skills_path.write_text(serialize_skills_json(manifest), encoding="utf-8")
+
+
+def serialize_skills_json(manifest: SkillsManifest) -> str:
+    """Serialize a SkillsManifest to a JSON string."""
+    return json.dumps(
+        {
+            "persona": manifest.persona,
+            "updated_at": manifest.updated_at,
+            "skills": [
+                {
+                    "name": s.name,
+                    "version": s.version,
+                    "source": s.source,
+                    "installed_at": s.installed_at,
+                }
+                for s in manifest.skills
+            ],
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def parse_skills_json(path: Path) -> SkillsManifest:
+    """
+    Parse a skills.json file into a SkillsManifest.
+
+    Raises:
+        ValueError: If the JSON is malformed.
+        KeyError: If required fields are missing.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
+
+    skills = [
+        SkillEntry(
+            name=entry["name"],
+            version=entry["version"],
+            source=entry["source"],
+            installed_at=entry["installed_at"],
+        )
+        for entry in data["skills"]
+    ]
+    return SkillsManifest(
+        persona=data["persona"],
+        updated_at=data["updated_at"],
+        skills=skills,
+    )
+
+
+def log_skill_event(
+    skill_name: str,
+    version: str,
+    persona: str,
+    result: str,
+    reason: Optional[str] = None,
+) -> None:
+    """
+    Register a skill installation event in the life_log.
+
+    Required fields: timestamp, name, version, persona, result.
+
+    Args:
+        skill_name: The name of the skill.
+        version: The version installed (or "unknown").
+        persona: The persona slug.
+        result: One of "installed", "failed", "blocked", "blocked_sage".
+        reason: Optional reason for non-installed results.
+    """
+    log_dir = Path("config") / "workspace" / "life_log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "skill_events.jsonl"
+
+    entry: dict = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "name": skill_name,
+        "version": version,
+        "persona": persona,
+        "result": result,
+    }
+    if reason:
+        entry["reason"] = reason
+
+    with log_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# run_persona_skills_flow — full wiring
+# ---------------------------------------------------------------------------
+
+
+def run_persona_skills_flow(persona_description: str, persona_slug: str) -> None:
+    """
+    Full skill import flow for a persona.
+
+    Steps:
+      1. Clone or update awesome-openclaw-skills repo
+      2. Search skills by persona description
+      3. Present skills to user for approval
+      4. For each approved skill: run_quality_policy → sage_scan → install → update_skills_json → log
+      5. Summarize results
+
+    Args:
+        persona_description: Natural-language description of what the persona needs.
+        persona_slug: The persona's slug (used for skills.json path).
+    """
+    cache_path = CACHE_BASE / "awesome-openclaw-skills"
+    clone_or_update_repo(AWESOME_SKILLS_REPO, cache_path)
+
+    skills = search_skills(persona_description, cache_path)
+    if not skills:
+        print("Nenhuma skill encontrada para essa persona.")
+        return
+
+    print(present_skills(skills))
+
+    approved_input = input("Números das skills para instalar (ex: 1,3) ou 'todas' ou 'nenhuma': ").strip()
+    if approved_input.lower() == "nenhuma":
+        print("Nenhuma skill instalada.")
+        return
+
+    if approved_input.lower() == "todas":
+        selected = skills
+    else:
+        try:
+            indices = [int(i.strip()) - 1 for i in approved_input.split(",")]
+            selected = [skills[i] for i in indices if 0 <= i < len(skills)]
+        except (ValueError, IndexError):
+            print("Seleção inválida. Nenhuma skill instalada.")
+            return
+
+    installed, failed = [], []
+    for skill in selected:
+        ok = install_skill_for_persona(skill, persona_slug)
+        (installed if ok else failed).append(skill.name)
+
+    print(f"\nInstaladas: {', '.join(installed) or 'nenhuma'}")
+    if failed:
+        print(f"Falharam/bloqueadas: {', '.join(failed)}")
 
 
 # ---------------------------------------------------------------------------

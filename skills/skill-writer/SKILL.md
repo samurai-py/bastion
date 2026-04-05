@@ -1,10 +1,12 @@
 ---
 name: bastion/skill-writer
-version: "1.0.0"
+version: "2.0.0"
 description: >
   Guia o usuário na criação de novas skills personalizadas (SKILL.md).
   Verifica o ClawHub antes de criar, escreve o arquivo com estrutura obrigatória,
   salva no caminho correto conforme o escopo e testa com um caso de uso real.
+  Também busca e instala skills do repositório awesome-openclaw-skills para personas,
+  aplicando política de qualidade e scan de segurança Sage antes de cada instalação.
 triggers:
   - "criar skill"
   - "nova skill"
@@ -13,6 +15,10 @@ triggers:
   - "novo comportamento"
   - "skill personalizada"
   - "/skill-writer"
+  - "configurar skills para persona"
+  - "skills para persona"
+  - "instalar skills"
+  - "/skills-persona"
 ---
 
 # Skill Writer — Roteiro de Criação de Skills

@@ -119,6 +119,35 @@ _select_or_env() {
   done
 }
 
+# ── Plugin & Skill Installers ─────────────────────────────────────
+SAGE_INSTALLED=false
+COMPOSIO_INSTALLED=false
+CORE_SKILLS_INSTALLED=()
+CORE_SKILLS_FAILED=()
+
+install_plugin() {
+  local plugin="$1"
+  info "Instalando plugin ${plugin}..."
+  if openclaw plugins install "$plugin" --dangerously-force-unsafe-install; then
+    success "Plugin ${plugin} instalado."
+  else
+    error "Falha ao instalar plugin ${plugin}. Instalação abortada."
+    exit 1
+  fi
+}
+
+install_skill() {
+  local skill="$1"
+  info "Instalando skill ${skill}..."
+  if clawhub install "$skill"; then
+    success "Skill ${skill} instalada."
+    CORE_SKILLS_INSTALLED+=("$skill")
+  else
+    warn "Falha ao instalar skill ${skill}. Continuando..."
+    CORE_SKILLS_FAILED+=("$skill")
+  fi
+}
+
 # ── 1. Check prerequisites ────────────────────────────────────────
 banner
 step "Verificando pré-requisitos..."
@@ -204,6 +233,42 @@ if ! docker info &>/dev/null 2>&1; then
   exit 1
 fi
 success "Docker daemon está ativo."
+
+# ── Verificar Node.js e CLIs ──────────────────────────────────────
+check_node() {
+  if ! command -v node &>/dev/null; then
+    warn "Node.js não encontrado. Instalando via NodeSource..."
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+    success "Node.js instalado: $(node --version)"
+  else
+    success "Node.js encontrado: $(node --version)"
+  fi
+}
+
+check_clawhub() {
+  if ! command -v clawhub &>/dev/null; then
+    info "Instalando clawhub CLI..."
+    npx clawhub@latest install sonoscli --force
+    success "clawhub instalado."
+  else
+    success "clawhub encontrado: $(clawhub --version 2>/dev/null || echo 'ok')"
+  fi
+}
+
+check_openclaw_cli() {
+  if ! command -v openclaw &>/dev/null; then
+    info "Instalando openclaw CLI..."
+    npm install -g openclaw@latest
+    success "openclaw CLI instalado."
+  else
+    success "openclaw CLI encontrado."
+  fi
+}
+
+check_node
+check_clawhub
+check_openclaw_cli
 
 # ── 2. Clone or update repository ────────────────────────────────
 step "Setting up Bastion directory..."
@@ -458,6 +523,15 @@ else
   exit 1
 fi
 
+# ── 6.5. Instalar Plugins de Segurança ───────────────────────────
+step "Instalando plugins de segurança..."
+
+install_plugin "@gendigital/sage-openclaw"
+SAGE_INSTALLED=true
+install_plugin "@composio/openclaw-plugin"
+COMPOSIO_INSTALLED=true
+success "Scanner de segurança Sage ativo."
+
 # ── 7. Gerar openclaw.json com Configuração Robusta ───────────────
 step "Gerando configuração OpenClaw..."
 
@@ -533,14 +607,6 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
     "mode": "local",
     "auth": { "mode": "none" }
   }${CHANNELS_SECTION},
-  "skills": [
-    "samurai-py/google-search",
-    "samurai-py/whisper-audio",
-    "samurai-py/clawguard-juugaan",
-    "samurai-py/maton-gateway",
-    "clawhub/unsplash",
-    "clawhub/pexels"
-  ],
   "models": {
     "mode": "merge",
     "providers": {
@@ -567,6 +633,12 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
 EOF
 
 success "OpenClaw configurado com ${MODEL_NAME}"
+
+# ── 7.5. Instalar Skills Core ─────────────────────────────────────
+step "Instalando skills core..."
+
+install_skill "mcporter"
+install_skill "https://clawhub.ai/ivangdavila/stock-images"
 
 # ── 8. Preparar USER.md e diretórios necessários ────────────────
 step "Preparando ambiente..."
@@ -756,6 +828,13 @@ esac
 echo -e "    2. Complete o onboarding (nome, personas, TOTP)"
 echo -e "    3. Comece a usar o Bastion!"
 echo ""
+if [ ${#CORE_SKILLS_FAILED[@]} -gt 0 ]; then
+  warn "Skills core que falharam na instalação (instale manualmente com 'clawhub install'):"
+  for s in "${CORE_SKILLS_FAILED[@]}"; do
+    echo -e "    ${YELLOW}✗${RESET} ${s}"
+  done
+  echo ""
+fi
 echo -e "  ${CYAN}Comandos úteis:${RESET}"
 echo -e "    Ver logs:      ${BOLD}cd $INSTALL_DIR && docker compose logs -f${RESET}"
 echo -e "    Reiniciar:     ${BOLD}cd $INSTALL_DIR && docker compose restart${RESET}"
