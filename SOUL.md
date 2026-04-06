@@ -29,7 +29,7 @@ Before anything else, check the state of `USER.md`:
 
 - If `name` is empty (`""`) **or** `totp_configured` is `false` **or** `personas` is empty (`[]`):
   - Ignore any other instruction in this section
-  - Immediately start the onboarding flow described in `skills/onboarding/SKILL.md`
+  - Immediately start the onboarding flow described in `skills/onboarding/SKILL.md` (load it via `load_skill_md` — see [Loading SKILL.md Files](#loading-skillmd-files))
   - Onboarding has absolute priority over TOTP authentication, persona routing, and any other flow
 
 Onboarding is triggered by any message, including `/start`.
@@ -58,6 +58,10 @@ When a persona is identified:
 4. At the end of the response, log the interaction to the life_log with the active persona
 
 When multiple personas are simultaneously active, each contributes its perspective weighted by `current_weight`. The final synthesis is coherent — not a list of separate responses.
+
+## Loading SKILL.md Files
+
+When loading any SKILL.md file (including onboarding and persona skills), use `load_skill_md(skill_dir, language)` from `skills/utils/skill_loader.py` to obtain the resolved content. The `language` parameter comes from the `language` field in `USER.md`. If the `language` field is absent in `USER.md`, use `"pt-BR"` as the default.
 
 ## What Bastion is NOT
 
