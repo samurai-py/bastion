@@ -1,136 +1,68 @@
 # 🏰 Bastion
 
-Seu assistente pessoal de IA, rodando 100% no seu computador ou servidor. O Bastion aprende como você trabalha, se adapta às diferentes áreas da sua vida e te ajuda a manter o foco no que importa — sem compartilhar seus dados com ninguém.
+> Self-hosted, privacy-first AI agent. Your personal Life OS — running entirely on your own machine.
 
-## O que é?
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Agente de IA self-hosted construído sobre o [OpenClaw](https://openclaw.ai). Funciona com **personas** — perfis de comportamento para cada área da sua vida (trabalho, estudos, projetos pessoais). O Bastion detecta automaticamente qual persona usar com base no contexto.
-
-Seus dados ficam 100% com você. Nada vai para servidores externos além das chamadas ao LLM que você escolher.
+**[Português](docs/pt-br/README.md)** · **[English](docs/en/README.md)**
 
 ---
 
-## Instalação
+Bastion is a self-hosted AI orchestrator built on [OpenClaw](https://openclaw.ai). It connects to the messaging apps you already use (Telegram, WhatsApp, Discord, Slack), routes conversations through the LLM provider of your choice, and organizes your life through **personas** — behavioral profiles for each area of your life.
 
-### TL;DR
+Your data never leaves your machine. No subscriptions. No cloud lock-in.
+
+## Quick Start
 
 ```bash
 bash <(curl -fsSL https://bastion.run/install)
 ```
 
-Siga o wizard e pronto. Leva 5 minutos.
+Takes 5 minutes. You'll need Docker and an LLM API key (OpenRouter has free models).
 
-### Pré-requisitos
+## How It Works
 
-- **Docker** ([instalar](https://docs.docker.com/get-docker/))
-- **API key de LLM** (pelo menos uma):
-  - [OpenRouter](https://openrouter.ai/keys) — recomendado, tem modelos gratuitos
-  - [Groq](https://console.groq.com) — gratuito, rápido
-  - [Google Gemini](https://aistudio.google.com/app/apikey) — gratuito
-  - [Anthropic](https://console.anthropic.com) — pago, melhor qualidade
-  - [OpenAI](https://platform.openai.com/api-keys) — pago, popular
-- **Canal de mensagens** (pelo menos um):
-  - Bot do Telegram (via [@BotFather](https://t.me/BotFather))
-  - Evolution API para WhatsApp
-  - Bot do Discord
-  - App do Slack
+Bastion uses **personas** — each one is a specialized agent for a different area of your life (work, health, business, studies). When you send a message, Bastion automatically detects which persona should respond based on context and keywords.
 
-### Instalação Interativa
+Each persona has its own memory, tone, and set of skills. They share a common life-log for cross-context recall.
 
-```bash
-bash <(curl -fsSL https://bastion.run/install)
-```
+## Key Features
 
-O instalador vai perguntar:
-1. Qual LLM usar (recomendamos OpenRouter com modelos gratuitos)
-2. Qual canal configurar (Telegram é o mais fácil)
-3. Suas credenciais (API keys, tokens)
+- **Persona system** — separate agents per life area, with dynamic weight-based routing
+- **Life-log** — semantic memory with vector search (RAG) across all interactions
+- **Crisis mode** — emergency replanning algorithm that frees up Deep Work time
+- **Mobile app** — self-hosted iOS/Android app with secure JWT pairing
+- **Skill system** — extensible via bundled skills and the ClawHub marketplace
+- **TOTP auth** — every session requires a 6-digit code from your authenticator app
+- **Anti-injection** — all external content treated as data, never as instructions
 
-Depois disso, ele:
-- Verifica/instala Docker se necessário
-- Gera todas as configurações automaticamente
-- Inicia o Bastion
+## Stack
 
-### Instalação Automatizada (CI/CD)
+- **Runtime**: OpenClaw (Node.js) + Docker + Caddy
+- **Skills**: Python 3 with Hypothesis property-based testing
+- **Mobile plugin**: TypeScript + Express + fast-check
+- **Memory**: SQLite with vector search (sqlite-vec)
+- **Security**: Sage plugin, TOTP, JWT, user allowlist
 
-```bash
-export BASTION_WIZARD=false
-export OPENROUTER_API_KEY="sk-or-v1-..."
-export OPENROUTER_MODEL="openai/gpt-oss-20b:free"
-export TELEGRAM_BOT_TOKEN="123456:ABC..."
-export TELEGRAM_USER_ID="987654321"
+## Documentation
 
-bash <(curl -fsSL https://bastion.run/install)
-```
+- 🇧🇷 [Documentação em Português](docs/pt-br/README.md)
+- 🇺🇸 [English Documentation](docs/en/README.md)
+- 📐 [Architecture Blueprint](docs/BLUEPRINT.md)
 
-Veja todas as variáveis suportadas em [docs/installer-guide.md](docs/installer-guide.md).
+## Roadmap
 
-### Instalação Manual
+| Status | Milestone |
+|--------|-----------|
+| ✅ | Bastion v1 — initial release |
+| ✅ | Bastion v2 — OpenClaw-based, mobile app, RAG, PBT |
+| 🔜 | Self-hosted mobile app (APK/IPA distribution) |
+| 🔜 | Token cost optimization and local LLM support |
+| 🔜 | Container isolation ([NanoClaw](https://github.com/qwibitai/nanoclaw)-inspired sandboxing) |
+| 🔜 | Installer improvements and self-hosted LLM automation |
+| 🔮 | Bastion v3 — [ZeroClaw](https://github.com/openagen/zeroclaw) Rust core + [memU](https://github.com/NevaMind-AI/memUBot) memory system |
+| 🔮 | Bastion Cloud — managed deployment for non-technical users |
 
-Se preferir configurar na mão:
+## License
 
-```bash
-git clone https://github.com/samurai-py/bastion.git
-cd bastion
-cp .env.example .env
-nano .env  # preencha suas chaves
-docker compose up -d
-```
-
----
-
-## Primeiros Passos
-
-1. Envie `/start` para seu bot no canal configurado
-2. Complete o onboarding (nome, personas, TOTP)
-3. Comece a usar!
-
-O Bastion vai criar suas personas automaticamente com base no que você faz. Depois disso, é só conversar normalmente — ele detecta o contexto e responde com a persona certa.
-
----
-
-## Troubleshooting
-
-### Docker não encontrado
-
-O instalador oferece instalação automática. Se recusar:
-- **Linux:** `curl -fsSL https://get.docker.com | sh`
-- **macOS/Windows:** [Docker Desktop](https://docs.docker.com/get-docker/)
-
-### Bot não responde
-
-```bash
-cd ~/bastion
-docker compose logs -f
-```
-
-Verifique se:
-- O container está rodando: `docker ps`
-- Seu user_id está correto: `grep authorized_user_ids USER.md`
-- Para Telegram, obtenha seu ID com [@userinfobot](https://t.me/userinfobot)
-
-### Reconfigurar do zero
-
-```bash
-cd ~/bastion
-docker compose down -v
-rm -rf config/
-bash installer.sh
-```
-
----
-
-## Documentação
-
-- [Guia do Instalador](docs/installer-guide.md) — referência técnica completa
-- [VPS Setup](docs/vps-setup.md) — subir numa VPS do zero
-- [Segurança](docs/security.md) — guardrails e autenticação
-- [Personas](docs/personas.md) — como funcionam
-- [Modo Crise](docs/crisis-mode.md) — replanejamento automático
-- [FAQ](docs/faq.md) — perguntas frequentes
-
----
-
-## Licença
-
-MIT
+MIT — see [LICENSE](LICENSE).
