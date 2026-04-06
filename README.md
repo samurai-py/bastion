@@ -18,7 +18,9 @@ Your data never leaves your machine. No subscriptions. No cloud lock-in.
 bash <(curl -fsSL https://bastion.run/install)
 ```
 
-Takes 5 minutes. You'll need Docker and an LLM API key (OpenRouter has free models).
+Takes 5 minutes. You'll need Docker and two API keys:
+- **LLM** — OpenRouter, Anthropic, OpenAI, Gemini, or Groq (OpenRouter has free models)
+- **[Composio](https://composio.dev)** — for external integrations (Google Calendar, Notion, GitHub, etc.)
 
 ## How It Works
 

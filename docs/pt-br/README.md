@@ -18,7 +18,9 @@ Seus dados ficam 100% com você. Nada vai para servidores externos além das cha
 bash <(curl -fsSL https://bastion.run/install)
 ```
 
-Siga o wizard e pronto. Leva 5 minutos.
+Siga o wizard e pronto. Leva 5 minutos. Você vai precisar do Docker e de duas API keys:
+- **LLM** — OpenRouter, Anthropic, OpenAI, Gemini ou Groq (OpenRouter tem modelos gratuitos)
+- **[Composio](https://composio.dev)** — para integrações externas (Google Calendar, Notion, GitHub, etc.)
 
 ### Pré-requisitos
 

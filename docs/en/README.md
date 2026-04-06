@@ -18,7 +18,9 @@ Your data stays 100% with you. Nothing goes to external servers except the LLM A
 bash <(curl -fsSL https://bastion.run/install)
 ```
 
-Follow the wizard and you're done. Takes 5 minutes.
+Follow the wizard and you're done. Takes 5 minutes. You'll need Docker and two API keys:
+- **LLM** — OpenRouter, Anthropic, OpenAI, Gemini, or Groq (OpenRouter has free models)
+- **[Composio](https://composio.dev)** — for external integrations (Google Calendar, Notion, GitHub, etc.)
 
 ### Prerequisites
 
