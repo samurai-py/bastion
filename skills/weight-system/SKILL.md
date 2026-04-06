@@ -2,41 +2,41 @@
 name: bastion/weight-system
 version: 1.0.0
 description: >
-  Calcula a prioridade dinâmica de personas e gerencia ajustes de peso
-  (current_weight). Persiste mudanças em USER.md e registra histórico
-  com timestamp e justificativa em personas/{slug}/weight-history.md.
+  Calculates dynamic persona priority and manages weight adjustments
+  (current_weight). Persists changes in USER.md and records history
+  with timestamp and justification in personas/{slug}/weight-history.md.
 triggers:
-  - chamada interna do bastion/crisis-mode ao aplicar crisis boost
-  - chamada interna do bastion/weekly-review ao sugerir ajustes de peso
-  - chamada interna do bastion/self-improving ao registrar promoções/decaimentos
-  - usuário solicita explicitamente ajustar o peso de uma persona
-  - HEARTBEAT executa a tarefa semanal de revisão de pesos
+  - internal call from bastion/crisis-mode when applying crisis boost
+  - internal call from bastion/weekly-review when suggesting weight adjustments
+  - internal call from bastion/self-improving when recording promotions/decays
+  - user explicitly requests to adjust a persona's weight
+  - HEARTBEAT executes weekly weight review task
 ---
 
 # Skill: bastion/weight-system
 
-## Objetivo
+## Objective
 
-Gerenciar o sistema de pesos dinâmicos das personas do Bastion:
+Manage Bastion's dynamic persona weight system:
 
-1. **Calcular prioridade** de uma persona dado o contexto atual (deep work, deadline)
-2. **Ajustar current_weight** de forma persistida e auditável
-3. **Registrar histórico** de todas as mudanças com timestamp e justificativa
+1. **Calculate priority** of a persona given current context (deep work, deadline)
+2. **Adjust current_weight** in a persisted and auditable way
+3. **Record history** of all changes with timestamp and justification
 
 ---
 
-## Conceitos
+## Concepts
 
 ### base_weight vs current_weight
 
-| Campo | Descrição | Quando muda |
+| Field | Description | When it changes |
 |---|---|---|
-| `base_weight` | Peso fixo definido na criação da persona (0.0–1.0) | Raramente — apenas por edição explícita do usuário |
-| `current_weight` | Peso dinâmico atual (0.0–1.0) | Crises, revisões semanais, aprendizados, ajustes manuais |
+| `base_weight` | Fixed weight defined at persona creation (0.0–1.0) | Rarely — only by explicit user edit |
+| `current_weight` | Current dynamic weight (0.0–1.0) | Crises, weekly reviews, learnings, manual adjustments |
 
-O `current_weight` é o valor usado em todos os cálculos de prioridade e matching.
+`current_weight` is the value used in all priority and matching calculations.
 
-### Fórmula de Prioridade
+### Priority Formula
 
 ```
 priority = current_weight
@@ -47,11 +47,11 @@ priority = current_weight
          + 0.05 × (deadline ≤ 48h)
 ```
 
-O resultado é sempre clamped em **[0.0, 1.0]**.
+Result is always clamped to **[0.0, 1.0]**.
 
-Os bônus de deadline são **aditivos** — um deadline de 3h acumula os bônus de ≤4h, ≤12h, ≤24h e ≤48h simultaneamente.
+Deadline bonuses are **additive** — a 3h deadline accumulates bonuses for ≤4h, ≤12h, ≤24h and ≤48h simultaneously.
 
-**Exemplos:**
+**Examples:**
 
 | current_weight | deep_work | deadline | priority |
 |---|---|---|---|
@@ -63,73 +63,73 @@ Os bônus de deadline são **aditivos** — um deadline de 3h acumula os bônus 
 
 ---
 
-## Quando Este Skill é Acionado
+## When This Skill is Triggered
 
 ### 1. Crisis Boost (bastion/crisis-mode)
 
-Quando o `crisis-mode` detecta uma crise e identifica a persona afetada:
+When `crisis-mode` detects a crisis and identifies affected persona:
 
 ```
 adjust_weight(
-    persona_slug=<slug da persona em crise>,
+    persona_slug=<crisis persona slug>,
     delta=+0.3,
-    justification="Crisis boost: <descrição da crise>",
+    justification="Crisis boost: <crisis description>",
     persistence=UserMdAdapter(...)
 )
 ```
 
-O clamp garante que o resultado nunca ultrapasse 1.0.
+Clamp ensures result never exceeds 1.0.
 
 ---
 
-### 2. Revisão Semanal (bastion/weekly-review)
+### 2. Weekly Review (bastion/weekly-review)
 
-Toda segunda-feira às 9h, o HEARTBEAT aciona o `weekly-review`, que:
+Every Monday at 9am, HEARTBEAT triggers `weekly-review`, which:
 
-1. Analisa os últimos 50 registros do life_log por persona
-2. Compara o padrão de uso com os pesos atuais
-3. Sugere ajustes ao usuário
-4. Após confirmação, chama `adjust_weight()` para cada persona com sugestão aceita
+1. Analyzes last 50 life_log records per persona
+2. Compares usage pattern with current weights
+3. Suggests adjustments to user
+4. After confirmation, calls `adjust_weight()` for each persona with accepted suggestion
 
 ---
 
 ### 3. Self-Improving (bastion/self-improving)
 
-Quando um padrão é promovido ou decaído, o `self-improving` registra a mudança:
+When a pattern is promoted or decayed, `self-improving` records the change:
 
 ```
 adjust_weight(
     persona_slug=<slug>,
-    delta=<+0.05 para promoção, -0.05 para decaimento>,
-    justification="Pattern promoted to HOT: <nome do padrão>",
+    delta=<+0.05 for promotion, -0.05 for decay>,
+    justification="Pattern promoted to HOT: <pattern name>",
     persistence=UserMdAdapter(...)
 )
 ```
 
 ---
 
-### 4. Ajuste Manual pelo Usuário
+### 4. Manual Adjustment by User
 
-O usuário pode solicitar ajuste direto:
+User can request direct adjustment:
 
 ```
-"Aumenta o peso da persona Tech Lead para 0.95"
-"Reduz o peso do Empreendedor em 0.1"
+"Increase Tech Lead persona weight to 0.95"
+"Reduce Entrepreneur weight by 0.1"
 ```
 
-Fluxo:
-1. Identificar a persona pelo nome ou slug
-2. Calcular o delta necessário
-3. Confirmar com o usuário: `"Vou ajustar o peso de '{nome}' de {atual} para {novo}. Confirma? (sim/não)"`
-4. Após confirmação, chamar `adjust_weight()`
+Flow:
+1. Identify persona by name or slug
+2. Calculate necessary delta
+3. Confirm with user: `"{locale:confirm_adjust}"`
+4. After confirmation, call `adjust_weight()`
 
 ---
 
-## Persistência
+## Persistence
 
 ### USER.md
 
-O `current_weight` de cada persona é mantido no frontmatter de `USER.md`:
+`current_weight` of each persona is maintained in `USER.md` frontmatter:
 
 ```yaml
 personas:
@@ -137,54 +137,54 @@ personas:
     name: "Tech Lead"
     current_weight: 0.9
   - slug: "empreendedor"
-    name: "Empreendedor"
+    name: "Entrepreneur"
     current_weight: 0.7
 ```
 
-O `UserMdAdapter` atualiza este valor automaticamente a cada chamada de `adjust_weight()`.
+`UserMdAdapter` updates this value automatically on each `adjust_weight()` call.
 
 ### personas/{slug}/weight-history.md
 
-Cada ajuste gera uma linha de histórico:
+Each adjustment generates a history line:
 
 ```
 # Weight History
 
-- 2025-01-15T10:30:00+00:00 | 0.7000 → 1.0000 | Crisis boost: servidor de produção fora do ar
-- 2025-01-22T09:00:00+00:00 | 1.0000 → 0.8500 | Weekly review: uso normalizado após crise
+- 2025-01-15T10:30:00+00:00 | 0.7000 → 1.0000 | Crisis boost: production server down
+- 2025-01-22T09:00:00+00:00 | 1.0000 → 0.8500 | Weekly review: usage normalized after crisis
 - 2025-01-29T09:00:00+00:00 | 0.8500 → 0.9000 | Pattern promoted to HOT: deploy-checklist
 ```
 
-Formato de cada linha:
+Format of each line:
 ```
 - {ISO 8601 timestamp} | {old_weight:.4f} → {new_weight:.4f} | {justification}
 ```
 
 ---
 
-## Arquitetura (Hexagonal)
+## Architecture (Hexagonal)
 
-O skill usa o padrão **Protocol/Adapter** para desacoplar a lógica de negócio da persistência:
+Skill uses **Protocol/Adapter** pattern to decouple business logic from persistence:
 
 ```
-WeightPersistenceProtocol (porta)
+WeightPersistenceProtocol (port)
     ├── get_current_weight(slug) → float
     ├── set_current_weight(slug, weight) → None
     └── append_weight_history(slug, entry) → None
 
-UserMdAdapter (adaptador concreto padrão)
-    ├── Lê/escreve USER.md (frontmatter YAML)
-    └── Appenda em personas/{slug}/weight-history.md
+UserMdAdapter (default concrete adapter)
+    ├── Reads/writes USER.md (YAML frontmatter)
+    └── Appends to personas/{slug}/weight-history.md
 ```
 
-Para trocar o backend de persistência (ex: banco de dados), basta implementar um novo adapter que satisfaça o `WeightPersistenceProtocol` — sem alterar `calculate_priority()` ou `adjust_weight()`.
+To swap the persistence backend (e.g., database), implement a new adapter that satisfies `WeightPersistenceProtocol` — without changing `calculate_priority()` or `adjust_weight()`.
 
 ---
 
-## Comandos CLI
+## CLI Commands
 
-> IMPORTANTE: Comando CLI
-> Como você é um agente OpenClaw, você deve invocar todas as operações via linha de comando (`exec python3 ...`). Não tente interpretar o código Python nativamente.
+> IMPORTANT: CLI Command
+> As you are an OpenClaw agent, you must invoke all operations via command line (`exec python3 ...`). Do not attempt to interpret Python code natively.
 
 
 
@@ -197,13 +197,13 @@ from skills.weight_system.weight_system import (
 )
 from pathlib import Path
 
-# Instanciar o adapter
+# Instantiate the adapter
 adapter = UserMdAdapter(
     user_md_path=Path("USER.md"),
     personas_dir=Path("personas"),
 )
 
-# Calcular prioridade
+# Calculate priority
 priority = calculate_priority(
     current_weight=0.7,
     deep_work=True,
@@ -211,38 +211,38 @@ priority = calculate_priority(
 )
 # → 0.95 (0.7 + 0.1 + 0.15)
 
-# Ajustar peso (crisis boost)
+# Adjust weight (crisis boost)
 new_weight = adjust_weight(
     persona_slug="tech-lead",
     delta=+0.3,
-    justification="Crisis boost: deploy crítico em produção",
+    justification="Crisis boost: critical production deploy",
     persistence=adapter,
 )
-# → persiste em USER.md + appenda em personas/tech-lead/weight-history.md
+# → persists to USER.md + appends to personas/tech-lead/weight-history.md
 ```
 
 ---
 
 ## Edge Cases
 
-### Clamp em [0.0, 1.0]
+### Clamp to [0.0, 1.0]
 
-Qualquer delta que levaria o peso abaixo de 0.0 ou acima de 1.0 é silenciosamente clamped:
+Any delta that would take the weight below 0.0 or above 1.0 is silently clamped:
 
 ```python
-adjust_weight("tech-lead", delta=+0.5, ...)  # current=0.9 → new=1.0 (não 1.4)
-adjust_weight("tech-lead", delta=-0.5, ...)  # current=0.1 → new=0.0 (não -0.4)
+adjust_weight("tech-lead", delta=+0.5, ...)  # current=0.9 → new=1.0 (not 1.4)
+adjust_weight("tech-lead", delta=-0.5, ...)  # current=0.1 → new=0.0 (not -0.4)
 ```
 
-### Persona não encontrada em USER.md
+### Persona not found in USER.md
 
-Se o slug não existir em USER.md, `UserMdAdapter.get_current_weight()` lança `KeyError`.
-O chamador deve tratar este erro e verificar se a persona existe antes de ajustar.
+If the slug doesn't exist in USER.md, `UserMdAdapter.get_current_weight()` raises `KeyError`.
+The caller must handle this error and verify the persona exists before adjusting.
 
-### Arquivo weight-history.md inexistente
+### weight-history.md file doesn't exist
 
-O `UserMdAdapter` cria o arquivo automaticamente na primeira escrita, incluindo o cabeçalho `# Weight History`.
+The `UserMdAdapter` creates the file automatically on the first write, including the `# Weight History` header.
 
-### Pasta personas/{slug}/ inexistente
+### personas/{slug}/ folder doesn't exist
 
-O `UserMdAdapter` cria a pasta automaticamente via `mkdir(parents=True, exist_ok=True)`.
+The `UserMdAdapter` creates the folder automatically via `mkdir(parents=True, exist_ok=True)`.

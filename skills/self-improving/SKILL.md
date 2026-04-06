@@ -2,89 +2,88 @@
 name: bastion/self-improving
 version: 1.0.0
 description: >
-  Fork do ivangdavila/self-improving com consciência de personas.
-  Aprende padrões de comportamento por persona ao longo do tempo usando
-  memória tiered (HOT/WARM/COLD), promoção/decaimento automático com
-  consciência de peso, resolução de conflitos por precedência e isolamento
-  completo de namespace entre personas.
+  Fork of ivangdavila/self-improving with persona awareness. Learns behavior
+  patterns per persona over time using tiered memory (HOT/WARM/COLD), automatic
+  promotion/decay with weight awareness, conflict resolution by precedence, and
+  complete namespace isolation between personas.
 triggers:
-  - HEARTBEAT executa análise semanal do life_log (a cada 7 dias)
-  - padrão de comportamento observado 3+ vezes em 7 dias para uma persona
-  - persona entra em modo crise (crisis-mode detecta is_crisis=true)
-  - dois padrões conflitam durante matching de persona
-  - bastion/weekly-review solicita análise de padrões acumulados
+  - HEARTBEAT executes weekly life_log analysis (every 7 days)
+  - behavior pattern observed 3+ times in 7 days for a persona
+  - persona enters crisis mode (crisis-mode detects is_crisis=true)
+  - two patterns conflict during persona matching
+  - bastion/weekly-review requests accumulated pattern analysis
 ---
 
 # Skill: bastion/self-improving
 
-## Objetivo
+## Objective
 
-Aprender padrões de comportamento por persona ao longo do tempo, melhorando
-progressivamente as respostas sem que o usuário precise repetir preferências.
-
----
-
-## Tiered Memory (mantido do original)
-
-Cada persona tem três camadas de memória:
-
-| Tier | Arquivo | Tamanho | Carregamento |
-|------|---------|---------|--------------|
-| **HOT** | `personas/{slug}/memory.md` | ≤ 100 linhas | Sempre — injetado no contexto |
-| **WARM** | `personas/{slug}/index.md` | Ilimitado | Sob demanda (busca semântica) |
-| **COLD** | `personas/{slug}/archive/` | Ilimitado | Raramente — busca explícita |
+Learn behavior patterns per persona over time, progressively improving responses
+without user needing to repeat preferences.
 
 ---
 
-## Regras de Promoção com Consciência de Peso
+## Tiered Memory (maintained from original)
 
-### Promoção para HOT (Requirement 12.1)
+Each persona has three memory layers:
 
-Um padrão é promovido para HOT quando:
-- Observado **3 ou mais vezes** em um janela de **7 dias**
+| Tier | File | Size | Loading |
+|------|------|------|---------|
+| **HOT** | `personas/{slug}/memory.md` | ≤ 100 lines | Always — injected in context |
+| **WARM** | `personas/{slug}/index.md` | Unlimited | On demand (semantic search) |
+| **COLD** | `personas/{slug}/archive/` | Unlimited | Rarely — explicit search |
 
-### Bloqueio por Peso Baixo (Requirement 12.2)
+---
 
-Se `current_weight < 0.3` para uma persona:
-- O padrão **não é promovido para HOT global**
-- Permanece em WARM até que o peso da persona aumente
-- Justificativa registrada: `"Weight gate: current_weight=X.XXXX < 0.3"`
+## Promotion Rules with Weight Awareness
 
-### Prioridade em Crise (Requirement 12.3)
+### Promotion to HOT (Requirement 12.1)
 
-Quando uma crise é detectada pelo `bastion/crisis-mode`:
-- Os padrões da **persona em crise** têm prioridade sobre todas as outras
-- O gate de peso é **bypassado** para a persona em crise
-- Justificativa registrada: `"Crisis priority: N occurrences (crisis override — weight gate bypassed)"`
+A pattern is promoted to HOT when:
+- Observed **3 or more times** in a **7-day** window
+
+### Low Weight Blocking (Requirement 12.2)
+
+If `current_weight < 0.3` for a persona:
+- Pattern is **not promoted to global HOT**
+- Remains in WARM until persona weight increases
+- Justification recorded: `"Weight gate: current_weight=X.XXXX < 0.3"`
+
+### Crisis Priority (Requirement 12.3)
+
+When a crisis is detected by `bastion/crisis-mode`:
+- Patterns from **crisis persona** have priority over all others
+- Weight gate is **bypassed** for crisis persona
+- Justification recorded: `"Crisis priority: N occurrences (crisis override — weight gate bypassed)"`
 
 ---
 
 ## Conflict Resolution (Requirement 12.4)
 
-Quando dois padrões conflitam, a ordem de precedência é:
+When two patterns conflict, the precedence order is:
 
 ```
-1. Mais específico  (maior valor de specificity)
-2. Mais recente     (maior updated_at)
-3. Maior peso       (maior persona_weight)
+1. More specific  (higher specificity value)
+2. More recent    (higher updated_at)
+3. Higher weight  (higher persona_weight)
 ```
 
-Se todos os critérios empatarem, o padrão `pattern_a` vence (determinístico).
+If all criteria tie, `pattern_a` wins (deterministic).
 
-**Exemplo:**
+**Example:**
 
 ```python
 from skills.self_improving.promotion import conflict_resolution
 
 winner = conflict_resolution(pattern_a, pattern_b)
-# → retorna o Pattern vencedor com log do critério usado
+# → returns the winning Pattern with the criterion used logged
 ```
 
 ---
 
-## Registro de Promoções e Decaimentos (Requirement 12.5)
+## Promotion and Decay Logging (Requirement 12.5)
 
-Toda promoção ou decaimento é registrado em `personas/{slug}/weight-history.md`:
+Every promotion or decay is recorded in `personas/{slug}/weight-history.md`:
 
 ```
 # Weight History
@@ -94,47 +93,45 @@ Toda promoção ou decaimento é registrado em `personas/{slug}/weight-history.m
 - 2025-01-29T09:00:00+00:00 | PROMOTED WARM → HOT | pattern:deploy-checklist | Crisis priority: 3 occurrences (crisis override — weight gate bypassed)
 ```
 
-Formato de cada linha:
+Format of each line:
 ```
 - {ISO 8601 timestamp} | {action} | pattern:{id} | {justification}
 ```
 
 ---
 
-## Isolamento de Namespace (Requirement 12.6)
+## Namespace Isolation (Requirement 12.6)
 
-**Garantia:** Operações em `personas/{slug-a}/` **nunca** tocam `personas/{slug-b}/`.
+**Guarantee:** Operations on `personas/{slug-a}/` **never** touch `personas/{slug-b}/`.
 
-O `FileSystemAdapter` deriva todos os caminhos de `self._personas_dir / persona_slug`.
-Não há operação que aceite dois slugs diferentes na mesma chamada de escrita.
+The `FileSystemAdapter` derives all paths from `self._personas_dir / persona_slug`.
+No operation accepts two different slugs in the same write call.
 
 ---
 
-## Arquitetura (Hexagonal)
+## Architecture (Hexagonal)
 
 ```
-PromotionPersistenceProtocol (porta)
+PromotionPersistenceProtocol (port)
     ├── get_pattern(persona_slug, pattern_id) → Pattern | None
     ├── save_pattern(pattern) → None
     ├── get_current_weight(persona_slug) → float
     └── append_promotion_history(persona_slug, timestamp, pattern_id, action, justification) → None
 
-FileSystemAdapter (adaptador concreto padrão)
-    ├── Lê/escreve personas/{slug}/memory.md (HOT tier)
-    ├── Lê current_weight de USER.md
-    └── Appenda em personas/{slug}/weight-history.md
+FileSystemAdapter (default concrete adapter)
+    ├── Reads/writes personas/{slug}/memory.md (HOT tier)
+    ├── Reads current_weight from USER.md
+    └── Appends to personas/{slug}/weight-history.md
 ```
 
-Para trocar o backend (ex: banco de dados), basta implementar um novo adapter
-que satisfaça o `PromotionPersistenceProtocol` — sem alterar `promote_pattern()`,
-`decay_pattern()` ou `conflict_resolution()`.
+To swap the backend (e.g., database), implement a new adapter that satisfies `PromotionPersistenceProtocol` — without changing `promote_pattern()`, `decay_pattern()`, or `conflict_resolution()`.
 
 ---
 
 ## Comandos CLI
 
-> IMPORTANTE: Comando CLI
-> Como você é um agente OpenClaw, você deve invocar todas as operações via linha de comando (`exec python3 ...`). Não tente interpretar o código Python nativamente.
+> IMPORTANT: CLI Command
+> As you are an OpenClaw agent, you must invoke all operations via command line (`exec python3 ...`). Do not attempt to interpret Python code natively.
 
 
 
@@ -155,11 +152,11 @@ adapter = FileSystemAdapter(
     user_md_path=Path("USER.md"),
 )
 
-# Criar um padrão com ocorrências recentes
+# Create a pattern with recent occurrences
 pattern = Pattern(
     id="deploy-checklist",
     persona_slug="tech-lead",
-    description="Sempre verifica o checklist de deploy antes de fazer push",
+    description="Always checks the deploy checklist before pushing",
     tier=MemoryTier.WARM,
     specificity=3,
     persona_weight=0.9,
@@ -170,54 +167,54 @@ pattern = Pattern(
     ],
 )
 
-# Tentar promover para HOT
+# Try to promote to HOT
 promoted = promote_pattern(pattern, adapter, is_crisis=False)
-# → True se current_weight >= 0.3 e 3+ ocorrências em 7 dias
+# → True if current_weight >= 0.3 and 3+ occurrences in 7 days
 
-# Resolver conflito entre dois padrões
+# Resolve conflict between two patterns
 winner = conflict_resolution(pattern_a, pattern_b)
-# → Pattern vencedor pela ordem: específico > recente > peso
+# → Winning Pattern by order: specific > recent > weight
 
-# Decair um padrão
+# Decay a pattern
 decay_pattern(pattern, MemoryTier.WARM, "Pattern not accessed in 14 days", adapter)
 ```
 
 ---
 
-## Integração com HEARTBEAT
+## Integration with HEARTBEAT
 
-O HEARTBEAT aciona este skill a cada 7 dias via `bastion/weekly-review`:
+The HEARTBEAT triggers this skill every 7 days via `bastion/weekly-review`:
 
-1. Busca os últimos 50 registros do `life_log` por persona
-2. Agrupa por padrão de comportamento
-3. Para cada padrão com 3+ ocorrências em 7 dias → chama `promote_pattern()`
-4. Para padrões sem acesso há 14+ dias → chama `decay_pattern()`
-5. Registra todas as mudanças em `personas/{slug}/weight-history.md`
+1. Fetches the last 50 `life_log` records per persona
+2. Groups by behavior pattern
+3. For each pattern with 3+ occurrences in 7 days → calls `promote_pattern()`
+4. For patterns not accessed in 14+ days → calls `decay_pattern()`
+5. Records all changes in `personas/{slug}/weight-history.md`
 
 ---
 
 ## Edge Cases
 
-### Persona com peso < 0.3
+### Persona with weight < 0.3
 
-O padrão permanece em WARM. Quando o peso da persona aumentar (via crisis boost
-ou weekly-review), a próxima execução do HEARTBEAT pode promovê-lo.
+The pattern stays in WARM. When the persona's weight increases (via crisis boost
+or weekly-review), the next HEARTBEAT execution may promote it.
 
-### Crise ativa
+### Active crisis
 
-Durante uma crise, `is_crisis=True` bypassa o gate de peso. Após a crise,
-o comportamento normal é restaurado automaticamente.
+During a crisis, `is_crisis=True` bypasses the weight gate. After the crisis,
+normal behavior is restored automatically.
 
-### Padrão já em HOT
+### Pattern already in HOT
 
-Chamar `promote_pattern()` em um padrão já HOT é idempotente — atualiza
-`updated_at` e `persona_weight`, mas não duplica a entrada no histórico.
+Calling `promote_pattern()` on a pattern already in HOT is idempotent — it updates
+`updated_at` and `persona_weight`, but does not duplicate the entry in the history.
 
-### Arquivo memory.md inexistente
+### memory.md file doesn't exist
 
-O `FileSystemAdapter` cria o arquivo automaticamente na primeira escrita,
-incluindo o cabeçalho `# HOT Memory — {slug}`.
+The `FileSystemAdapter` creates the file automatically on the first write,
+including the `# HOT Memory — {slug}` header.
 
-### Pasta personas/{slug}/ inexistente
+### personas/{slug}/ folder doesn't exist
 
-O `FileSystemAdapter` cria a pasta automaticamente via `mkdir(parents=True, exist_ok=True)`.
+The `FileSystemAdapter` creates the folder automatically via `mkdir(parents=True, exist_ok=True)`.

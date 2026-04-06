@@ -23,73 +23,73 @@ triggers:
 
 # Skill Writer — Roteiro de Criação de Skills
 
-## Objetivo
+## Objective
 
-Guiar o usuário na criação de uma nova skill (SKILL.md) de forma conversacional,
-garantindo que o arquivo gerado tenha estrutura completa e seja salvo no caminho correto.
-
----
-
-## Fluxo Conversacional
-
-### Passo 1 — Entender a Necessidade
-
-Faça as três perguntas abaixo, uma de cada vez, aguardando a resposta antes de prosseguir:
-
-1. **O quê**: "O que você quer que essa skill faça? Descreva o comportamento esperado."
-2. **Quando**: "Quando ela deve ser ativada? Quais palavras-chave ou situações disparam esse comportamento?"
-3. **Output**: "Qual é o resultado esperado? O que o agente deve entregar ao final?"
-
-Registre as respostas como:
-- `skill_purpose`: o que a skill faz
-- `skill_triggers`: quando é ativada (lista de keywords/frases)
-- `skill_output`: o que entrega ao final
+Guide the user through creating a new skill (SKILL.md) in a conversational way,
+ensuring the generated file has a complete structure and is saved in the correct path.
 
 ---
 
-### Passo 2 — Verificar o ClawHub
+## Conversational Flow
 
-Antes de criar uma skill nova, verifique se já existe uma equivalente no ClawHub:
+### Step 1 — Understand the Need
 
-1. Busque no ClawHub por skills com propósito similar ao `skill_purpose`
-2. Se encontrar uma skill equivalente → vá para o **Passo 3a**
-3. Se não encontrar → vá para o **Passo 3b**
+Ask the three questions below, one at a time, waiting for the answer before proceeding:
 
----
+1. **What**: "What do you want this skill to do? Describe the expected behavior."
+2. **When**: "When should it be activated? What keywords or situations trigger this behavior?"
+3. **Output**: "What is the expected result? What should the agent deliver at the end?"
 
-### Passo 3a — Skill Equivalente Existe no ClawHub
-
-Se uma skill equivalente já existe no ClawHub:
-
-1. Apresente a skill encontrada ao usuário:
-   - Nome, descrição, avaliação, número de reviews, badge Verified
-2. Sugira a instalação em vez de criar uma nova:
-   > "Encontrei a skill `{nome}` no ClawHub que faz exatamente isso (⭐ {rating} · {reviews} reviews · Verified).
-   > Quer que eu instale ela em vez de criar uma nova?"
-3. Se o usuário confirmar → instale a skill seguindo a política de instalação do AGENTS.md
-4. Se o usuário preferir criar mesmo assim → continue para o **Passo 3b**
+Record the answers as:
+- `skill_purpose`: what the skill does
+- `skill_triggers`: when it is activated (list of keywords/phrases)
+- `skill_output`: what it delivers at the end
 
 ---
 
-### Passo 3b — Criar Nova Skill
+### Step 2 — Check ClawHub
 
-Se não existe equivalente no ClawHub (ou o usuário preferiu criar):
+Before creating a new skill, check if an equivalent one already exists on ClawHub:
 
-#### 3b.1 — Definir o Escopo
+1. Search ClawHub for skills with a purpose similar to `skill_purpose`
+2. If an equivalent skill is found → go to **Step 3a**
+3. If not found → go to **Step 3b**
 
-Pergunte ao usuário:
-> "Essa skill é para uso exclusivo de uma persona específica ou para todo o Bastion?"
+---
 
-- **Privada** (persona específica): salvar em `personas/{slug}/SKILL.md`
-- **Global** (todo o Bastion): salvar em `skills/{nome}/SKILL.md`
+### Step 3a — Equivalent Skill Exists on ClawHub
 
-Se o usuário não souber o escopo:
-> "Se a skill só faz sentido para a persona '{persona_ativa}', é privada.
-> Se qualquer persona pode usar, é global. Qual prefere?"
+If an equivalent skill already exists on ClawHub:
 
-#### 3b.2 — Gerar o SKILL.md
+1. Present the found skill to the user:
+   - Name, description, rating, number of reviews, Verified badge
+2. Suggest installation instead of creating a new one:
+   > "I found the skill `{name}` on ClawHub that does exactly this (⭐ {rating} · {reviews} reviews · Verified).
+   > Would you like me to install it instead of creating a new one?"
+3. If the user confirms → install the skill following the installation policy in AGENTS.md
+4. If the user prefers to create anyway → continue to **Step 3b**
 
-Monte o arquivo com a estrutura obrigatória:
+---
+
+### Step 3b — Create New Skill
+
+If no equivalent exists on ClawHub (or the user preferred to create one):
+
+#### 3b.1 — Define the Scope
+
+Ask the user:
+> "Is this skill for exclusive use by a specific persona or for all of Bastion?"
+
+- **Private** (specific persona): save to `personas/{slug}/SKILL.md`
+- **Global** (all of Bastion): save to `skills/{name}/SKILL.md`
+
+If the user doesn't know the scope:
+> "If the skill only makes sense for the '{active_persona}' persona, it's private.
+> If any persona can use it, it's global. Which do you prefer?"
+
+#### 3b.2 — Generate the SKILL.md
+
+Assemble the file with the required structure:
 
 ```markdown
 ---
@@ -103,123 +103,123 @@ triggers:
   ...
 ---
 
-# {Nome da Skill}
+# {Skill Name}
 
-## Objetivo
+## Objective
 
 {skill_purpose}
 
-## Instruções Passo a Passo
+## Step-by-Step Instructions
 
-1. {passo_1}
-2. {passo_2}
-3. {passo_3}
+1. {step_1}
+2. {step_2}
+3. {step_3}
 ...
 
-## Exemplos de Uso
+## Usage Examples
 
-### Exemplo 1 — {cenário}
+### Example 1 — {scenario}
 
-**Input do usuário:** "{exemplo_input}"
+**User input:** "{example_input}"
 
-**Comportamento esperado:**
-{exemplo_output}
+**Expected behavior:**
+{example_output}
 
-### Exemplo 2 — {cenário_2}
+### Example 2 — {scenario_2}
 
-**Input do usuário:** "{exemplo_input_2}"
+**User input:** "{example_input_2}"
 
-**Comportamento esperado:**
-{exemplo_output_2}
+**Expected behavior:**
+{example_output_2}
 
 ## Edge Cases
 
-- **Skill já existe localmente**: Se já existe um arquivo no caminho de destino, perguntar ao usuário se deseja sobrescrever ou criar uma versão nova (ex: `v2`).
-- **Usuário não sabe o escopo**: Explicar a diferença entre privada e global e sugerir com base no contexto da conversa.
-- **Skill com mesmo nome no ClawHub**: Avisar que o nome já existe no ClawHub e sugerir um nome alternativo para evitar conflito futuro.
-- **Triggers muito genéricos**: Se os triggers forem palavras muito comuns (ex: "ok", "sim"), alertar que podem causar ativações indesejadas e sugerir triggers mais específicos.
-- **Output indefinido**: Se o usuário não souber descrever o output, fazer perguntas de clarificação antes de prosseguir.
+- **Skill already exists locally**: If a file already exists at the destination path, ask the user whether to overwrite or create a new version (e.g., `v2`).
+- **User doesn't know the scope**: Explain the difference between private and global and suggest based on the conversation context.
+- **Skill with same name on ClawHub**: Warn that the name already exists on ClawHub and suggest an alternative name to avoid future conflicts.
+- **Too generic triggers**: If triggers are very common words (e.g., "ok", "yes"), warn that they may cause unwanted activations and suggest more specific triggers.
+- **Undefined output**: If the user can't describe the output, ask clarifying questions before proceeding.
 ```
 
-**Regras de nomenclatura:**
-- Para skills privadas: `name: personas/{slug}/{skill-slug}`
-- Para skills globais: `name: bastion/{skill-slug}` ou `name: {namespace}/{skill-slug}`
-- O `slug` usa apenas letras minúsculas, números e hífens
+**Naming rules:**
+- For private skills: `name: personas/{slug}/{skill-slug}`
+- For global skills: `name: bastion/{skill-slug}` or `name: {namespace}/{skill-slug}`
+- The `slug` uses only lowercase letters, numbers, and hyphens
 
-#### 3b.3 — Salvar no Caminho Correto
+#### 3b.3 — Save to the Correct Path
 
-**Regra de caminho (obrigatória):**
+**Path rule (mandatory):**
 
-| Escopo | Caminho |
+| Scope | Path |
 |--------|---------|
-| Privada (persona específica) | `personas/{slug}/SKILL.md` |
-| Global (todo o Bastion) | `skills/{nome}/SKILL.md` |
+| Private (specific persona) | `personas/{slug}/SKILL.md` |
+| Global (all of Bastion) | `skills/{name}/SKILL.md` |
 
-Onde:
-- `{slug}` é o slug da persona (ex: `tech-lead`, `empreendedor`)
-- `{nome}` é o nome da skill em kebab-case (ex: `weekly-review`, `code-reviewer`)
+Where:
+- `{slug}` is the persona slug (e.g., `tech-lead`, `entrepreneur`)
+- `{name}` is the skill name in kebab-case (e.g., `weekly-review`, `code-reviewer`)
 
-Antes de salvar, confirme com o usuário:
-> "Vou salvar a skill em `{caminho}`. Confirma? (sim/não)"
-
----
-
-### Passo 4 — Testar com Caso de Uso Real
-
-Após salvar o arquivo, acione a skill com um caso de uso real:
-
-1. Peça ao usuário um exemplo concreto de uso:
-   > "Para validar a skill, me dê um exemplo real de mensagem que deveria ativá-la."
-2. Execute o fluxo da skill com esse input
-3. Apresente o resultado ao usuário:
-   > "A skill foi ativada com o input '{input}' e produziu: {output}"
-4. Pergunte se o resultado está correto:
-   > "O resultado está como esperado? (sim/não/ajustar)"
-5. Se não estiver correto → ajuste o SKILL.md e repita o teste
+Before saving, confirm with the user:
+> "I'll save the skill to `{path}`. Confirm? (yes/no)"
 
 ---
 
-### Passo 5 — Publicar no ClawHub (Opcional)
+### Step 4 — Test with a Real Use Case
 
-Após validação bem-sucedida, pergunte:
-> "Essa skill pode ser útil para outros usuários do Bastion? Quer publicá-la no ClawHub?"
+After saving the file, trigger the skill with a real use case:
 
-Se o usuário confirmar:
-1. Verifique se o nome não conflita com skills existentes no ClawHub
-2. Guie o processo de publicação:
-   - Adicionar `author`, `license` e `repository` ao frontmatter
-   - Criar `README.md` com documentação pública
-   - Submeter via `clawhub publish {caminho}`
-3. Informe que a skill passará por revisão antes de aparecer no marketplace
+1. Ask the user for a concrete usage example:
+   > "To validate the skill, give me a real example of a message that should activate it."
+2. Run the skill flow with that input
+3. Present the result to the user:
+   > "The skill was activated with input '{input}' and produced: {output}"
+4. Ask if the result is correct:
+   > "Is the result as expected? (yes/no/adjust)"
+5. If not correct → adjust the SKILL.md and repeat the test
 
 ---
 
-## Edge Cases Globais
+### Step 5 — Publish to ClawHub (Optional)
 
-### Skill já existe localmente
+After successful validation, ask:
+> "Could this skill be useful for other Bastion users? Would you like to publish it to ClawHub?"
 
-Se já existe um arquivo no caminho de destino:
-> "Já existe uma skill em `{caminho}`. Quer sobrescrever, criar `{nome}-v2` ou cancelar?"
+If the user confirms:
+1. Check that the name doesn't conflict with existing ClawHub skills
+2. Guide the publishing process:
+   - Add `author`, `license`, and `repository` to the frontmatter
+   - Create `README.md` with public documentation
+   - Submit via `clawhub publish {path}`
+3. Inform that the skill will go through review before appearing in the marketplace
 
-### Usuário não sabe o escopo
+---
 
-Se o usuário não conseguir definir se a skill é privada ou global:
-1. Explique: "Skills privadas ficam dentro da pasta da persona e só ela usa. Skills globais ficam em `skills/` e qualquer persona pode usar."
-2. Sugira com base no contexto: se a skill usa keywords muito específicas da persona ativa, provavelmente é privada.
+## Global Edge Cases
 
-### Skill com mesmo nome no ClawHub
+### Skill already exists locally
 
-Se o nome escolhido já existe no ClawHub:
-> "O nome `{nome}` já existe no ClawHub. Para evitar conflito futuro, sugiro usar `{sugestão}`. Aceita?"
+If a file already exists at the destination path:
+> "A skill already exists at `{path}`. Would you like to overwrite, create `{name}-v2`, or cancel?"
 
-### Triggers muito genéricos
+### User doesn't know the scope
 
-Se os triggers incluírem palavras muito comuns:
-> "O trigger '{trigger}' é muito genérico e pode ativar a skill em contextos indesejados. Sugiro usar '{sugestão_mais_específica}'. Quer ajustar?"
+If the user can't define whether the skill is private or global:
+1. Explain: "Private skills live inside the persona's folder and only that persona uses them. Global skills live in `skills/` and any persona can use them."
+2. Suggest based on context: if the skill uses keywords very specific to the active persona, it's probably private.
 
-### Usuário quer criar skill para outra persona
+### Skill with same name on ClawHub
 
-Se o usuário quiser criar uma skill privada para uma persona diferente da ativa:
-1. Confirme o slug da persona de destino
-2. Salve em `personas/{slug-destino}/SKILL.md`
-3. Informe que a skill só estará disponível quando essa persona estiver ativa
+If the chosen name already exists on ClawHub:
+> "The name `{name}` already exists on ClawHub. To avoid future conflicts, I suggest using `{suggestion}`. Accept?"
+
+### Too generic triggers
+
+If triggers include very common words:
+> "The trigger '{trigger}' is too generic and may activate the skill in unintended contexts. I suggest using '{more_specific_suggestion}'. Would you like to adjust?"
+
+### User wants to create a skill for another persona
+
+If the user wants to create a private skill for a persona other than the active one:
+1. Confirm the target persona's slug
+2. Save to `personas/{target-slug}/SKILL.md`
+3. Inform that the skill will only be available when that persona is active

@@ -2,234 +2,228 @@
 name: bastion/weekly-review
 version: "1.0.0"
 description: >
-  Executa a revisão semanal de todas as personas ativas: agrega interações dos
-  últimos 7 dias via life_log, calcula métricas de uso, compara com os pesos
-  atuais e apresenta um relatório com sugestões de ajuste de peso para confirmação
-  do usuário antes de aplicar qualquer mudança.
+  Executes weekly review of all active personas: aggregates interactions from
+  last 7 days via life_log, calculates usage metrics, compares with current
+  weights and presents a report with weight adjustment suggestions for user
+  confirmation before applying any changes.
 triggers:
-  - HEARTBEAT toda segunda-feira às 9h
+  - HEARTBEAT every Monday at 9am
   - "/weekly-review"
-  - "revisão semanal"
-  - "revisar pesos"
-  - "como estão minhas personas"
+  - "weekly review"
+  - "review weights"
+  - "how are my personas"
 ---
 
-# Weekly Review — Revisão Semanal de Personas
+# Weekly Review — Weekly Persona Review
 
-## Quando este skill é ativado
+## When this skill is activated
 
-1. **Automático**: o HEARTBEAT executa este skill toda segunda-feira às 9h.
-2. **Manual**: o usuário envia `/weekly-review` ou solicita uma revisão semanal.
+1. **Automatic**: HEARTBEAT executes this skill every Monday at 9am.
+2. **Manual**: user sends `/weekly-review` or requests a weekly review.
 
 ---
 
-## Fluxo completo
+## Complete Flow
 
 ```
-HEARTBEAT (segunda, 9h) ou trigger manual
+HEARTBEAT (Monday, 9am) or manual trigger
         │
         ▼
-Carregar lista de personas ativas de USER.md
+Load list of active personas from USER.md
         │
         ▼
-Para cada persona ativa:
+For each active persona:
   life_log.get_persona_summary(persona, days=7)
         │
         ▼
-Calcular métricas de uso por persona
+Calculate usage metrics per persona
         │
         ▼
-Comparar padrão de uso com current_weight de cada persona
+Compare usage pattern with current_weight of each persona
         │
         ▼
-Gerar relatório com sugestões de ajuste
+Generate report with adjustment suggestions
         │
-        ├── Nenhuma sugestão → informar que os pesos estão adequados
+        ├── No suggestions → inform weights are adequate
         │
-        └── Há sugestões → apresentar relatório ao usuário
+        └── Has suggestions → present report to user
                 │
                 ▼
-          Aguardar confirmação do usuário
+          Wait for user confirmation
                 │
-                ├── Usuário confirma tudo → aplicar todos os ajustes via weight-system
-                ├── Usuário confirma parcialmente → aplicar apenas os confirmados
-                └── Usuário recusa → não aplicar nenhum ajuste
+                ├── User confirms all → apply all adjustments via weight-system
+                ├── User confirms partially → apply only confirmed ones
+                └── User refuses → don't apply any adjustment
 ```
 
 ---
 
-## Passo 1 — Coletar dados do life_log
+## Step 1 — Collect data from life_log
 
-Para cada persona ativa listada em `USER.md`, chamar:
+For each active persona listed in `USER.md`, call:
 
 ```
 life_log.get_persona_summary(persona="{slug}", days=7)
 ```
 
-O resumo retorna:
-- `total_interactions`: número total de interações nos últimos 7 dias
-- `intents_used`: lista de intents executados com contagem (ex: `{"code_review": 12, "planning": 3}`)
-- `tools_used`: lista de tools chamadas com contagem (ex: `{"github": 8, "calendar": 2}`)
-- `active_hours`: lista de horas do dia com maior atividade (ex: `[9, 10, 14, 15]`)
-- `last_interaction`: timestamp da última interação
+Summary returns:
+- `total_interactions`: total number of interactions in last 7 days
+- `intents_used`: list of executed intents with count (e.g., `{"code_review": 12, "planning": 3}`)
+- `tools_used`: list of called tools with count (e.g., `{"github": 8, "calendar": 2}`)
+- `active_hours`: list of hours of day with most activity (e.g., `[9, 10, 14, 15]`)
+- `last_interaction`: timestamp of last interaction
 
-Se uma persona não tiver nenhuma interação nos últimos 7 dias, registrar `total_interactions=0`.
-
----
-
-## Passo 2 — Calcular métricas de uso
-
-Para cada persona, calcular:
-
-| Métrica | Cálculo |
-|---------|---------|
-| **Taxa de uso** | `total_interactions / total_interactions_todas_personas` |
-| **Intent dominante** | intent com maior contagem |
-| **Tool dominante** | tool com maior contagem |
-| **Janela de atividade** | horas com ≥ 20% das interações da persona |
-| **Dias desde última interação** | `hoje - last_interaction` em dias |
+If a persona has no interactions in last 7 days, record `total_interactions=0`.
 
 ---
 
-## Passo 3 — Comparar com pesos atuais
+## Step 2 — Calculate usage metrics
 
-Para cada persona, comparar a taxa de uso com o `current_weight`:
+For each persona, calculate:
 
-### Critérios de sugestão de aumento de peso
-
-Sugerir **aumento** de `current_weight` se:
-- `taxa_de_uso > current_weight + 0.15` (persona sendo usada muito mais do que o peso sugere)
-- `total_interactions >= 20` na semana (uso consistente e expressivo)
-
-Valor sugerido: `min(current_weight + 0.1, 1.0)`
-
-### Critérios de sugestão de redução de peso
-
-Sugerir **redução** de `current_weight` se:
-- `taxa_de_uso < current_weight - 0.2` (persona sendo usada muito menos do que o peso sugere)
-- `total_interactions <= 3` na semana (uso muito baixo)
-- `current_weight > 0.3` (não reduzir personas já com peso baixo)
-
-Valor sugerido: `max(current_weight - 0.1, 0.0)`
-
-### Sem sugestão
-
-Manter o peso atual se nenhum critério acima for atendido.
+| Metric | Calculation |
+|--------|-------------|
+| **Usage rate** | `total_interactions / total_interactions_all_personas` |
+| **Dominant intent** | intent with highest count |
+| **Dominant tool** | tool with highest count |
+| **Activity window** | hours with ≥ 20% of persona's interactions |
+| **Days since last interaction** | `today - last_interaction` in days |
 
 ---
 
-## Passo 4 — Gerar relatório
+## Step 3 — Compare with current weights
 
-Montar o relatório em linguagem clara e acessível para o usuário:
+For each persona, compare usage rate with `current_weight`:
+
+### Weight increase suggestion criteria
+
+Suggest **increase** of `current_weight` if:
+- `usage_rate > current_weight + 0.15` (persona being used much more than weight suggests)
+- `total_interactions >= 20` in the week (consistent and expressive usage)
+
+Suggested value: `min(current_weight + 0.1, 1.0)`
+
+### Weight reduction suggestion criteria
+
+Suggest **reduction** of `current_weight` if:
+- `usage_rate < current_weight - 0.2` (persona being used much less than weight suggests)
+- `total_interactions <= 3` in the week (very low usage)
+- `current_weight > 0.3` (don't reduce personas already with low weight)
+
+Suggested value: `max(current_weight - 0.1, 0.0)`
+
+### No suggestion
+
+Keep current weight if none of the above criteria are met.
+
+---
+
+## Step 4 — Generate report
+
+Assemble report in clear and accessible language for user:
 
 ```
-📊 Revisão Semanal — {data_inicio} a {data_fim}
+{locale:title}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{locale:separator}
 
-{Para cada persona com interações:}
+{For each persona with interactions:}
 
-🧠 {Nome da Persona}
-   Interações: {total_interactions} esta semana
-   Mais usada para: {intent_dominante}
-   Ferramenta favorita: {tool_dominante}
-   Horários de pico: {janela_de_atividade}
-   Peso atual: {current_weight}
-   {Se há sugestão:}
-   💡 Sugestão: ajustar peso para {novo_peso} ({motivo})
+{locale:persona_header}
+   {locale:interactions}
+   {locale:most_used_for}
+   {locale:favorite_tool}
+   {locale:peak_hours}
+   {locale:current_weight}
+   {If has suggestion:}
+   {locale:suggestion}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{locale:separator}
 
-{Se há personas sem interações:}
-😴 Personas sem atividade esta semana:
-   • {persona_1} (último uso: {dias} dias atrás)
-   • {persona_2} (último uso: {dias} dias atrás)
+{If has personas without interactions:}
+{locale:inactive_title}
+   {locale:inactive_item}
+   {locale:inactive_item}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{locale:separator}
 
-{Se há sugestões de ajuste:}
-Encontrei {N} sugestão(ões) de ajuste de peso.
-Quer que eu aplique as sugestões acima? (sim / não / escolher)
+{If has adjustment suggestions:}
+{locale:suggestions_prompt}
 
-{Se não há sugestões:}
-✅ Os pesos das suas personas estão bem calibrados para esta semana.
-Nenhum ajuste necessário.
+{If no suggestions:}
+{locale:no_suggestions}
 ```
 
-**Regras de linguagem do relatório:**
-- Usar linguagem simples, sem jargões técnicos
-- Substituir "current_weight" por "peso" ou "prioridade"
-- Substituir "intent" por "tipo de tarefa" ou "o que foi feito"
-- Substituir "tool" por "ferramenta"
-- Datas no formato `DD/MM/YYYY`
+**Report language rules:**
+- Use simple language, no technical jargon
+- Replace "current_weight" with "weight" or "priority"
+- Replace "intent" with "task type" or "what was done"
+- Replace "tool" with "tool"
+- Dates in `DD/MM/YYYY` format
 
 ---
 
-## Passo 5 — Aguardar confirmação antes de aplicar
+## Step 5 — Wait for confirmation before applying
 
-**Nunca aplicar ajustes sem confirmação explícita do usuário.**
+**Never apply adjustments without explicit user confirmation.**
 
-### Opções de resposta do usuário
+### User response options
 
-| Resposta | Ação |
-|----------|------|
-| `sim` / `confirmar` / `aplicar tudo` | Aplicar todos os ajustes sugeridos |
-| `não` / `cancelar` / `manter` | Não aplicar nenhum ajuste |
-| `escolher` / `selecionar` | Listar cada sugestão individualmente para confirmação |
+| Response | Action |
+|----------|--------|
+| `yes` / `confirm` / `apply all` | Apply all suggested adjustments |
+| `no` / `cancel` / `keep` | Don't apply any adjustment |
+| `choose` / `select` | List each suggestion individually for confirmation |
 
-### Fluxo de confirmação individual (quando usuário responde "escolher")
+### Individual confirmation flow (when user responds "choose")
 
-Para cada sugestão, perguntar:
-> "Ajustar peso de **{Nome da Persona}** de {peso_atual} para {novo_peso}? (sim/não)"
+For each suggestion, ask:
+> "{locale:confirm_individual}"
 
-Aguardar resposta antes de passar para a próxima.
+Wait for response before moving to next.
 
 ---
 
-## Passo 6 — Aplicar ajustes confirmados via weight-system
+## Step 6 — Apply confirmed adjustments via weight-system
 
-Para cada ajuste confirmado, chamar:
+For each confirmed adjustment, call:
 
 ```
 weight_system.adjust_weight(
     persona_slug="{slug}",
-    delta={novo_peso - peso_atual},
-    justification="Revisão semanal: taxa de uso {taxa_de_uso:.0%} vs peso {peso_atual} — {motivo}"
+    delta={new_weight - current_weight},
+    justification="Weekly review: usage rate {usage_rate:.0%} vs weight {current_weight} — {reason}"
 )
 ```
 
-O `weight-system` persiste o novo `current_weight` em `USER.md` e registra a mudança
-com timestamp e justificativa em `personas/{slug}/weight-history.md`.
+`weight-system` persists new `current_weight` in `USER.md` and records change
+with timestamp and justification in `personas/{slug}/weight-history.md`.
 
-Após aplicar todos os ajustes confirmados, confirmar ao usuário:
+After applying all confirmed adjustments, confirm to user:
 
 ```
-✅ Ajustes aplicados:
-   • {Persona 1}: {peso_antigo} → {peso_novo}
-   • {Persona 2}: {peso_antigo} → {peso_novo}
-
-Os pesos foram atualizados. Até a próxima segunda! 👋
+{locale:applied}
 ```
 
 ---
 
-## Edge cases
+## Edge Cases
 
-| Situação | Comportamento |
-|----------|---------------|
-| Nenhuma persona ativa em USER.md | Informar que não há personas configuradas e sugerir o onboarding |
-| life_log vazio (primeira semana) | Informar que ainda não há dados suficientes e que a revisão será mais útil na próxima semana |
-| Todas as personas sem interações | Apresentar relatório de inatividade e sugerir retomada, sem sugestões de peso |
-| Usuário não responde em 24h | Não aplicar nenhum ajuste; registrar que a revisão foi apresentada mas não confirmada |
-| Ajuste resultaria em peso < 0.0 ou > 1.0 | Clamp automático pelo weight-system; informar o valor final real ao usuário |
-| Persona em crise ativa | Não sugerir redução de peso para persona com crise ativa, independentemente da taxa de uso |
-| Empate entre personas na taxa de uso | Manter pesos atuais; não sugerir ajuste quando a diferença for < 0.05 |
+| Situation | Behavior |
+|-----------|----------|
+| No active personas in USER.md | Inform no personas configured and suggest onboarding |
+| Empty life_log (first week) | Inform not enough data yet and review will be more useful next week |
+| All personas without interactions | Present inactivity report and suggest resumption, no weight suggestions |
+| User doesn't respond in 24h | Don't apply any adjustment; record review was presented but not confirmed |
+| Adjustment would result in weight < 0.0 or > 1.0 | Automatic clamp by weight-system; inform user of actual final value |
+| Persona in active crisis | Don't suggest weight reduction for persona with active crisis, regardless of usage rate |
+| Tie between personas in usage rate | Keep current weights; don't suggest adjustment when difference is < 0.05 |
 
 ---
 
-## Dependências
+## Dependencies
 
-- `skills/life-log` — `get_persona_summary(persona, days=7)` para coletar dados de uso
-- `skills/weight-system` — `adjust_weight(persona_slug, delta, justification)` para aplicar ajustes
-- `USER.md` — lista de personas ativas e seus `current_weight`
-- `personas/{slug}/weight-history.md` — histórico de ajustes (escrito pelo weight-system)
+- `skills/life-log` — `get_persona_summary(persona, days=7)` to collect usage data
+- `skills/weight-system` — `adjust_weight(persona_slug, delta, justification)` to apply adjustments
+- `USER.md` — list of active personas and their `current_weight`
+- `personas/{slug}/weight-history.md` — adjustment history (written by weight-system)

@@ -2,206 +2,159 @@
 name: bastion/persona-engine
 version: 1.0.0
 description: >
-  Criação, edição e matching de personas do Bastion. Conduz fluxo conversacional
-  para criar novas personas, gera o arquivo personas/{slug}/SOUL.md com frontmatter
-  YAML obrigatório, e executa o algoritmo de matching para identificar qual persona
-  (ou quais personas) deve estar ativa em cada mensagem recebida.
+  Creation, editing and matching of Bastion personas. Conducts conversational
+  flow to create new personas, generates personas/{slug}/SOUL.md file with
+  mandatory YAML frontmatter, and executes matching algorithm to identify which
+  persona (or personas) should be active for each received message.
 triggers:
-  - "/nova-persona"
-  - "/criar-persona"
-  - "/editar-persona"
-  - mensagem do usuário que solicita criar, editar ou listar personas
-  - chamada interna do bastion/onboarding durante criação automática de personas
+  - "/nova-persona" or "/new-persona"
+  - "/criar-persona" or "/create-persona"
+  - "/editar-persona" or "/edit-persona"
+  - user message requesting to create, edit or list personas
+  - internal call from bastion/onboarding during automatic persona creation
 ---
 
 # Skill: bastion/persona-engine
 
-## Objetivo
+## Objective
 
-Gerenciar o ciclo de vida completo de personas: criação via fluxo conversacional,
-persistência em `personas/{slug}/SOUL.md`, e matching em tempo real para determinar
-qual persona (ou quais personas simultâneas) deve responder a cada mensagem.
-
----
-
-## Parte 1 — Criação de Persona (Persona Builder)
-
-### Quando acionar
-
-- Usuário envia `/nova-persona` ou `/criar-persona`
-- Usuário solicita explicitamente criar uma nova persona ("quero criar uma persona para X")
-- Chamada interna do `bastion/onboarding` para cada área de vida informada
-
-### Fluxo de Criação
-
-#### Passo 1 — Nome da persona
-
-Enviar ao usuário:
-
-```
-Vamos criar uma nova persona. 🎭
-
-Qual será o nome desta persona?
-(Ex: "Tech Lead", "Empreendedor", "Pai de Família", "Atleta")
-```
-
-Aguardar resposta. Armazenar como `persona.name`.
-
-**Validação:** nome não pode ser vazio. Se vazio, repetir a pergunta.
+Manage the complete lifecycle of personas: creation via conversational flow,
+persistence in `personas/{slug}/SOUL.md`, and real-time matching to determine
+which persona (or simultaneous personas) should respond to each message.
 
 ---
 
-#### Passo 2 — Domínio de atuação
+## Part 1 — Persona Creation (Persona Builder)
 
-Enviar:
+### When to trigger
+
+- User sends `/nova-persona` or `/criar-persona` or `/new-persona` or `/create-persona`
+- User explicitly requests to create a new persona ("I want to create a persona for X")
+- Internal call from `bastion/onboarding` for each informed life area
+
+### Creation Flow
+
+#### Step 1 — Persona Name
+
+Send to user:
 
 ```
-Qual é o domínio de atuação de "{persona.name}"?
+{locale:create_intro}
 
-Descreva as áreas de conhecimento e responsabilidade desta persona.
-(Ex: "código, arquitetura de software, liderança técnica de times")
+{locale:ask_name}
 ```
 
-Aguardar resposta. Parsear a resposta em uma lista de domínios.
-Armazenar como `persona.domains: list[str]`.
+Wait for response. Store as `persona.name`.
+
+**Validation:** name cannot be empty. If empty, repeat the question.
 
 ---
 
-#### Passo 3 — Tom de voz
+#### Step 2 — Domain
 
-Enviar:
+Send:
 
 ```
-Como "{persona.name}" deve se comunicar?
-
-Escolha as características que melhor descrevem o tom de voz:
-
-1. Formalidade: formal / informal
-2. Profundidade: direto e objetivo / detalhado e explicativo
-3. Estilo: técnico / acessível / motivacional / analítico
-
-Responda livremente ou use os exemplos acima como guia.
-(Ex: "informal, direto, técnico" ou "formal e detalhado, com exemplos práticos")
+{locale:ask_domain}
 ```
 
-Aguardar resposta. Armazenar como `persona.voice_tone: str` (texto livre descritivo).
+Wait for response. Parse response into a list of domains.
+Store as `persona.domains: list[str]`.
 
 ---
 
-#### Passo 4 — Keywords de ativação
+#### Step 3 — Voice Tone
 
-Enviar:
+Send:
 
 ```
-Quais palavras ou expressões devem ativar "{persona.name}"?
-
-Estas são as trigger_keywords — quando aparecerem em uma mensagem, esta persona
-será considerada para responder.
-
-Liste as keywords separadas por vírgula.
-(Ex: "PR, review, deploy, bug, arquitetura, código, refactor")
+{locale:ask_voice_tone}
 ```
 
-Aguardar resposta. Parsear em lista. Armazenar como `persona.trigger_keywords: list[str]`.
-
-**Validação:** deve ter pelo menos 1 keyword. Se vazio, repetir a pergunta.
+Wait for response. Store as `persona.voice_tone: str` (free-form descriptive text).
 
 ---
 
-#### Passo 5 — Skills do ClawHub
+#### Step 4 — Activation Keywords
 
-Enviar:
+Send:
 
 ```
-Quais skills do ClawHub são relevantes para "{persona.name}"?
-
-Posso sugerir com base no domínio informado, ou você pode listar diretamente.
-
-Sugestões para "{persona.domains}":
-{lista de sugestões inferidas — ver tabela de inferência abaixo}
-
-Digite os nomes das skills desejadas, separados por vírgula.
-Ou responda "nenhuma" para pular.
+{locale:ask_keywords}
 ```
 
-Aguardar resposta. Armazenar como `persona.clawhub_skills: list[str]`.
+Wait for response. Parse into list. Store as `persona.trigger_keywords: list[str]`.
 
-Se o usuário confirmar skills, verificar cada uma conforme a política de segurança
-(badge Verified + rating ≥ 4.0 + 50+ reviews) antes de instalar.
+**Validation:** must have at least 1 keyword. If empty, repeat the question.
 
-**Tabela de inferência de skills por domínio:**
+---
 
-| Domínio contém | Skills sugeridas |
+#### Step 5 — ClawHub Skills
+
+Send:
+
+```
+{locale:ask_skills}
+```
+
+Wait for response. Store as `persona.clawhub_skills: list[str]`.
+
+If user confirms skills, verify each one according to security policy
+(Verified badge + rating ≥ 4.0 + 50+ reviews) before installing.
+
+**Skill inference table by domain:**
+
+| Domain contains | Suggested skills |
 |---|---|
-| código / software / dev / tech | `github-integration`, `code-review-helper`, `jira-tasks` |
-| negócio / empreendimento / startup | `google-calendar`, `notion-tasks`, `web-search` |
-| saúde / bem-estar / fitness | `web-search` |
-| família / casa | `google-calendar` |
-| finanças / dinheiro / investimento | `web-search` |
-| estudos / aprendizado / educação | `web-search`, `notion-tasks` |
-| projetos / criação / hobby | `github-integration`, `notion-tasks` |
-| marketing / redes sociais / conteúdo | `web-search`, `notion-tasks` |
-| agenda / calendário / reuniões | `google-calendar` |
+| code / software / dev / tech | `github-integration`, `code-review-helper`, `jira-tasks` |
+| business / entrepreneurship / startup | `google-calendar`, `notion-tasks`, `web-search` |
+| health / wellness / fitness | `web-search` |
+| family / home | `google-calendar` |
+| finance / money / investment | `web-search` |
+| study / learning / education | `web-search`, `notion-tasks` |
+| projects / creation / hobby | `github-integration`, `notion-tasks` |
+| marketing / social media / content | `web-search`, `notion-tasks` |
+| schedule / calendar / meetings | `google-calendar` |
 
-Para domínios não mapeados: sugerir `web-search` como padrão mínimo.
-
----
-
-#### Passo 6 — Peso base
-
-Enviar:
-
-```
-Qual é o peso base de "{persona.name}"?
-
-O peso base (0.0 a 1.0) define a prioridade padrão desta persona.
-Personas com peso maior têm mais chance de ser ativadas quando há ambiguidade.
-
-• 0.9–1.0: persona principal, alta prioridade
-• 0.6–0.8: persona importante, prioridade média-alta
-• 0.3–0.5: persona secundária, prioridade média
-• 0.1–0.2: persona de baixa prioridade
-
-Digite um valor entre 0.0 e 1.0:
-```
-
-Aguardar resposta. Validar que é um número no intervalo [0.0, 1.0].
-Armazenar como `persona.base_weight: float`.
-
-**Validação:** se fora do intervalo ou não numérico, informar e repetir a pergunta.
+For unmapped domains: suggest `web-search` as the minimum default.
 
 ---
 
-#### Passo 7 — Confirmação e geração
+#### Step 6 — Base Weight
 
-Exibir resumo para confirmação:
+Send:
 
 ```
-Resumo da nova persona:
-
-🎭 Nome: {persona.name}
-🔑 Slug: {persona.slug}
-📂 Domínios: {persona.domains}
-🗣️ Tom de voz: {persona.voice_tone}
-🏷️ Keywords: {persona.trigger_keywords}
-🔧 Skills ClawHub: {persona.clawhub_skills ou "nenhuma"}
-⚖️ Peso base: {persona.base_weight}
-
-Confirma a criação? (sim/não — ou me diga o que ajustar)
+{locale:ask_base_weight}
 ```
 
-- Se "não" ou pedido de ajuste: perguntar qual passo deseja revisar e retornar ao passo correspondente.
-- Se "sim": executar a geração (ver seção abaixo) e instalar as skills confirmadas.
+Wait for response. Validate it's a number in range [0.0, 1.0].
+Store as `persona.base_weight: float`.
+
+**Validation:** if out of range or non-numeric, inform and repeat the question.
 
 ---
 
-### Geração do SOUL.md
+#### Step 7 — Confirmation and Generation
 
-Após confirmação, criar o arquivo `personas/{slug}/SOUL.md`:
+Display summary for confirmation:
 
-**Caminho:** `personas/{persona.slug}/SOUL.md`
+```
+{locale:summary}
+```
 
-**Conteúdo:**
+- If "no" or adjustment request: ask which step to review and return to corresponding step.
+- If "yes": execute generation (see section below) and install confirmed skills.
+
+---
+
+### SOUL.md Generation
+
+After confirmation, create the file `personas/{slug}/SOUL.md`:
+
+**Path:** `personas/{persona.slug}/SOUL.md`
+
+**Content:**
 
 ```yaml
 ---
@@ -216,54 +169,49 @@ voice_tone: "{persona.voice_tone}"
 created_at: "{ISO 8601 timestamp}"
 ---
 
-Você é a persona {persona.name}.
+You are the {persona.name} persona.
 
-Seu domínio abrange: {persona.domains em texto natural}.
-Tom de voz: {persona.voice_tone}.
+Your domain covers: {persona.domains in natural language}.
+Voice tone: {persona.voice_tone}.
 
-Foque em ajudar com tarefas, decisões e informações relacionadas ao seu domínio.
-Mantenha consistência com o tom de voz definido em todas as respostas.
+Focus on helping with tasks, decisions, and information related to your domain.
+Maintain consistency with the defined voice tone in all responses.
 ```
 
-Após criar o arquivo, informar o usuário:
+After creating the file, inform the user:
 
 ```
-✅ Persona "{persona.name}" criada com sucesso!
-
-Arquivo gerado: personas/{slug}/SOUL.md
-{se skills instaladas: Skills instaladas: {lista}}
-
-Esta persona será ativada automaticamente quando você mencionar: {trigger_keywords}
+{locale:created}
 ```
 
-Atualizar `USER.md` adicionando a nova persona à lista `personas`.
+Update `USER.md` adding the new persona to the `personas` list.
 
 ---
 
-### Geração do slug
+### Slug Generation
 
-Regras para gerar o `slug` a partir do `persona.name`:
+Rules for generating the `slug` from `persona.name`:
 
-1. Converter para lowercase
-2. Remover acentos e caracteres especiais (normalização Unicode NFKD)
-3. Substituir espaços e separadores por hífen
-4. Remover caracteres que não sejam letras, números ou hífens
-5. Remover hífens duplicados
-6. Remover hífens no início e no fim
+1. Convert to lowercase
+2. Remove accents and special characters (Unicode NFKD normalization)
+3. Replace spaces and separators with hyphens
+4. Remove characters that are not letters, numbers, or hyphens
+5. Remove duplicate hyphens
+6. Remove leading and trailing hyphens
 
-Exemplos:
+Examples:
 - `"Tech Lead"` → `tech-lead`
 - `"Saúde & Bem-estar"` → `saude-bem-estar`
 - `"Pai de Família"` → `pai-de-familia`
 - `"Dev/Arquiteto"` → `dev-arquiteto`
 
-**Verificação de unicidade:** se já existir uma pasta `personas/{slug}/`, adicionar sufixo numérico (`-2`, `-3`, etc.).
+**Uniqueness check:** if a folder `personas/{slug}/` already exists, add a numeric suffix (`-2`, `-3`, etc.).
 
 ---
 
-## Parte 2 — Frontmatter YAML Obrigatório do SOUL.md
+## Part 2 — Mandatory YAML Frontmatter for SOUL.md
 
-Todo arquivo `personas/{slug}/SOUL.md` gerado por este skill **deve** conter os seguintes campos no frontmatter YAML:
+Every `personas/{slug}/SOUL.md` file generated by this skill **must** contain the following fields in the YAML frontmatter:
 
 | Campo | Tipo | Descrição |
 |---|---|---|
@@ -318,91 +266,91 @@ created_at: "2025-01-15T10:30:00-03:00"
 
 ---
 
-## Parte 3 — Algoritmo de Matching
+## Part 3 — Matching Algorithm
 
-O matching é executado pelo orquestrador a cada mensagem recebida, antes de formular a resposta.
+The matching is executed by the orchestrator on every received message, before formulating the response.
 
-### Entradas
+### Inputs
 
-- `message`: texto da mensagem recebida
-- `personas`: lista de todas as personas ativas (lidas de `USER.md` + respectivos `SOUL.md`)
-- `current_time`: horário atual (para matching por hora do dia)
+- `message`: text of the received message
+- `personas`: list of all active personas (read from `USER.md` + respective `SOUL.md`)
+- `current_time`: current time (for time-of-day matching)
 
-### Saída
+### Output
 
-- `active_personas`: lista de personas ativas para esta mensagem, cada uma com seu `current_weight`
-- Se lista vazia após matching: aplicar fallback (ver Passo 4)
-
----
-
-### Passo 1 — Keyword Matching
-
-Para cada persona, verificar se alguma das suas `trigger_keywords` aparece na mensagem.
-
-**Regras:**
-- Comparação case-insensitive
-- Matching parcial é válido: keyword `"deploy"` ativa se a mensagem contém `"deployar"` ou `"deployed"`
-- Stemming básico: remover sufixos comuns antes de comparar (opcional, melhora recall)
-
-**Resultado:** lista de personas com pelo menos 1 keyword correspondente → `keyword_matches: list[Persona]`
+- `active_personas`: list of active personas for this message, each with its `current_weight`
+- If list is empty after matching: apply fallback (see Step 4)
 
 ---
 
-### Passo 2 — Análise Semântica
+### Step 1 — Keyword Matching
 
-Para personas que **não** foram capturadas pelo keyword matching, avaliar se o contexto semântico da mensagem é relevante para o domínio da persona.
+For each persona, check if any of its `trigger_keywords` appear in the message.
 
-**Como avaliar:**
-- Comparar o conteúdo da mensagem com os `domains` da persona
-- Usar o LLM para classificar a relevância semântica (score 0.0–1.0)
-- Threshold mínimo para ativação semântica: `0.6`
+**Rules:**
+- Case-insensitive comparison
+- Partial matching is valid: keyword `"deploy"` activates if the message contains `"deployar"` or `"deployed"`
+- Basic stemming: remove common suffixes before comparing (optional, improves recall)
 
-**Resultado:** lista adicional de personas ativadas semanticamente → `semantic_matches: list[Persona]`
-
-Combinar: `candidates = keyword_matches ∪ semantic_matches`
+**Result:** list of personas with at least 1 matching keyword → `keyword_matches: list[Persona]`
 
 ---
 
-### Passo 3 — Filtro por Hora do Dia (se configurado)
+### Step 2 — Semantic Analysis
 
-Para cada persona em `candidates`, verificar se possui `active_hours` configurado no SOUL.md.
+For personas that were **not** captured by keyword matching, evaluate whether the semantic context of the message is relevant to the persona's domain.
 
-**Se `active_hours` está definido:**
-- Converter `current_time` para o timezone da persona
-- Se o horário atual estiver **fora** da janela `active_hours.start`–`active_hours.end`:
-  - Reduzir o `current_weight` da persona em 30% para este matching
-  - Não remover da lista — apenas penalizar o peso
+**How to evaluate:**
+- Compare message content with the persona's `domains`
+- Use the LLM to classify semantic relevance (score 0.0–1.0)
+- Minimum threshold for semantic activation: `0.6`
 
-**Se `active_hours` não está definido:** nenhum ajuste de peso por horário.
+**Result:** additional list of semantically activated personas → `semantic_matches: list[Persona]`
 
----
-
-### Passo 4 — Ativação Simultânea de Múltiplas Personas
-
-Todas as personas em `candidates` são ativadas **simultaneamente**.
-
-Cada persona ativa contribui com seu `current_weight` (ajustado pelo filtro de horário se aplicável).
-
-**Não há limite de personas simultâneas** — se 3 personas têm keywords correspondentes, as 3 são ativadas.
-
-O orquestrador usa os `current_weight` para ponderar a influência de cada persona na resposta final.
-
-**Resultado:** `active_personas = candidates` com seus respectivos `current_weight`
+Combine: `candidates = keyword_matches ∪ semantic_matches`
 
 ---
 
-### Passo 5 — Fallback
+### Step 3 — Time-of-Day Filter (if configured)
 
-**Condição de fallback:** `candidates` está vazio após os Passos 1, 2 e 3.
+For each persona in `candidates`, check if it has `active_hours` configured in SOUL.md.
 
-**Comportamento:**
-1. Selecionar a persona com o maior `current_weight` entre todas as personas ativas
-2. Em caso de empate: selecionar a persona com maior `base_weight`
-3. Em caso de empate persistente: selecionar a persona criada mais recentemente (`created_at`)
+**If `active_hours` is defined:**
+- Convert `current_time` to the persona's timezone
+- If the current time is **outside** the `active_hours.start`–`active_hours.end` window:
+  - Reduce the persona's `current_weight` by 30% for this matching
+  - Do not remove from the list — only penalize the weight
 
-**Resultado:** `active_personas = [persona_com_maior_peso]`
+**If `active_hours` is not defined:** no time-based weight adjustment.
 
-O fallback garante que sempre haverá pelo menos uma persona ativa para responder.
+---
+
+### Step 4 — Simultaneous Activation of Multiple Personas
+
+All personas in `candidates` are activated **simultaneously**.
+
+Each active persona contributes with its `current_weight` (adjusted by the time filter if applicable).
+
+**No limit on simultaneous personas** — if 3 personas have matching keywords, all 3 are activated.
+
+The orchestrator uses `current_weight` to weight each persona's influence on the final response.
+
+**Result:** `active_personas = candidates` with their respective `current_weight`
+
+---
+
+### Step 5 — Fallback
+
+**Fallback condition:** `candidates` is empty after Steps 1, 2, and 3.
+
+**Behavior:**
+1. Select the persona with the highest `current_weight` among all active personas
+2. In case of tie: select the persona with the highest `base_weight`
+3. In case of persistent tie: select the most recently created persona (`created_at`)
+
+**Result:** `active_personas = [persona_with_highest_weight]`
+
+The fallback guarantees there will always be at least one active persona to respond.
 
 ---
 
@@ -410,13 +358,13 @@ O fallback garante que sempre haverá pelo menos uma persona ativa para responde
 
 ```python
 def match_personas(message: str, personas: list[Persona], current_time: datetime) -> list[ActivePersona]:
-    # Passo 1: keyword matching
+    # Step 1: keyword matching
     keyword_matches = [
         p for p in personas
         if any(kw.lower() in message.lower() for kw in p.trigger_keywords)
     ]
 
-    # Passo 2: semantic matching para personas não capturadas por keywords
+    # Step 2: semantic matching for personas not captured by keywords
     remaining = [p for p in personas if p not in keyword_matches]
     semantic_matches = [
         p for p in remaining
@@ -425,20 +373,20 @@ def match_personas(message: str, personas: list[Persona], current_time: datetime
 
     candidates = keyword_matches + semantic_matches
 
-    # Passo 3: ajuste de peso por hora do dia
+    # Step 3: time-of-day weight adjustment
     active_personas = []
     for persona in candidates:
         weight = persona.current_weight
         if persona.active_hours:
             if not is_within_active_hours(current_time, persona.active_hours):
-                weight = weight * 0.7  # penalidade de 30%
+                weight = weight * 0.7  # 30% penalty
         active_personas.append(ActivePersona(persona=persona, weight=weight))
 
-    # Passo 4: retornar todas as personas ativas simultaneamente
+    # Step 4: return all active personas simultaneously
     if active_personas:
         return active_personas
 
-    # Passo 5: fallback — persona com maior current_weight
+    # Step 5: fallback — persona with highest current_weight
     fallback = max(
         personas,
         key=lambda p: (p.current_weight, p.base_weight, p.created_at)
@@ -448,97 +396,91 @@ def match_personas(message: str, personas: list[Persona], current_time: datetime
 
 ---
 
-## Parte 4 — Edição de Persona
+## Part 4 — Persona Editing
 
-### Quando acionar
+### When to trigger
 
-- Usuário envia `/editar-persona` ou solicita editar uma persona existente
+- User sends `/editar-persona` or `/edit-persona` or requests to edit an existing persona
 
-### Fluxo
+### Flow
 
-1. Listar personas existentes para o usuário escolher
-2. Perguntar qual campo deseja editar (nome, domínios, tom de voz, keywords, skills, peso base)
-3. Conduzir o passo correspondente do fluxo de criação para o campo escolhido
-4. Confirmar a alteração
-5. Atualizar o `personas/{slug}/SOUL.md` com o novo valor
-6. Se o nome foi alterado: gerar novo slug, criar nova pasta, mover arquivos, atualizar `USER.md`
+1. List existing personas for the user to choose from
+2. Ask which field to edit (name, domains, voice tone, keywords, skills, base weight)
+3. Run the corresponding creation flow step for the chosen field
+4. Confirm the change
+5. Update `personas/{slug}/SOUL.md` with the new value
+6. If the name was changed: generate new slug, create new folder, move files, update `USER.md`
 
 ---
 
 ## Edge Cases
 
-### Edge Case A — Slug já existe
+### Edge Case A — Slug already exists
 
-**Situação:** Usuário tenta criar uma persona com nome que gera um slug já existente.
-(Ex: já existe `personas/tech-lead/` e o usuário quer criar "Tech Lead 2")
+**Situation:** User tries to create a persona with a name that generates an already existing slug.
+(e.g., `personas/tech-lead/` already exists and the user wants to create "Tech Lead 2")
 
-**Comportamento:**
-- Gerar slug com sufixo: `tech-lead-2`
-- Informar o usuário: `"Já existe uma persona com slug 'tech-lead'. A nova persona será criada como 'tech-lead-2'."`
-- Prosseguir normalmente com o slug ajustado
-
----
-
-### Edge Case B — Nenhuma persona cadastrada (fallback impossível)
-
-**Situação:** O algoritmo de matching tenta aplicar o fallback, mas não há nenhuma persona cadastrada.
-
-**Comportamento:**
-- Responder com a personalidade base do Bastion (SOUL.md raiz)
-- Sugerir ao usuário criar sua primeira persona: `"Você ainda não tem personas configuradas. Digite /nova-persona para criar sua primeira persona."`
+**Behavior:**
+- Generate slug with suffix: `tech-lead-2`
+- Inform the user: `"A persona with slug 'tech-lead' already exists. The new persona will be created as 'tech-lead-2'."`
+- Proceed normally with the adjusted slug
 
 ---
 
-### Edge Case C — Keyword muito genérica
+### Edge Case B — No personas registered (fallback impossible)
 
-**Situação:** O usuário define uma keyword extremamente genérica (ex: "a", "o", "de", "e") que ativaria a persona em praticamente toda mensagem.
+**Situation:** The matching algorithm tries to apply the fallback, but no personas are registered.
 
-**Comportamento:**
-- Detectar keywords com menos de 3 caracteres ou que sejam stopwords comuns em português/inglês
-- Avisar o usuário: `"A keyword '{kw}' é muito genérica e pode ativar esta persona em quase todas as mensagens. Deseja mantê-la mesmo assim? (sim/não)"`
-- Se "sim": aceitar e registrar o aviso no SOUL.md como comentário
-- Se "não": remover a keyword e pedir uma substituta
+**Behavior:**
+- Respond with Bastion's base personality (root SOUL.md)
+- Suggest the user create their first persona using the `{locale:no_personas_fallback}` message
 
 ---
 
-### Edge Case D — Peso base fora do intervalo
+### Edge Case C — Too generic keyword
 
-**Situação:** Usuário digita um valor inválido para o peso base (ex: "1.5", "-0.1", "alto").
+**Situation:** The user defines an extremely generic keyword (e.g., "a", "o", "de", "e") that would activate the persona in almost every message.
 
-**Comportamento:**
+**Behavior:**
+- Detect keywords with fewer than 3 characters or that are common stopwords in Portuguese/English
+- Warn the user using `{locale:generic_keyword_warning}`
+- If "yes": accept and record the warning in SOUL.md as a comment
+- If "no": remove the keyword and ask for a replacement
+
+---
+
+### Edge Case D — Base weight out of range
+
+**Situation:** User types an invalid value for the base weight (e.g., "1.5", "-0.1", "high").
+
+**Behavior:**
 
 ```
-O peso base deve ser um número entre 0.0 e 1.0.
-
-• 0.9 = alta prioridade
-• 0.5 = prioridade média
-• 0.2 = baixa prioridade
-
-Digite um valor válido:
+{locale:invalid_weight}
 ```
 
-Repetir até receber um valor válido.
+Repeat until a valid value is received.
 
 ---
 
-### Edge Case E — Múltiplas personas com mesmo peso no fallback
+### Edge Case E — Multiple personas with same weight in fallback
 
-**Situação:** Duas ou mais personas têm exatamente o mesmo `current_weight` e `base_weight` no momento do fallback.
+**Situation:** Two or more personas have exactly the same `current_weight` and `base_weight` at the time of fallback.
 
-**Comportamento:**
-- Usar `created_at` como critério de desempate final: persona mais recente tem prioridade
-- Se `created_at` também for igual (improvável): usar ordem alfabética do slug
+**Behavior:**
+- Use `created_at` as the final tiebreaker: most recently created persona has priority
+- If `created_at` is also equal (unlikely): use alphabetical order of slug
 
 ---
 
-### Edge Case F — Persona sem keywords ativada apenas semanticamente
+### Edge Case F — Persona without keywords activated only semantically
 
-**Situação:** Uma persona tem `trigger_keywords: []` (lista vazia) e só pode ser ativada por análise semântica.
+**Situation:** A persona has `trigger_keywords: []` (empty list) and can only be activated by semantic analysis.
 
-**Comportamento:**
-- Permitir a criação (keywords vazias são válidas)
-- Avisar o usuário durante a criação: `"Esta persona não tem keywords definidas e só será ativada por análise semântica. Isso pode resultar em ativações menos precisas."`
-- No matching, pular o Passo 1 para esta persona e ir direto ao Passo 2
+**Behavior:**
+- Allow creation (empty keywords are valid)
+- Warn the user during creation that this persona will only be activated by semantic analysis and may result in less precise activations
+- In matching, skip Step 1 for this persona and go directly to Step 2
 
 ---
 
@@ -560,10 +502,10 @@ Repetir até receber um valor válido.
 
 ---
 
-## Notas de Implementação
+## Implementation Notes
 
-- O `current_weight` é inicializado igual ao `base_weight` na criação e gerenciado pelo skill `bastion/weight-system` após isso. O `persona-engine` não altera `current_weight` diretamente — apenas lê para matching e fallback.
-- O matching é executado pelo orquestrador antes de cada resposta. O resultado (`active_personas`) é injetado no contexto da resposta.
-- Personas criadas durante o onboarding (`bastion/onboarding`) seguem o mesmo formato de SOUL.md definido aqui. O onboarding chama este skill internamente para garantir consistência.
-- O arquivo `USER.md` deve ser atualizado sempre que uma persona é criada, editada ou removida — mantendo a lista `personas` sincronizada com as pastas em `personas/`.
-- Skills do ClawHub instaladas para uma persona são registradas em `personas/{slug}/skills.json` além do frontmatter do SOUL.md.
+- `current_weight` is initialized equal to `base_weight` at creation and managed by the `bastion/weight-system` skill after that. The `persona-engine` does not alter `current_weight` directly — it only reads it for matching and fallback.
+- Matching is executed by the orchestrator before each response. The result (`active_personas`) is injected into the response context.
+- Personas created during onboarding (`bastion/onboarding`) follow the same SOUL.md format defined here. Onboarding calls this skill internally to ensure consistency.
+- `USER.md` must be updated whenever a persona is created, edited, or removed — keeping the `personas` list in sync with the folders under `personas/`.
+- ClawHub skills installed for a persona are recorded in `personas/{slug}/skills.json` in addition to the SOUL.md frontmatter.
