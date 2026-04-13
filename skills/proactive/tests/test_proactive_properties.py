@@ -42,8 +42,8 @@ class FakeLifeLogAdapter:
     def __init__(self, last_interactions: dict[str, datetime | None]) -> None:
         self._data = last_interactions
 
-    async def get_last_interaction(self, persona_slug: str) -> datetime | None:
-        return self._data.get(persona_slug)
+    async def get_last_interactions(self, personas: list[str]) -> dict[str, datetime | None]:
+        return {p: self._data.get(p) for p in personas}
 
 
 class FakeClawHubClient:
