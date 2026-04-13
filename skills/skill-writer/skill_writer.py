@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from i18n import get_string, load_locale
 
@@ -247,7 +246,7 @@ class PolicyResult:
     """Result of the quality policy check for a skill."""
 
     approved: bool
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 @dataclass
@@ -361,7 +360,7 @@ def search_mcps(description: str, repo_path: Path) -> list[SkillDiscoveryResult]
     return search_skills(description, repo_path)
 
 
-def _parse_skill_line(line: str, category: str) -> Optional[SkillDiscoveryResult]:
+def _parse_skill_line(line: str, category: str) -> SkillDiscoveryResult | None:
     """Parse a markdown list line into a SkillDiscoveryResult. Returns None if unparseable."""
     # Expect format: - [name](url) — description
     match = re.match(r"-\s+\[([^\]]+)\]\(([^)]+)\)\s*[—-]\s*(.+)", line)
@@ -634,7 +633,7 @@ def log_skill_event(
     version: str,
     persona: str,
     result: str,
-    reason: Optional[str] = None,
+    reason: str | None = None,
 ) -> None:
     """
     Register a skill installation event in the life_log.
