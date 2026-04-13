@@ -90,6 +90,18 @@ class InMemoryLifeLogAdapter:
             reverse=True,
         )
 
+    async def get_last_interactions(
+        self,
+        personas: list[str],
+    ) -> dict[str, datetime | None]:
+        result: dict[str, datetime | None] = {p: None for p in personas}
+        for record in self._records:
+            if record.persona in result:
+                current_last = result[record.persona]
+                if current_last is None or record.timestamp > current_last:
+                    result[record.persona] = record.timestamp
+        return result
+
     @property
     def all_records(self) -> list[InteractionRecord]:
         return list(self._records)
