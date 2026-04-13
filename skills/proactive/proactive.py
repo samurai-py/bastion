@@ -211,7 +211,6 @@ async def check_cve_alerts(
 def main() -> None:
     import argparse
     import asyncio
-    import sys
     import json
 
     parser = argparse.ArgumentParser(description="Proactive Skill CLI")
