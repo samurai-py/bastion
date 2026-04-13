@@ -61,10 +61,10 @@ class CVEAlert:
 class LifeLogAdapter(Protocol):
     """Port for querying the life log — implemented by SQLite or Supabase adapters."""
 
-    async def get_last_interaction(self, persona_slug: str) -> datetime | None:
+    async def get_last_interactions(self, personas: list[str]) -> dict[str, datetime | None]:
         """
-        Return the timestamp of the most recent interaction for the given persona,
-        or None if no interactions have been recorded.
+        Return the timestamp of the most recent interaction for the given personas,
+        mapping each persona slug to its last interaction timestamp, or None.
         """
         ...
 
@@ -114,8 +114,10 @@ async def check_inactive_personas(
     now = datetime.now(tz=timezone.utc)
     inactive: list[PersonaActivity] = []
 
+    last_interactions = await life_log_adapter.get_last_interactions(personas)
+
     for slug in personas:
-        last = await life_log_adapter.get_last_interaction(slug)
+        last = last_interactions.get(slug)
 
         if last is None:
             days_inactive = threshold_days  # treat as at least threshold
@@ -243,8 +245,8 @@ def main() -> None:
                 print(get_string(locale, "warning_adapter", error=e))
                 # Mock adapter for fallback
                 class MockAdapter:
-                    async def get_last_interaction(self, slug):
-                        return None
+                    async def get_last_interactions(self, personas):
+                        return {p: None for p in personas}
                 adapter = MockAdapter()
             
             personas_list = json.loads(args.personas)
