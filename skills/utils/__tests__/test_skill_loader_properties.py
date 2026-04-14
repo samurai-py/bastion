@@ -250,7 +250,7 @@ def _locale_without_keys(missing_keys: list[str]) -> st.SearchStrategy[dict[str,
 @given(
     missing_keys=st.lists(_missing_key_strategy, min_size=1, max_size=5, unique=True),
     surrounding_text=st.text(
-        alphabet=st.characters(blacklist_characters="\x00\r"),
+        alphabet=st.characters(blacklist_characters="\x00\r", blacklist_categories=("Cs",)),
         min_size=0,
         max_size=200,
     ).filter(lambda t: not _REMAINING_TOKEN_RE.search(t)),
@@ -417,7 +417,7 @@ _non_pt_br_language_strategy = st.text(
     keys=st.lists(_key_strategy, min_size=1, max_size=5, unique=True),
     values=st.lists(_value_strategy, min_size=1, max_size=5),
     surrounding_text=st.text(
-        alphabet=st.characters(blacklist_characters="\x00\r"),
+        alphabet=st.characters(blacklist_characters="\x00\r", blacklist_categories=("Cs",)),
         min_size=0,
         max_size=200,
     ).filter(lambda t: not _REMAINING_TOKEN_RE.search(t)),

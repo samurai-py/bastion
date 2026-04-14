@@ -16,16 +16,24 @@ Path rules (Requirements 6.5):
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from i18n import get_string, load_locale
+
+_log_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+
+def _write_log_entry(log_file: Path, entry_str: str) -> None:
+    with log_file.open("a", encoding="utf-8") as f:
+        f.write(entry_str + "\n")
+
 
 # ---------------------------------------------------------------------------
 # Enums & dataclasses
@@ -109,7 +117,7 @@ def generate_skill_md(content: SkillContent) -> str:
     skill_md = (
         f"---\n"
         f"name: {meta.name}\n"
-        f"version: \"{meta.version}\"\n"
+        f'version: "{meta.version}"\n'
         f"description: >\n"
         f"  {meta.description}\n"
         f"triggers:\n"
@@ -164,9 +172,7 @@ def get_skill_path(
     """
     if scope == SkillScope.PRIVATE:
         if not persona_slug:
-            raise ValueError(
-                "persona_slug is required for PRIVATE scope skills"
-            )
+            raise ValueError("persona_slug is required for PRIVATE scope skills")
         return Path("personas") / persona_slug / "SKILL.md"
 
     # GLOBAL
@@ -211,12 +217,8 @@ def validate_skill_md(content: str) -> bool:
             return False
 
     # Check all required body sections are present
-    body = content[match.end():]
-    for section in _REQUIRED_BODY_SECTIONS:
-        if section not in body:
-            return False
-
-    return True
+    body = content[match.end() :]
+    return all(section in body for section in _REQUIRED_BODY_SECTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +249,7 @@ class PolicyResult:
     """Result of the quality policy check for a skill."""
 
     approved: bool
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 @dataclass
@@ -361,7 +363,7 @@ def search_mcps(description: str, repo_path: Path) -> list[SkillDiscoveryResult]
     return search_skills(description, repo_path)
 
 
-def _parse_skill_line(line: str, category: str) -> Optional[SkillDiscoveryResult]:
+def _parse_skill_line(line: str, category: str) -> SkillDiscoveryResult | None:
     """Parse a markdown list line into a SkillDiscoveryResult. Returns None if unparseable."""
     # Expect format: - [name](url) — description
     match = re.match(r"-\s+\[([^\]]+)\]\(([^)]+)\)\s*[—-]\s*(.+)", line)
@@ -409,7 +411,9 @@ def run_quality_policy(skill: SkillDiscoveryResult, locale: dict) -> PolicyResul
         return PolicyResult(approved=True)
 
     if skill.cves:
-        return PolicyResult(approved=False, reason=get_string(locale, "known_cves", cves=", ".join(skill.cves)))
+        return PolicyResult(
+            approved=False, reason=get_string(locale, "known_cves", cves=", ".join(skill.cves))
+        )
 
     if skill.rating < 4.0:
         return PolicyResult(
@@ -485,7 +489,9 @@ def sage_scan(skill: SkillDiscoveryResult, locale: dict) -> PolicyResult:
     if result.returncode != 0:
         return PolicyResult(
             approved=False,
-            reason=get_string(locale, "sage_blocked", reason=result.stderr.strip() or result.stdout.strip()),
+            reason=get_string(
+                locale, "sage_blocked", reason=result.stderr.strip() or result.stdout.strip()
+            ),
         )
     return PolicyResult(approved=True)
 
@@ -533,7 +539,7 @@ def install_skill_for_persona(skill: SkillDiscoveryResult, persona_slug: str, lo
         name=skill.name,
         version="latest",
         source=skill.url,
-        installed_at=datetime.now(timezone.utc).isoformat(),
+        installed_at=datetime.now(UTC).isoformat(),
     )
     update_skills_json(persona_slug, entry, locale)
     log_skill_event(skill.name, entry.version, persona_slug, "installed")
@@ -550,9 +556,7 @@ def update_skills_json(persona_slug: str, skill_entry: SkillEntry, locale: dict)
         persona_slug: The persona's slug.
         skill_entry: The skill entry to add or update.
     """
-    skills_path = (
-        Path("config") / "workspace" / "personas" / persona_slug / "skills.json"
-    )
+    skills_path = Path("config") / "workspace" / "personas" / persona_slug / "skills.json"
     skills_path.parent.mkdir(parents=True, exist_ok=True)
 
     manifest: SkillsManifest
@@ -563,18 +567,18 @@ def update_skills_json(persona_slug: str, skill_entry: SkillEntry, locale: dict)
             print(get_string(locale, "skills_json_corrupt", path=skills_path))
             manifest = SkillsManifest(
                 persona=persona_slug,
-                updated_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(UTC).isoformat(),
             )
     else:
         manifest = SkillsManifest(
             persona=persona_slug,
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
         )
 
     # Replace existing entry with same name, or append
     manifest.skills = [s for s in manifest.skills if s.name != skill_entry.name]
     manifest.skills.append(skill_entry)
-    manifest.updated_at = datetime.now(timezone.utc).isoformat()
+    manifest.updated_at = datetime.now(UTC).isoformat()
 
     skills_path.write_text(serialize_skills_json(manifest), encoding="utf-8")
 
@@ -634,7 +638,7 @@ def log_skill_event(
     version: str,
     persona: str,
     result: str,
-    reason: Optional[str] = None,
+    reason: str | None = None,
 ) -> None:
     """
     Register a skill installation event in the life_log.
@@ -653,7 +657,7 @@ def log_skill_event(
     log_file = log_dir / "skill_events.jsonl"
 
     entry: dict = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "name": skill_name,
         "version": version,
         "persona": persona,
@@ -662,8 +666,8 @@ def log_skill_event(
     if reason:
         entry["reason"] = reason
 
-    with log_file.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    entry_str = json.dumps(entry, ensure_ascii=False)
+    _log_executor.submit(_write_log_entry, log_file, entry_str)
 
 
 # ---------------------------------------------------------------------------
@@ -671,7 +675,9 @@ def log_skill_event(
 # ---------------------------------------------------------------------------
 
 
-def run_persona_skills_flow(persona_description: str, persona_slug: str, language: str = "en") -> None:
+def run_persona_skills_flow(
+    persona_description: str, persona_slug: str, language: str = "en"
+) -> None:
     """
     Full skill import flow for a persona.
 
@@ -728,17 +734,16 @@ def run_persona_skills_flow(persona_description: str, persona_slug: str, languag
 # ---------------------------------------------------------------------------
 def main() -> None:
     import argparse
-    import json
-    import sys
-    
+
     parser = argparse.ArgumentParser(description="CLI wrapper generated by refactoring")
     parser.add_argument("--action", help="Action to perform")
     parser.add_argument("--args-json", default="{}", help="Arguments as JSON string")
-    
+
     args = parser.parse_args()
     print("Execution of stub CLI for", __file__)
     print("Action:", args.action)
     print("Args:", args.args_json)
+
 
 if __name__ == "__main__":
     main()
