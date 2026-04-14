@@ -49,6 +49,9 @@ class FakeClawHubClient:
     async def get_cves(self, skill_name: str) -> list[dict[str, str]]:
         return self._data.get(skill_name, [])
 
+    async def get_batch_cves(self, skill_names: list[str]) -> dict[str, list[dict[str, str]]]:
+        return {name: self._data.get(name, []) for name in skill_names if name in self._data}
+
 
 # ---------------------------------------------------------------------------
 # Hypothesis strategies
