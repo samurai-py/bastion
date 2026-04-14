@@ -119,3 +119,17 @@ class SupabaseLifeLogAdapter:
             "SupabaseLifeLogAdapter.get_persona_summary is not yet implemented. "
             "Set DB_STRATEGY=sqlite to use the local SQLite adapter."
         )
+
+    async def get_last_interactions(
+        self,
+        personas: list[str],
+    ) -> dict[str, datetime | None]:
+        """
+        Return the timestamp of the most recent interaction for the given personas.
+
+        Stub: raises NotImplementedError until supabase-py integration is complete.
+        """
+        raise NotImplementedError(
+            "SupabaseLifeLogAdapter.get_last_interactions is not yet implemented. "
+            "Set DB_STRATEGY=sqlite to use the local SQLite adapter."
+        )

@@ -168,6 +168,46 @@ class TestCLI:
         assert result.exit_code == 0
         assert "No metrics" in result.output
 
+    def test_dashboard_command_with_data(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        metrics_file = tmp_path / "config/logs/validation-metrics.json"
+        metrics_file.parent.mkdir(parents=True, exist_ok=True)
+
+        data = {
+            "skill-ok": {
+                "total": 100,
+                "valid": 98,
+                "recent": [True] * 98 + [False] * 2,
+                "last_error": None,
+                "last_updated": "2024-01-01T00:00:00Z",
+            },
+            "skill-warn": {
+                "total": 100,
+                "valid": 92,
+                "recent": [True] * 92 + [False] * 8,
+                "last_error": None,
+                "last_updated": "2024-01-01T00:00:00Z",
+            },
+            "skill-drift": {
+                "total": 100,
+                "valid": 80,
+                "recent": [True] * 80 + [False] * 20,
+                "last_error": None,
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        }
+        metrics_file.write_text(json.dumps(data))
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["dashboard"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "skill-ok" in result.output
+        assert "✓ OK" in result.output
+        assert "skill-warn" in result.output
+        assert "⚠ WARN" in result.output
+        assert "skill-drift" in result.output
+        assert "✗ DRIFT" in result.output
+
 
 # ---------------------------------------------------------------------------
 # Real skills integration (life-log, persona-engine)

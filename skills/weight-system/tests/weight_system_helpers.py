@@ -4,7 +4,10 @@ Test helpers for weight-system tests — in-memory persistence adapter.
 
 from __future__ import annotations
 
-from weight_system import WeightHistoryEntry, WeightPersistenceProtocol
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from weight_system import WeightHistoryEntry
 
 
 class InMemoryWeightAdapter:

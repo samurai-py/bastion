@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -57,8 +58,6 @@ def get_string(locale: dict[str, Any], key: str, **kwargs: Any) -> str:
     """
     value = locale.get(key, key)
     if kwargs:
-        try:
+        with contextlib.suppress(KeyError):
             value = value.format(**kwargs)
-        except KeyError:
-            pass
     return value
