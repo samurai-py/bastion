@@ -16,6 +16,7 @@ Path rules (Requirements 6.5):
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import subprocess
@@ -25,6 +26,14 @@ from enum import Enum
 from pathlib import Path
 
 from i18n import get_string, load_locale
+
+_log_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+
+def _write_log_entry(log_file: Path, entry_str: str) -> None:
+    with log_file.open("a", encoding="utf-8") as f:
+        f.write(entry_str + "\n")
+
 
 # ---------------------------------------------------------------------------
 # Enums & dataclasses
@@ -657,8 +666,8 @@ def log_skill_event(
     if reason:
         entry["reason"] = reason
 
-    with log_file.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    entry_str = json.dumps(entry, ensure_ascii=False)
+    _log_executor.submit(_write_log_entry, log_file, entry_str)
 
 
 # ---------------------------------------------------------------------------
