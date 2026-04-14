@@ -35,7 +35,7 @@ import concurrent.futures
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -55,7 +55,7 @@ MIN_WEIGHT_FOR_GLOBAL_HOT: float = 0.3
 # ---------------------------------------------------------------------------
 
 
-class MemoryTier(str, Enum):
+class MemoryTier(StrEnum):
     """Tiered memory levels — mirrors the original ivangdavila/self-improving."""
 
     HOT = "HOT"
