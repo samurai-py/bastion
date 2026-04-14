@@ -110,6 +110,23 @@ class TestExtractExampleFromSkill:
         result = extractor.extract_example_from_skill(tmp_skills / "dir-skill")
         assert result == {"dir": "test"}
 
+    def test_unreadable_file_oserror(self, extractor, tmp_skills, monkeypatch):
+        content = textwrap.dedent("""\
+            ## Output Example
+            ```json
+            {"status": "ok"}
+            ```
+        """)
+        skill_md = _make_skill_md(tmp_skills, "unreadable-skill", content)
+
+        def mock_read_text(*args, **kwargs):
+            raise OSError("Mocked permission denied")
+
+        monkeypatch.setattr(Path, "read_text", mock_read_text)
+
+        result = extractor.extract_example_from_skill(skill_md)
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # generate_schema_for_skill

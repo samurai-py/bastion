@@ -119,12 +119,10 @@ class UserMdAdapter:
             f"{entry.justification}\n"
         )
 
-        if not history_path.exists():
-            header = "# Weight History\n\n"
-            history_path.write_text(header + line, encoding="utf-8")
-        else:
-            with history_path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
+        with history_path.open("a", encoding="utf-8") as fh:
+            if fh.tell() == 0:
+                fh.write("# Weight History\n\n")
+            fh.write(line)
 
         logger.debug(
             "Weight history appended: slug=%s ts=%s", slug, iso_ts
@@ -159,7 +157,7 @@ class UserMdAdapter:
         lines = frontmatter.splitlines()
         in_target_persona = False
 
-        for i, line in enumerate(lines):
+        for line in lines:
             if slug_pattern.search(line):
                 in_target_persona = True
                 continue

@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-
 from skill_writer import (
     SkillContent,
     SkillMetadata,
@@ -171,7 +170,7 @@ def test_property14_metadata_values_present_in_output(
         f"Skill version '{content.metadata.version}' not found in generated SKILL.md"
     )
     assert content.metadata.description in skill_md, (
-        f"Skill description not found in generated SKILL.md"
+        "Skill description not found in generated SKILL.md"
     )
 
 

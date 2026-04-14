@@ -23,11 +23,11 @@ Metrics tracking is enabled by default. Disable with ``track_metrics=False``::
 import json
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
+from .alerts import Alert, run_alert_scan
 from .auto_validator import AutoValidator, ValidationResult
 from .metrics_tracker import MetricsTracker
-from .alerts import run_alert_scan, Alert
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ _SKILLS_DIR = Path("skills")
 _METRICS_FILE = Path("config/logs/validation-metrics.json")
 
 # Singleton instances (lazy-initialised)
-_validator: Optional[AutoValidator] = None
-_tracker: Optional[MetricsTracker] = None
+_validator: AutoValidator | None = None
+_tracker: MetricsTracker | None = None
 
 
 def _get_validator() -> AutoValidator:
@@ -123,4 +123,4 @@ def validate_skill_output(
     return result
 
 
-__all__ = ["validate_skill_output", "ValidationResult", "AutoValidator", "MetricsTracker", "run_alert_scan", "Alert"]
+__all__ = ["Alert", "AutoValidator", "MetricsTracker", "ValidationResult", "run_alert_scan", "validate_skill_output"]
