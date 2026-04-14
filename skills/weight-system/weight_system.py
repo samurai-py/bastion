@@ -157,7 +157,7 @@ class UserMdAdapter:
         lines = frontmatter.splitlines()
         in_target_persona = False
 
-        for i, line in enumerate(lines):
+        for line in lines:
             if slug_pattern.search(line):
                 in_target_persona = True
                 continue
