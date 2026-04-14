@@ -31,6 +31,7 @@ History recording (Requirement 12.5):
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -130,6 +131,7 @@ class FileSystemAdapter:
     def __init__(self, personas_dir: Path, user_md_path: Path) -> None:
         self._personas_dir = personas_dir
         self._user_md = user_md_path
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     # ------------------------------------------------------------------
     # PromotionPersistenceProtocol implementation
@@ -163,19 +165,24 @@ class FileSystemAdapter:
         memory_path = persona_dir / "memory.md"
         entry = self._format_pattern_entry(pattern)
 
-        if not memory_path.exists():
-            memory_path.write_text(f"# HOT Memory — {slug}\n\n{entry}", encoding="utf-8")
-        else:
-            content = memory_path.read_text(encoding="utf-8")
-            # Replace existing entry or append
-            if f"<!-- pattern:{pattern.id} -->" in content:
-                content = self._replace_pattern_entry(content, pattern.id, entry)
-                memory_path.write_text(content, encoding="utf-8")
-            else:
-                with memory_path.open("a", encoding="utf-8") as fh:
-                    fh.write(entry)
+        def _write_save_pattern():
+            try:
+                if not memory_path.exists():
+                    memory_path.write_text(f"# HOT Memory — {slug}\n\n{entry}", encoding="utf-8")
+                else:
+                    content = memory_path.read_text(encoding="utf-8")
+                    # Replace existing entry or append
+                    if f"<!-- pattern:{pattern.id} -->" in content:
+                        content = self._replace_pattern_entry(content, pattern.id, entry)
+                        memory_path.write_text(content, encoding="utf-8")
+                    else:
+                        with memory_path.open("a", encoding="utf-8") as fh:
+                            fh.write(entry)
+                logger.debug("Pattern saved: slug=%s id=%s tier=%s", slug, pattern.id, pattern.tier)
+            except Exception as e:
+                logger.error("Failed to save pattern (slug=%s id=%s): %s", slug, pattern.id, e)
 
-        logger.debug("Pattern saved: slug=%s id=%s tier=%s", slug, pattern.id, pattern.tier)
+        self._executor.submit(_write_save_pattern)
 
     def get_current_weight(self, persona_slug: str) -> float:
         """
@@ -191,7 +198,9 @@ class FileSystemAdapter:
         content = self._user_md.read_text(encoding="utf-8")
         weight = self._parse_weight(content, persona_slug)
         if weight is None:
-            logger.warning("Persona '%s' not found in USER.md; defaulting weight to 0.0", persona_slug)
+            logger.warning(
+                "Persona '%s' not found in USER.md; defaulting weight to 0.0", persona_slug
+            )
             return 0.0
         return weight
 
@@ -215,18 +224,28 @@ class FileSystemAdapter:
         iso_ts = timestamp.isoformat()
         line = f"- {iso_ts} | {action} | pattern:{pattern_id} | {justification}\n"
 
-        if not history_path.exists():
-            history_path.write_text(f"# Weight History\n\n{line}", encoding="utf-8")
-        else:
-            with history_path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
+        def _write_append_history():
+            try:
+                if not history_path.exists():
+                    history_path.write_text(f"# Weight History\n\n{line}", encoding="utf-8")
+                else:
+                    with history_path.open("a", encoding="utf-8") as fh:
+                        fh.write(line)
+                logger.debug(
+                    "Promotion history appended: slug=%s action=%s pattern=%s",
+                    persona_slug,
+                    action,
+                    pattern_id,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to append promotion history (slug=%s pattern=%s): %s",
+                    persona_slug,
+                    pattern_id,
+                    e,
+                )
 
-        logger.debug(
-            "Promotion history appended: slug=%s action=%s pattern=%s",
-            persona_slug,
-            action,
-            pattern_id,
-        )
+        self._executor.submit(_write_append_history)
 
     # ------------------------------------------------------------------
     # Internal helpers — all scoped to a single persona slug
@@ -282,7 +301,11 @@ class FileSystemAdapter:
         import re
 
         pattern = re.compile(
-            r"\n<!-- pattern:" + re.escape(pattern_id) + r" -->.*?<!-- /pattern:" + re.escape(pattern_id) + r" -->\n",
+            r"\n<!-- pattern:"
+            + re.escape(pattern_id)
+            + r" -->.*?<!-- /pattern:"
+            + re.escape(pattern_id)
+            + r" -->\n",
             re.DOTALL,
         )
         return pattern.sub(new_entry, content)
@@ -295,7 +318,11 @@ class FileSystemAdapter:
         import re
 
         block_pattern = re.compile(
-            r"<!-- pattern:" + re.escape(pattern_id) + r" -->(.*?)<!-- /pattern:" + re.escape(pattern_id) + r" -->",
+            r"<!-- pattern:"
+            + re.escape(pattern_id)
+            + r" -->(.*?)<!-- /pattern:"
+            + re.escape(pattern_id)
+            + r" -->",
             re.DOTALL,
         )
         m = block_pattern.search(content)
@@ -558,6 +585,7 @@ def main() -> None:
     print("Execution of stub CLI for", __file__)
     print("Action:", args.action)
     print("Args:", args.args_json)
+
 
 if __name__ == "__main__":
     main()
