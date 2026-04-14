@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -111,13 +111,27 @@ def _generate_slug(name: str, persistence: PersonaPersistenceProtocol) -> str:
         slug = "persona"
 
     # Ensure uniqueness
-    candidate = slug
-    counter = 2
-    while persistence.slug_exists(candidate):
-        candidate = f"{slug}-{counter}"
-        counter += 1
+    if not persistence.slug_exists(slug):
+        return slug
 
-    return candidate
+    # Exponential search to find an upper bound
+    low = 2
+    high = 2
+    while persistence.slug_exists(f"{slug}-{high}"):
+        low = high
+        high *= 2
+
+    # Binary search to find the exact first available suffix between low and high
+    ans = high
+    while low <= high:
+        mid = (low + high) // 2
+        if not persistence.slug_exists(f"{slug}-{mid}"):
+            ans = mid
+            high = mid - 1
+        else:
+            low = mid + 1
+
+    return f"{slug}-{ans}"
 
 
 # ---------------------------------------------------------------------------
@@ -221,13 +235,13 @@ def match_personas(
     logger.debug("Fallback to persona: slug=%s", fallback.slug)
     return [ActivePersona(persona=fallback, weight=fallback.current_weight)]
 
+
 # ---------------------------------------------------------------------------
 # CLI Interface for OpenClaw Agent
 # ---------------------------------------------------------------------------
 def main() -> None:
     import argparse
     import json
-    import sys
 
     parser = argparse.ArgumentParser(description="Persona Engine CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -248,29 +262,42 @@ def main() -> None:
     args = parser.parse_args()
 
     class DummyPersistence:
-        def write_soul_md(self, p): pass
-        def read_soul_md(self, s): return None
-        def slug_exists(self, s): return False
+        def write_soul_md(self, p):
+            pass
+
+        def read_soul_md(self, s):
+            return None
+
+        def slug_exists(self, s):
+            return False
 
     if args.command == "create":
         domains = json.loads(args.domains)
         t_keywords = json.loads(args.trigger_keywords)
         c_skills = json.loads(args.clawhub_skills)
-        p = create_persona(args.name, domains, t_keywords, c_skills, args.base_weight, DummyPersistence())
+        p = create_persona(
+            args.name, domains, t_keywords, c_skills, args.base_weight, DummyPersistence()
+        )
         print(f"Created: {p.slug}")
     elif args.command == "match":
         p_list = []
         raw = json.loads(args.personas_json)
         for rp in raw:
-            p_list.append(Persona(
-                name=rp.get("name", ""), slug=rp.get("slug", ""),
-                base_weight=rp.get("base_weight", 0.5), current_weight=rp.get("current_weight", 0.5),
-                domains=rp.get("domains", []), trigger_keywords=rp.get("trigger_keywords", []),
-                clawhub_skills=rp.get("clawhub_skills", [])
-            ))
+            p_list.append(
+                Persona(
+                    name=rp.get("name", ""),
+                    slug=rp.get("slug", ""),
+                    base_weight=rp.get("base_weight", 0.5),
+                    current_weight=rp.get("current_weight", 0.5),
+                    domains=rp.get("domains", []),
+                    trigger_keywords=rp.get("trigger_keywords", []),
+                    clawhub_skills=rp.get("clawhub_skills", []),
+                )
+            )
         res = match_personas(args.message, p_list)
         for r in res:
             print(f"Active: {r.persona.slug} (weight: {r.weight})")
+
 
 if __name__ == "__main__":
     main()
