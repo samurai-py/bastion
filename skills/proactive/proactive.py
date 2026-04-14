@@ -84,6 +84,14 @@ class ClawHubClient(Protocol):
         """
         ...
 
+    async def get_batch_cves(self, skill_names: list[str]) -> dict[str, list[dict[str, str]]]:
+        """
+        Return a mapping of skill name to a list of CVE records for multiple skills.
+
+        If a skill has no CVEs or is not found, its list will be empty or omitted.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # check_inactive_personas
@@ -178,17 +186,29 @@ async def check_cve_alerts(
     """
     alerts: list[CVEAlert] = []
 
-    for skill_name in installed_skills:
-        try:
-            cves = await clawhub_client.get_cves(skill_name)
-        except Exception:
-            logger.warning(
-                "ClawHub API unavailable for skill %r — skipping CVE check",
-                skill_name,
-                exc_info=True,
-            )
-            continue
+    if not installed_skills:
+        return alerts
 
+    try:
+        batch_cves = await clawhub_client.get_batch_cves(installed_skills)
+    except Exception:
+        logger.warning(
+            "ClawHub API batch query unavailable — falling back to individual checks",
+            exc_info=True,
+        )
+        # Fallback to individual checks if batch fails
+        batch_cves = {}
+        for skill_name in installed_skills:
+            try:
+                batch_cves[skill_name] = await clawhub_client.get_cves(skill_name)
+            except Exception:
+                logger.warning(
+                    "ClawHub API unavailable for skill %r — skipping CVE check",
+                    skill_name,
+                    exc_info=True,
+                )
+
+    for skill_name, cves in batch_cves.items():
         for cve in cves:
             alert = CVEAlert(
                 skill_name=skill_name,
@@ -260,6 +280,8 @@ def main() -> None:
             class DummyClawHubClient:
                 async def get_cves(self, skill_name: str):
                     return []
+                async def get_batch_cves(self, skill_names: list[str]):
+                    return {}
 
             skills_list = json.loads(args.skills)
             results = await check_cve_alerts(skills_list, DummyClawHubClient())
