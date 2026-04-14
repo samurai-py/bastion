@@ -20,7 +20,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -533,7 +533,7 @@ def install_skill_for_persona(skill: SkillDiscoveryResult, persona_slug: str, lo
         name=skill.name,
         version="latest",
         source=skill.url,
-        installed_at=datetime.now(timezone.utc).isoformat(),
+        installed_at=datetime.now(UTC).isoformat(),
     )
     update_skills_json(persona_slug, entry, locale)
     log_skill_event(skill.name, entry.version, persona_slug, "installed")
@@ -563,18 +563,18 @@ def update_skills_json(persona_slug: str, skill_entry: SkillEntry, locale: dict)
             print(get_string(locale, "skills_json_corrupt", path=skills_path))
             manifest = SkillsManifest(
                 persona=persona_slug,
-                updated_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(UTC).isoformat(),
             )
     else:
         manifest = SkillsManifest(
             persona=persona_slug,
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
         )
 
     # Replace existing entry with same name, or append
     manifest.skills = [s for s in manifest.skills if s.name != skill_entry.name]
     manifest.skills.append(skill_entry)
-    manifest.updated_at = datetime.now(timezone.utc).isoformat()
+    manifest.updated_at = datetime.now(UTC).isoformat()
 
     skills_path.write_text(serialize_skills_json(manifest), encoding="utf-8")
 
@@ -653,7 +653,7 @@ def log_skill_event(
     log_file = log_dir / "skill_events.jsonl"
 
     entry: dict = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "name": skill_name,
         "version": version,
         "persona": persona,
