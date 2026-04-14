@@ -11,11 +11,9 @@ Properties tested:
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -23,10 +21,6 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from proactive import (
-    CVEAlert,
-    ClawHubClient,
-    LifeLogAdapter,
-    PersonaActivity,
     check_cve_alerts,
     check_inactive_personas,
 )
@@ -87,7 +81,7 @@ _threshold = st.integers(min_value=1, max_value=7)
 
 def _past_datetime(days_ago: int) -> datetime:
     """Return a timezone-aware datetime N days in the past."""
-    return datetime.now(tz=timezone.utc) - timedelta(days=days_ago)
+    return datetime.now(tz=UTC) - timedelta(days=days_ago)
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +508,7 @@ def test_property18_alert_fields_match_api_response(
     assert alert.skill_name == skill_name, f"skill_name mismatch: {alert.skill_name!r} != {skill_name!r}"
     assert alert.cve_id == cve_id, f"cve_id mismatch: {alert.cve_id!r} != {cve_id!r}"
     assert alert.severity == severity, f"severity mismatch: {alert.severity!r} != {severity!r}"
-    assert alert.description == description, f"description mismatch"
+    assert alert.description == description, "description mismatch"
 
 
 def test_property18_empty_skill_list_returns_no_alerts() -> None:
