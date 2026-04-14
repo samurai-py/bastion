@@ -1,63 +1,63 @@
-# HEARTBEAT — Tarefas Agendadas do Bastion
+# HEARTBEAT — Bastion Scheduled Tasks
 
-O OpenClaw lê este arquivo a cada 30 minutos e executa as tarefas cujo intervalo foi atingido.
+OpenClaw reads this file every 30 minutes and executes tasks whose interval has been reached.
 
 ---
 
-## Tarefas
+## Tasks
 
 ### calendar-check
-- **Intervalo**: a cada 30 minutos
+- **Interval**: every 30 minutes
 - **Skill**: `bastion/proactive`
-- **Ação**: verificar eventos do Google Calendar nos próximos 60 minutos
-- **Condição de alerta**: se houver evento com início em ≤ 5 minutos, enviar lembrete imediato ao usuário
-- **Formato do lembrete**: `🗓️ Em [X] minutos: [título do evento] — [horário]`
+- **Action**: check Google Calendar events in the next 60 minutes
+- **Alert condition**: if any event starts in ≤ 5 minutes, send an immediate reminder to the user
+- **Reminder format**: `🗓️ In [X] minutes: [event title] — [time]`
 
 ### persona-inactivity-check
-- **Intervalo**: a cada 6 horas
+- **Interval**: every 6 hours
 - **Skill**: `bastion/proactive`
-- **Ação**: verificar no life_log quais personas não têm atividade registrada há 3 ou mais dias
-- **Condição de alerta**: para cada persona inativa, gerar uma sugestão de retomada personalizada com base no domínio da persona
-- **Formato**: `💤 [Nome da Persona] está inativa há [N] dias. Quer retomar?`
+- **Action**: check memupalace for personas with no recorded activity for 3 or more days
+- **Alert condition**: for each inactive persona, generate a personalised re-engagement suggestion based on the persona's domain
+- **Format**: `💤 [Persona Name] has been inactive for [N] days. Want to resume?`
 
 ### weekly-review
-- **Intervalo**: toda segunda-feira às 9h
+- **Interval**: every Monday at 9am
 - **Skill**: `bastion/weekly-review`
-- **Ação**: executar o skill `weekly-review` para todas as personas ativas
-- **O que inclui**: agregar interações do life_log dos últimos 7 dias por persona, calcular métricas de uso, comparar com pesos atuais, gerar relatório com sugestões de ajuste de peso
-- **Requer confirmação**: sim — apresentar sugestões ao usuário antes de aplicar qualquer ajuste de peso
+- **Action**: run the `weekly-review` skill for all active personas
+- **Includes**: fetch the last 7 days of interactions per persona from memupalace via `memory_search`, calculate usage metrics, compare against current weights, generate a report with weight adjustment suggestions
+- **Requires confirmation**: yes — present suggestions to the user before applying any weight change
 
-### life-log-analysis
-- **Intervalo**: a cada 7 dias
-- **Skill**: `bastion/life-log` + `bastion/self-improving`
-- **Ação**: analisar os últimos 50 registros do life_log de cada persona
-- **O que inclui**:
-  - Extrair padrões de comportamento e preferências
-  - Atualizar `personas/{slug}/MEMORY.md` com novos aprendizados
-  - Comparar padrão de uso atual com pesos configurados
-  - Se o padrão mudou significativamente, sugerir ajustes de peso ao usuário
-- **Requer confirmação**: sim — sugestões de ajuste de peso são apresentadas antes de aplicar
+### memory-analysis
+- **Interval**: every 7 days
+- **Skill**: `bastion/memupalace` + `bastion/self-improving`
+- **Action**: analyse the last 50 memupalace records per persona via `memory_search`
+- **Includes**:
+  - Extract behaviour patterns and preferences
+  - Update `personas/{slug}/MEMORY.md` with new learnings
+  - Compare current usage pattern against configured weights
+  - If the pattern has changed significantly, suggest weight adjustments to the user
+- **Requires confirmation**: yes — weight adjustment suggestions are presented before applying
 
 ### cve-check
-- **Intervalo**: a cada 24 horas
+- **Interval**: every 24 hours
 - **Skill**: `bastion/proactive`
-- **Ação**: verificar CVEs das skills instaladas via ClawHub API
-- **Condição de alerta**: se qualquer CVE for detectado em qualquer skill instalada, alertar o usuário **imediatamente** — antes de qualquer outra mensagem na próxima interação
-- **Formato do alerta**: `⚠️ CVE detectado na skill [nome]: [descrição]. Recomendo desinstalar ou aguardar patch.`
-- **Prioridade**: máxima — este alerta tem precedência sobre qualquer outra mensagem pendente
+- **Action**: check CVEs for installed skills via the ClawHub API
+- **Alert condition**: if any CVE is detected in any installed skill, alert the user **immediately** — before any other pending message in the next interaction
+- **Alert format**: `⚠️ CVE detected in skill [name]: [description]. Recommend uninstalling or waiting for a patch.`
+- **Priority**: maximum — this alert takes precedence over all other pending messages
 
 ### validation-metrics-check
-- **Intervalo**: a cada 6 horas
+- **Interval**: every 6 hours
 - **Skill**: `output-validator`
-- **Ação**: ler `config/logs/validation-metrics.json` e calcular taxa de sucesso recente por skill
-- **Condição de alerta**: se qualquer skill tiver taxa de sucesso recente abaixo de 90% (com mínimo de 20 amostras na janela), gerar alerta
-- **Formato do alerta**: `⚠️ Drift de validação em [skill]: taxa de sucesso = [X]% (últimas [N] execuções). Último erro: [mensagem]`
-- **Ação adicional**: se geração de schema falhar para qualquer skill (schema.json ausente e SKILL.md sem exemplo), alertar o usuário
-- **Formato do alerta de schema**: `⚠️ Skill [nome] sem schema de validação configurado. Adicione ## Output Example ao SKILL.md.`
-- **Prioridade**: normal — exibir na próxima interação após o alerta de CVE (se houver)
+- **Action**: read `config/logs/validation-metrics.json` and calculate recent success rate per skill
+- **Alert condition**: if any skill has a recent success rate below 90% (with a minimum of 20 samples in the window), generate an alert
+- **Alert format**: `⚠️ Validation drift in [skill]: success rate = [X]% (last [N] executions). Last error: [message]`
+- **Additional action**: if schema generation fails for any skill (schema.json missing and SKILL.md has no output example), alert the user
+- **Schema alert format**: `⚠️ Skill [name] has no validation schema configured. Add ## Output Example to SKILL.md.`
+- **Priority**: normal — display in the next interaction after the CVE alert (if any)
 
 ---
 
-## Estado
+## State
 
-O estado de execução de cada tarefa (último horário de execução) é persistido em `personas/{slug}/heartbeat-state.md` por persona, e no arquivo de estado global do OpenClaw.
+The execution state of each task (last run timestamp) is persisted in `personas/{slug}/heartbeat-state.md` per persona, and in the OpenClaw global state file.

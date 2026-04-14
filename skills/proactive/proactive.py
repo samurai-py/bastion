@@ -237,15 +237,38 @@ def main() -> None:
                 import sys
                 import os
                 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-                from skills.life_log.factory import Settings, create_adapter
-                settings = Settings.from_env()
-                adapter = create_adapter(settings)
+                from skills.memupalace.factory import MemupalaceSettings, create_memupalace
+
+                memupalace_settings = MemupalaceSettings.from_env()
+                memupalace = create_memupalace(memupalace_settings)
+
+                class MemupalaceAdapter:
+                    """Adapts Memupalace.search() to the LifeLogAdapter protocol."""
+
+                    async def get_last_interaction(self, slug: str) -> datetime | None:
+                        results = await memupalace.search(
+                            query=slug,
+                            location=slug,
+                            limit=1,
+                        )
+                        if not results:
+                            return None
+                        ts = results[0].metadata.get("timestamp")
+                        if ts is None:
+                            return None
+                        try:
+                            return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+                        except (ValueError, TypeError):
+                            return None
+
+                adapter: LifeLogAdapter = MemupalaceAdapter()
             except Exception as e:
                 print(get_string(locale, "warning_adapter", error=e))
-                # Mock adapter for fallback
+
                 class MockAdapter:
-                    async def get_last_interaction(self, slug):
+                    async def get_last_interaction(self, slug: str) -> datetime | None:
                         return None
+
                 adapter = MockAdapter()
             
             personas_list = json.loads(args.personas)

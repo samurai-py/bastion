@@ -218,6 +218,7 @@ __marimo__/
 config/
 personas/
 tmp/
+models/
 
 # IDE / AI tools
 .vscode/

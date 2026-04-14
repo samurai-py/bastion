@@ -26,6 +26,11 @@ dependencies = [
 supabase = [
     "supabase>=2.4",
 ]
+memupalace = [
+    "chromadb>=0.5,<0.7",
+    "onnxruntime>=1.17",
+    "numpy>=1.26",
+]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.100",
@@ -73,6 +78,8 @@ pythonpath = [
     "skills/weekly-review/tests",
     "skills/weight-system",
     "skills/weight-system/tests",
+    "skills/memupalace",
+    "skills/memupalace/tests",
 ]
 
 # ── Ruff (lint + format) ──────────────────────────────────────────────────────
