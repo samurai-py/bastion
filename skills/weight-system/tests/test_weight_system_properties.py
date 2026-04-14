@@ -11,9 +11,8 @@ Properties tested:
 
 from __future__ import annotations
 
-from hypothesis import given, settings, assume
+from hypothesis import given, settings
 from hypothesis import strategies as st
-
 from weight_system import adjust_weight, calculate_priority
 from weight_system_helpers import InMemoryWeightAdapter
 
