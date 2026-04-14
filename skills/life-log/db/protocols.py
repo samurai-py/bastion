@@ -100,3 +100,19 @@ class LifeLogProtocol(Protocol):
             List of InteractionRecord ordered by descending timestamp.
         """
         ...
+
+    async def get_last_interactions(
+        self,
+        personas: list[str],
+    ) -> dict[str, datetime | None]:
+        """
+        Return the timestamp of the most recent interaction for the given personas.
+
+        Args:
+            personas: List of persona slugs to check.
+
+        Returns:
+            A dictionary mapping each persona slug to its most recent interaction
+            timestamp, or None if no interactions exist.
+        """
+        ...

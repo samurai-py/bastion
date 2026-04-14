@@ -11,11 +11,9 @@ Properties tested:
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -23,10 +21,6 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from proactive import (
-    CVEAlert,
-    ClawHubClient,
-    LifeLogAdapter,
-    PersonaActivity,
     check_cve_alerts,
     check_inactive_personas,
 )
@@ -42,8 +36,8 @@ class FakeLifeLogAdapter:
     def __init__(self, last_interactions: dict[str, datetime | None]) -> None:
         self._data = last_interactions
 
-    async def get_last_interaction(self, persona_slug: str) -> datetime | None:
-        return self._data.get(persona_slug)
+    async def get_last_interactions(self, personas: list[str]) -> dict[str, datetime | None]:
+        return {p: self._data.get(p) for p in personas}
 
 
 class FakeClawHubClient:
@@ -54,6 +48,9 @@ class FakeClawHubClient:
 
     async def get_cves(self, skill_name: str) -> list[dict[str, str]]:
         return self._data.get(skill_name, [])
+
+    async def get_batch_cves(self, skill_names: list[str]) -> dict[str, list[dict[str, str]]]:
+        return {name: self._data.get(name, []) for name in skill_names if name in self._data}
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +84,7 @@ _threshold = st.integers(min_value=1, max_value=7)
 
 def _past_datetime(days_ago: int) -> datetime:
     """Return a timezone-aware datetime N days in the past."""
-    return datetime.now(tz=timezone.utc) - timedelta(days=days_ago)
+    return datetime.now(tz=UTC) - timedelta(days=days_ago)
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +511,7 @@ def test_property18_alert_fields_match_api_response(
     assert alert.skill_name == skill_name, f"skill_name mismatch: {alert.skill_name!r} != {skill_name!r}"
     assert alert.cve_id == cve_id, f"cve_id mismatch: {alert.cve_id!r} != {cve_id!r}"
     assert alert.severity == severity, f"severity mismatch: {alert.severity!r} != {severity!r}"
-    assert alert.description == description, f"description mismatch"
+    assert alert.description == description, "description mismatch"
 
 
 def test_property18_empty_skill_list_returns_no_alerts() -> None:
