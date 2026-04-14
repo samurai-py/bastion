@@ -266,3 +266,44 @@ class SQLiteLifeLogAdapter:
             len(records),
         )
         return records
+
+    async def get_last_interactions(
+        self,
+        personas: list[str],
+    ) -> dict[str, datetime | None]:
+        """Return the timestamp of the most recent interaction for the given personas."""
+        if not personas:
+            return {}
+
+        conn = self._get_connection()
+        try:
+            placeholders = ",".join("?" for _ in personas)
+            # Use GROUP BY to efficiently get the MAX timestamp for each persona
+            rows = conn.execute(
+                f"""
+                SELECT persona, MAX(timestamp) as last_ts
+                FROM interactions
+                WHERE persona IN ({placeholders})
+                GROUP BY persona
+                """,
+                tuple(personas),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        # Initialize all requested personas with None
+        result: dict[str, datetime | None] = {p: None for p in personas}
+
+        # Update with actual timestamps found
+        for row in rows:
+            persona = row["persona"]
+            ts_str = row["last_ts"]
+            if ts_str:
+                result[persona] = datetime.fromisoformat(ts_str)
+
+        logger.debug(
+            "get_last_interactions: checked %d personas, found %d active",
+            len(personas),
+            sum(1 for v in result.values() if v is not None),
+        )
+        return result

@@ -1,10 +1,10 @@
 import argparse
-import sys
-import json
 import asyncio
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 
 from .factory import Settings, create_adapter
+
 
 async def async_main():
     parser = argparse.ArgumentParser(description="Life Log CLI")
@@ -40,13 +40,13 @@ async def async_main():
         embedding_list = json.loads(args.embedding)
         if not embedding_list:
             embedding_list = [0.0] * 1536
-        
+
         record_id = await adapter.log_interaction(
             persona=args.persona,
             intent=args.intent,
             tools=tools_list,
             embedding=embedding_list,
-            timestamp=datetime.now(tz=timezone.utc)
+            timestamp=datetime.now(tz=UTC)
         )
         print(f"Logged interaction: {record_id}")
 

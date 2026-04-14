@@ -17,7 +17,6 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 from hypothesis import given, settings, assume
 from hypothesis import strategies as st
 
@@ -165,16 +164,20 @@ def test_property10_all_logged_interactions_have_required_fields(
     adapter = InMemoryLifeLogAdapter()
     ts = datetime.now(tz=timezone.utc)
 
-    for persona, intent, tools, embedding in interactions:
-        _run(
-            adapter.log_interaction(
-                persona=persona,
-                intent=intent,
-                tools=tools,
-                embedding=embedding,
-                timestamp=ts,
+    _run(
+        asyncio.gather(
+            *(
+                adapter.log_interaction(
+                    persona=persona,
+                    intent=intent,
+                    tools=tools,
+                    embedding=embedding,
+                    timestamp=ts,
+                )
+                for persona, intent, tools, embedding in interactions
             )
         )
+    )
 
     assert len(adapter.all_records) == len(interactions)
 
@@ -286,26 +289,30 @@ def test_property11_sqlite_round_trip_multiple_records(
         adapter = SQLiteLifeLogAdapter(db_path=db_path)
         ts = datetime.now(tz=timezone.utc).replace(microsecond=0)
 
-        stored_ids: list[str] = []
-        personas_used: set[str] = set()
-        for persona, intent, tools, embedding in interactions:
-            iid = _run(
-                adapter.log_interaction(
-                    persona=persona,
-                    intent=intent,
-                    tools=tools,
-                    embedding=embedding,
-                    timestamp=ts,
+        # Log all interactions concurrently
+        stored_ids: list[str] = _run(
+            asyncio.gather(
+                *(
+                    adapter.log_interaction(
+                        persona=persona,
+                        intent=intent,
+                        tools=tools,
+                        embedding=embedding,
+                        timestamp=ts,
+                    )
+                    for persona, intent, tools, embedding in interactions
                 )
             )
-            stored_ids.append(iid)
-            personas_used.add(persona)
+        )
+        personas_used = {persona for persona, _, _, _ in interactions}
 
-        # Retrieve all records via get_persona_summary for each unique persona
-        retrieved_ids: set[str] = set()
-        for persona in personas_used:
-            records = _run(adapter.get_persona_summary(persona=persona, days=1))
-            retrieved_ids.update(r.id for r in records)
+        # Retrieve all records via get_persona_summary for each unique persona concurrently
+        summaries: list[list[InteractionRecord]] = _run(
+            asyncio.gather(
+                *(adapter.get_persona_summary(persona=p, days=1) for p in personas_used)
+            )
+        )
+        retrieved_ids: set[str] = {r.id for records in summaries for r in records}
 
         # All stored IDs must be retrievable
         for iid in stored_ids:
@@ -346,16 +353,20 @@ def test_property12_search_similar_only_returns_results_above_threshold(
     # Draw N embeddings using st.data() — correct Hypothesis pattern
     embeddings = data.draw(st.lists(_embedding, min_size=n_records, max_size=n_records))
 
-    for i, emb in enumerate(embeddings):
-        _run(
-            adapter.log_interaction(
-                persona="test-persona",
-                intent=f"intent-{i}",
-                tools=[],
-                embedding=emb,
-                timestamp=ts,
+    _run(
+        asyncio.gather(
+            *(
+                adapter.log_interaction(
+                    persona="test-persona",
+                    intent=f"intent-{i}",
+                    tools=[],
+                    embedding=emb,
+                    timestamp=ts,
+                )
+                for i, emb in enumerate(embeddings)
             )
         )
+    )
 
     results = _run(
         adapter.search_similar(
@@ -399,16 +410,20 @@ def test_property12_default_threshold_065_enforced(
     adapter = InMemoryLifeLogAdapter()
     ts = datetime.now(tz=timezone.utc)
 
-    for i, emb in enumerate(embeddings):
-        _run(
-            adapter.log_interaction(
-                persona="p",
-                intent=f"i-{i}",
-                tools=[],
-                embedding=emb,
-                timestamp=ts,
+    _run(
+        asyncio.gather(
+            *(
+                adapter.log_interaction(
+                    persona="p",
+                    intent=f"i-{i}",
+                    tools=[],
+                    embedding=emb,
+                    timestamp=ts,
+                )
+                for i, emb in enumerate(embeddings)
             )
         )
+    )
 
     query = embeddings[0]
     results = _run(
@@ -446,16 +461,20 @@ def test_property12_limit_is_respected(
     adapter = InMemoryLifeLogAdapter()
     ts = datetime.now(tz=timezone.utc)
 
-    for i, emb in enumerate(embeddings):
-        _run(
-            adapter.log_interaction(
-                persona="p",
-                intent=f"i-{i}",
-                tools=[],
-                embedding=emb,
-                timestamp=ts,
+    _run(
+        asyncio.gather(
+            *(
+                adapter.log_interaction(
+                    persona="p",
+                    intent=f"i-{i}",
+                    tools=[],
+                    embedding=emb,
+                    timestamp=ts,
+                )
+                for i, emb in enumerate(embeddings)
             )
         )
+    )
 
     results = _run(
         adapter.search_similar(
@@ -505,36 +524,38 @@ def test_property13_get_persona_summary_only_returns_records_within_period(
     now = datetime.now(tz=timezone.utc)
 
     # Records INSIDE the window (timestamp within last `days` days)
-    inside_ids: set[str] = set()
-    for i in range(n_inside):
-        # Place at days/2 ago (safely inside)
-        ts = now - timedelta(days=days / 2, hours=i)
-        iid = _run(
-            adapter.log_interaction(
-                persona="target",
-                intent=f"inside-{i}",
-                tools=[],
-                embedding=embedding,
-                timestamp=ts,
+    inside_results = _run(
+        asyncio.gather(
+            *(
+                adapter.log_interaction(
+                    persona="target",
+                    intent=f"inside-{i}",
+                    tools=[],
+                    embedding=embedding,
+                    timestamp=now - timedelta(days=days / 2, hours=i),
+                )
+                for i in range(n_inside)
             )
         )
-        inside_ids.add(iid)
+    )
+    inside_ids = set(inside_results)
 
     # Records OUTSIDE the window (timestamp older than `days` days)
-    outside_ids: set[str] = set()
-    for i in range(n_outside):
-        # Place at days+1 ago (safely outside)
-        ts = now - timedelta(days=days + 1, hours=i)
-        iid = _run(
-            adapter.log_interaction(
-                persona="target",
-                intent=f"outside-{i}",
-                tools=[],
-                embedding=embedding,
-                timestamp=ts,
+    outside_results = _run(
+        asyncio.gather(
+            *(
+                adapter.log_interaction(
+                    persona="target",
+                    intent=f"outside-{i}",
+                    tools=[],
+                    embedding=embedding,
+                    timestamp=now - timedelta(days=days + 1, hours=i),
+                )
+                for i in range(n_outside)
             )
         )
-        outside_ids.add(iid)
+    )
+    outside_ids = set(outside_results)
 
     results = _run(adapter.get_persona_summary(persona="target", days=days))
     result_ids = {r.id for r in results}
@@ -572,28 +593,33 @@ def test_property13_different_personas_are_isolated(
     adapter = InMemoryLifeLogAdapter()
     now = datetime.now(tz=timezone.utc)
 
-    # Log records for two different personas
+    # Log records for two different personas concurrently
     _run(
-        adapter.log_interaction(
-            persona="persona-a",
-            intent="action-a",
-            tools=[],
-            embedding=embedding,
-            timestamp=now,
-        )
-    )
-    _run(
-        adapter.log_interaction(
-            persona="persona-b",
-            intent="action-b",
-            tools=[],
-            embedding=embedding,
-            timestamp=now,
+        asyncio.gather(
+            adapter.log_interaction(
+                persona="persona-a",
+                intent="action-a",
+                tools=[],
+                embedding=embedding,
+                timestamp=now,
+            ),
+            adapter.log_interaction(
+                persona="persona-b",
+                intent="action-b",
+                tools=[],
+                embedding=embedding,
+                timestamp=now,
+            ),
         )
     )
 
-    results_a = _run(adapter.get_persona_summary(persona="persona-a", days=days))
-    results_b = _run(adapter.get_persona_summary(persona="persona-b", days=days))
+    # Retrieve summaries concurrently
+    results_a, results_b = _run(
+        asyncio.gather(
+            adapter.get_persona_summary(persona="persona-a", days=days),
+            adapter.get_persona_summary(persona="persona-b", days=days),
+        )
+    )
 
     # Each summary must only contain records for the requested persona
     for record in results_a:

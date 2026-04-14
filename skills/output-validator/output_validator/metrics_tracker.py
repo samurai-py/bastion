@@ -10,7 +10,7 @@ import logging
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class MetricsTracker:
         self.metrics_file = Path(metrics_file)
         self.window_size = window_size
         self.drift_threshold = drift_threshold
-        self.metrics: Dict[str, Any] = self._load_metrics()
+        self.metrics: dict[str, Any] = self._load_metrics()
 
     # ------------------------------------------------------------------
     # Public API
@@ -59,7 +59,7 @@ class MetricsTracker:
         self,
         skill_name: str,
         is_valid: bool,
-        errors: List[str],
+        errors: list[str],
     ) -> None:
         """
         Record a validation result for a skill.
@@ -87,7 +87,7 @@ class MetricsTracker:
             m["valid"] += 1
 
         # Maintain sliding window as a plain list (JSON-serialisable)
-        recent: List[bool] = m["recent"]
+        recent: list[bool] = m["recent"]
         recent.append(is_valid)
         if len(recent) > self.window_size:
             recent.pop(0)
@@ -103,7 +103,7 @@ class MetricsTracker:
         self._save_metrics()
         self._check_drift(skill_name)
 
-    def get_stats(self, skill_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_stats(self, skill_name: Optional[str] = None) -> dict[str, Any]:
         """
         Return validation statistics.
 
@@ -128,7 +128,7 @@ class MetricsTracker:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _load_metrics(self) -> Dict[str, Any]:
+    def _load_metrics(self) -> dict[str, Any]:
         """Load metrics from the JSON file, or return an empty dict."""
         if not self.metrics_file.exists():
             logger.debug("Metrics file not found, starting fresh: %s", self.metrics_file)
@@ -154,7 +154,7 @@ class MetricsTracker:
 
     def _check_drift(self, skill_name: str) -> None:
         """Log a warning if the recent success rate is below the threshold."""
-        recent: List[bool] = self.metrics[skill_name]["recent"]
+        recent: list[bool] = self.metrics[skill_name]["recent"]
         if len(recent) < MIN_SAMPLES_FOR_DRIFT:
             return
 
@@ -168,10 +168,10 @@ class MetricsTracker:
                 len(recent),
             )
 
-    def _format_skill_stats(self, skill_name: str) -> Dict[str, Any]:
+    def _format_skill_stats(self, skill_name: str) -> dict[str, Any]:
         """Format statistics for a single skill."""
         m = self.metrics[skill_name]
-        recent: List[bool] = m["recent"]
+        recent: list[bool] = m["recent"]
         total: int = m["total"]
         valid: int = m["valid"]
 
