@@ -27,10 +27,11 @@ Expected Supabase table DDL:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import datetime, timedelta, timezone  # noqa: F401, TC003
+from typing import TYPE_CHECKING, Any
 
-from .protocols import InteractionRecord, LifeLogProtocol
+if TYPE_CHECKING:
+    from .protocols import InteractionRecord, LifeLogProtocol  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
