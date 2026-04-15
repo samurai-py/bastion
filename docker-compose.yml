@@ -28,6 +28,7 @@ services:
     volumes:
       - ./config:/home/node/.openclaw:rw
       - ./skills:/home/node/.openclaw/workspace/skills:ro
+      - ./db:/home/node/.openclaw/workspace/db:rw
       - ./personas:/home/node/.openclaw/workspace/personas:rw
       - ./SOUL.md:/home/node/.openclaw/workspace/SOUL.md:ro
       - ./USER.md:/home/node/.openclaw/workspace/USER.md:rw

@@ -8,43 +8,49 @@ OpenClaw reads this file every 30 minutes and executes tasks whose interval has 
 
 ### calendar-check
 - **Interval**: every 30 minutes
-- **Skill**: `bastion/proactive`
+- **Skill**: _(needs dedicated calendar skill — not yet implemented)_
 - **Action**: check Google Calendar events in the next 60 minutes
 - **Alert condition**: if any event starts in ≤ 5 minutes, send an immediate reminder to the user
 - **Reminder format**: `🗓️ In [X] minutes: [event title] — [time]`
 
-### persona-inactivity-check
-- **Interval**: every 6 hours
-- **Skill**: `bastion/proactive`
-- **Action**: check memupalace for personas with no recorded activity for 3 or more days
-- **Alert condition**: for each inactive persona, generate a personalised re-engagement suggestion based on the persona's domain
+### proactive-cycle
+- **Interval**: every 2 hours
+- **Skill**: `bastion/proactive-engine`
+- **Action**: run the full proactive detection and suggestion cycle
+- **Steps**:
+  - `InactivityDetector`: checks **life-log** for personas with no interactions in the last 3+ days
+  - `MemoryStalenessDetector`: checks **memupalace** for memories not reinforced in the last 14+ days
+  - `TemporalPatternDetector`: queries **life-log** for day-of-week and hour interaction patterns
+  - `IntentTracker.flush_queue()`: persists pending intents to **memupalace** (wing: `proactive/intent`)
+  - `SuggestionGenerator`: single LLM call, persists suggestions to **memupalace** (wing: `proactive/suggestions`)
+- **Alert condition**: for each inactive persona or detected pattern, generate a personalised suggestion
 - **Format**: `💤 [Persona Name] has been inactive for [N] days. Want to resume?`
+
+### proactive-cve-check
+- **Interval**: every 24 hours
+- **Skill**: `bastion/proactive-engine`
+- **Action**: check CVEs for all installed skills via the ClawHub API
+- **Alert condition**: if any CVE is detected in any installed skill, alert the user **immediately** — before any other pending message in the next interaction
+- **Alert format**: `⚠️ CVE detected in skill [name]: [description]. Recommend uninstalling or waiting for a patch.`
+- **Priority**: maximum — this alert takes precedence over all other pending messages
 
 ### weekly-review
 - **Interval**: every Monday at 9am
 - **Skill**: `bastion/weekly-review`
 - **Action**: run the `weekly-review` skill for all active personas
-- **Includes**: fetch the last 7 days of interactions per persona from memupalace via `memory_search`, calculate usage metrics, compare against current weights, generate a report with weight adjustment suggestions
+- **Includes**: fetch the last 7 days of interactions per persona from **life-log** via `get_persona_summary`, calculate usage metrics, compare against current weights, generate a report with weight adjustment suggestions
 - **Requires confirmation**: yes — present suggestions to the user before applying any weight change
 
 ### memory-analysis
 - **Interval**: every 7 days
 - **Skill**: `bastion/memupalace` + `bastion/self-improving`
-- **Action**: analyse the last 50 memupalace records per persona via `memory_search`
+- **Action**: analyse the last 50 **memupalace** records per persona via `memory_search`
 - **Includes**:
-  - Extract behaviour patterns and preferences
+  - Extract behaviour patterns and preferences from semantic memory
   - Update `personas/{slug}/MEMORY.md` with new learnings
   - Compare current usage pattern against configured weights
   - If the pattern has changed significantly, suggest weight adjustments to the user
 - **Requires confirmation**: yes — weight adjustment suggestions are presented before applying
-
-### cve-check
-- **Interval**: every 24 hours
-- **Skill**: `bastion/proactive`
-- **Action**: check CVEs for installed skills via the ClawHub API
-- **Alert condition**: if any CVE is detected in any installed skill, alert the user **immediately** — before any other pending message in the next interaction
-- **Alert format**: `⚠️ CVE detected in skill [name]: [description]. Recommend uninstalling or waiting for a patch.`
-- **Priority**: maximum — this alert takes precedence over all other pending messages
 
 ### validation-metrics-check
 - **Interval**: every 6 hours

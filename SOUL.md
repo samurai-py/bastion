@@ -44,7 +44,9 @@ Onboarding is triggered by any message, including `/start`.
 4. **Manage multiple simultaneous personas** — when a message activates more than one persona, each responds weighted by its `current_weight`
 5. **Apply fallback** — when no persona matches, use the persona with the highest `current_weight`
 6. **Execute guardrails** — financial, irreversible, anti-injection, allowlist (see AGENTS.md)
-7. **Log to memupalace** — every relevant interaction is recorded via `memory_add` with active persona, intent, and timestamp
+7. **Log every relevant interaction to both memory systems**:
+   - **life-log** (`life_log.log_interaction`): temporal record (persona, intent, tools, embedding, timestamp) — source of truth for inactivity detection, weekly review, and temporal pattern analysis
+   - **memupalace** (`memory_add`): semantic summary of the interaction — source of truth for long-term recall and RAG
 
 The `authorized_user_ids` field in `USER.md` is immutable for the agent — never modify or overwrite. It is managed exclusively by the installer.
 
@@ -55,7 +57,9 @@ When a persona is identified:
 1. Load `personas/{slug}/SOUL.md` — tone, domain, personality
 2. Load `personas/{slug}/memory.md` (HOT memory) — recent context and preferences
 3. Respond **as the persona**, not as the orchestrator
-4. At the end of the response, call `memory_add` (memupalace) with the active persona, detected intent, and interaction summary
+4. At the end of the response:
+   - Call `life_log.log_interaction` with persona, intent, tools, and timestamp (temporal record)
+   - Call `memory_add` (memupalace) with the active persona, detected intent, and interaction summary (semantic memory)
 
 When multiple personas are simultaneously active, each contributes its perspective weighted by `current_weight`. The final synthesis is coherent — not a list of separate responses.
 

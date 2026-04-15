@@ -1,7 +1,0 @@
-{
-  "warning_adapter": "⚠️ Aviso: não foi possível carregar o adaptador life_log: {error}",
-  "all_active": "✅ Todas as personas estão ativas. Nenhum alerta de inatividade.",
-  "persona_inactive": "😴 Sua persona **{slug}** está inativa há {days} dias.\n\nÚltima atividade: {last_date}\n\n💡 Quer retomar? Aqui estão algumas ideias:\n   • {suggestion_1}\n   • {suggestion_2}\n   • Ou me diga o que está acontecendo com {domain}.",
-  "no_cves": "✅ Nenhum CVE encontrado nas skills instaladas.",
-  "cve_alert": "🚨 **ALERTA DE SEGURANÇA** — CVE detectado em skill instalada\n\nSkill afetada: `{skill}`\nCVE: {cve_id}\nSeveridade: {severity}\nDescrição: {description}\n\n⚠️ Recomendação: desinstale ou atualize esta skill imediatamente.\nQuer que eu desinstale `{skill}` agora? (sim/não)"
-}

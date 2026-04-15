@@ -136,7 +136,8 @@ Telegram / WhatsApp / Discord / Slack
 | `bastion/weight-system` | Dynamic weight adjustment based on usage |
 | `bastion/crisis-mode` | Emergency replanning via sacrifice algorithm |
 | `bastion/weekly-review` | Weekly usage analysis and weight suggestions |
-| `bastion/proactive` | Proactive alerts: calendar, inactivity, CVEs |
+| `bastion/proactive-engine` | Proactive engine: inactivity (life-log), memory staleness (memupalace), CVEs, LLM suggestions |
+| `bastion/memupalace` | Semantic long-term memory (ChromaDB + ONNX embeddings) |
 | `bastion/self-improving` | Pattern extraction and memory updates |
 | `bastion/mobile-connect` | Mobile app integration (JWT + device pairing) |
 | `bastion/skill-writer` | Custom skill creation + ClawHub discovery |

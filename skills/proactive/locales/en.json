@@ -1,7 +1,0 @@
-{
-  "warning_adapter": "⚠️ Warning: could not load life_log adapter: {error}",
-  "all_active": "✅ All personas are currently active. No inactivity alerts.",
-  "persona_inactive": "😴 Your persona **{slug}** has been inactive for {days} days.\n\nLast activity: {last_date}\n\n💡 Want to resume? Here are some ideas:\n   • {suggestion_1}\n   • {suggestion_2}\n   • Or just tell me what's going on with {domain}.",
-  "no_cves": "✅ No CVEs found in installed skills.",
-  "cve_alert": "🚨 **SECURITY ALERT** — CVE detected in installed skill\n\nAffected skill: `{skill}`\nCVE: {cve_id}\nSeverity: {severity}\nDescription: {description}\n\n⚠️ Recommendation: uninstall or update this skill immediately.\nWould you like me to uninstall `{skill}` now? (yes/no)"
-}
