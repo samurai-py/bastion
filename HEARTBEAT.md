@@ -8,10 +8,10 @@ OpenClaw reads this file every 30 minutes and executes tasks whose interval has 
 
 ### calendar-check
 - **Interval**: every 30 minutes
-- **Skill**: _(needs dedicated calendar skill — not yet implemented)_
-- **Action**: check Google Calendar events in the next 60 minutes
+- **Skill**: `bastion/calendar`
+- **Action**: check Google Calendar and Outlook events in the next 60 minutes; check overdue Google Tasks and Outlook To Do tasks on the :00 run
 - **Alert condition**: if any event starts in ≤ 5 minutes, send an immediate reminder to the user
-- **Reminder format**: `🗓️ In [X] minutes: [event title] — [time]`
+- **Reminder format**: `🗓️ Em [X] minutos: [título do evento] — [horário] (Google/Outlook)`
 
 ### proactive-cycle
 - **Interval**: every 2 hours
