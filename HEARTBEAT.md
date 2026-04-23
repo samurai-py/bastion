@@ -34,6 +34,16 @@ OpenClaw reads this file every 30 minutes and executes tasks whose interval has 
 - **Alert format**: `⚠️ CVE detected in skill [name]: [description]. Recommend uninstalling or waiting for a patch.`
 - **Priority**: maximum — this alert takes precedence over all other pending messages
 
+### proactive-weekly
+- **Interval**: every Monday at 9am
+- **Skill**: `bastion/proactive-engine`
+- **Action**: run the weekly synthesis cycle across active personas
+- **Steps**:
+  - `WeeklySynthesizer`: aggregates detection events from the last 7 days per persona
+  - Generates a weekly summary via LLM and persists it to **memupalace** (wing: `proactive/weekly`)
+- **Invoke**: `exec python3 skills/proactive-engine/main.py run-weekly --personas '["carreira","estudos","projetos-pessoais"]'`
+- **Alert condition**: none — output is persisted to memupalace and surfaced on the next user interaction
+
 ### weekly-review
 - **Interval**: every Monday at 9am
 - **Skill**: `bastion/weekly-review`
