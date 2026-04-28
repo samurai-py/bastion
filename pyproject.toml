@@ -49,6 +49,7 @@ packages = ["skills"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
+asyncio_mode = "auto"
 testpaths = ["skills"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -68,8 +69,6 @@ pythonpath = [
     "skills/output-validator/tests",
     "skills/persona-engine",
     "skills/persona-engine/tests",
-    "skills/proactive",
-    "skills/proactive/tests",
     "skills/self-improving",
     "skills/self-improving/tests",
     "skills/skill-writer",
@@ -80,6 +79,8 @@ pythonpath = [
     "skills/weight-system/tests",
     "skills/memupalace",
     "skills/memupalace/tests",
+    "skills/proactive-engine",
+    "skills/proactive-engine/tests",
 ]
 
 # ── Ruff (lint + format) ──────────────────────────────────────────────────────
