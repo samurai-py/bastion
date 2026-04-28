@@ -219,6 +219,7 @@ config/
 personas/
 tmp/
 models/
+db/
 
 # IDE / AI tools
 .vscode/

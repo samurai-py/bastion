@@ -10,7 +10,7 @@ triggers:
   - at the end of any relevant interaction with an active persona
   - when orchestrator prepares context for a response (semantic search)
   - internal call from bastion/weekly-review for last 7 days analysis
-  - internal call from bastion/proactive to detect inactive personas
+  - internal call from bastion/proactive-engine (InactivityDetector) to detect inactive personas
   - internal call from bastion/self-improving to extract usage patterns
 ---
 
