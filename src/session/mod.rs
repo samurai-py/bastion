@@ -1,2 +1,2 @@
-// Session management — implemented in Plan 02
 pub mod sqlite;
+pub use sqlite::SessionManager;
