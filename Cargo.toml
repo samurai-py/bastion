@@ -30,3 +30,4 @@ futures-util       = "0.3"
 [dev-dependencies]
 tokio-test   = "0.4"
 tracing-test = "0.2"
+tempfile     = "3"
