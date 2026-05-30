@@ -28,6 +28,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env (if present) before any std::env::var read. Real shell env wins.
+    dotenvy::dotenv().ok();
+
     // Init structured JSON logging to .bastion/bastion.log
     std::fs::create_dir_all(".bastion")?;
     let log_file = std::fs::OpenOptions::new()

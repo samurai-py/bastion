@@ -130,32 +130,28 @@ impl AgentLoop {
                 tracing::warn!(error = %e, "failed to update budget");
             }
 
-            // 9. Write assistant message to SQLite BEFORE dispatching tools (Pitfall 1)
+            // 9. Write assistant message to SQLite + history BEFORE dispatching tools (Pitfall 1).
+            // History MUST carry tool_calls (ToolUse parts) — without them, tool-using models
+            // never see that they already called the tool and loop until the round cap.
+            let assistant_content = if let Some(ref tc) = response.tool_calls {
+                MessageContent::Parts(
+                    std::iter::once(ContentPart::Text { text: response.text.clone() })
+                        .chain(tc.iter().map(|t| ContentPart::ToolUse {
+                            id: t.id.clone(),
+                            name: t.name.clone(),
+                            input: t.arguments.clone(),
+                        }))
+                        .collect()
+                )
+            } else {
+                MessageContent::Text(response.text.clone())
+            };
             self.session.append(
                 &self.session_id,
-                Message {
-                    role: Role::Assistant,
-                    content: if let Some(ref tc) = response.tool_calls {
-                        MessageContent::Parts(
-                            std::iter::once(ContentPart::Text { text: response.text.clone() })
-                                .chain(tc.iter().map(|t| ContentPart::ToolUse {
-                                    id: t.id.clone(),
-                                    name: t.name.clone(),
-                                    input: t.arguments.clone(),
-                                }))
-                                .collect()
-                        )
-                    } else {
-                        MessageContent::Text(response.text.clone())
-                    },
-                },
+                Message { role: Role::Assistant, content: assistant_content.clone() },
                 Some(response.usage.output_tokens),
             ).await?;
-
-            history.push(Message {
-                role: Role::Assistant,
-                content: MessageContent::Text(response.text.clone()),
-            });
+            history.push(Message { role: Role::Assistant, content: assistant_content });
 
             // 10. Tool dispatch
             match response.tool_calls {
@@ -166,20 +162,18 @@ impl AgentLoop {
                         let result = self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
                             .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
 
-                        // Tool result written to SQLite (assistant was written above — role sequence OK)
+                        // Tool result carries tool_use_id so the model pairs it with its call
+                        // (required for the OpenAI-compat round-trip; Anthropic uses the same shape).
                         let result_str = result.to_string();
-                        self.session.append(
-                            &self.session_id,
-                            Message {
-                                role: Role::Tool,
-                                content: MessageContent::Text(result_str.clone()),
-                            },
-                            None,
-                        ).await?;
-                        history.push(Message {
+                        let tool_msg = Message {
                             role: Role::Tool,
-                            content: MessageContent::Text(result_str),
-                        });
+                            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                                tool_use_id: tc.id.clone(),
+                                content: result_str,
+                            }]),
+                        };
+                        self.session.append(&self.session_id, tool_msg.clone(), None).await?;
+                        history.push(tool_msg);
                     }
                     rounds += 1;
                 }

@@ -1,4 +1,4 @@
-use super::{Provider, anthropic::AnthropicProvider, openai::OpenAIProvider, ollama::OllamaProvider};
+use super::{Provider, anthropic::AnthropicProvider, openai::OpenAIProvider, gemini::GeminiProvider, openrouter::OpenRouterProvider, ollama::OllamaProvider};
 
 pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
     if model_name.starts_with("claude") {
@@ -7,6 +7,11 @@ pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
            || model_name.starts_with("o1")
            || model_name.starts_with("o3") {
         Ok(Box::new(OpenAIProvider::new(model_name)))
+    } else if model_name.starts_with("gemini") {
+        Ok(Box::new(GeminiProvider::new(model_name)))
+    } else if model_name.contains('/') {
+        // OpenRouter slugs are namespaced: `vendor/model[:tag]` (e.g. `:free`).
+        Ok(Box::new(OpenRouterProvider::new(model_name)))
     } else {
         Ok(Box::new(OllamaProvider::new(model_name)))
     }
@@ -22,6 +27,10 @@ pub fn resolve_provider_kind(model_name: &str) -> &'static str {
            || model_name.starts_with("o1")
            || model_name.starts_with("o3") {
         "openai"
+    } else if model_name.starts_with("gemini") {
+        "gemini"
+    } else if model_name.contains('/') {
+        "openrouter"
     } else {
         "ollama"
     }
@@ -48,5 +57,18 @@ mod tests {
     fn resolve_provider_kind_ollama() {
         assert_eq!(resolve_provider_kind("llama3"),  "ollama");
         assert_eq!(resolve_provider_kind("mistral"), "ollama");
+    }
+
+    #[test]
+    fn resolve_provider_kind_gemini() {
+        assert_eq!(resolve_provider_kind("gemini-2.0-flash"),     "gemini");
+        assert_eq!(resolve_provider_kind("gemini-3-pro-preview"), "gemini");
+    }
+
+    #[test]
+    fn resolve_provider_kind_openrouter() {
+        assert_eq!(resolve_provider_kind("meta-llama/llama-3.3-70b-instruct:free"), "openrouter");
+        assert_eq!(resolve_provider_kind("deepseek/deepseek-chat-v3-0324:free"),    "openrouter");
+        assert_eq!(resolve_provider_kind("google/gemma-2-9b-it:free"),              "openrouter");
     }
 }

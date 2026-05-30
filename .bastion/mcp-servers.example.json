@@ -2,7 +2,7 @@
   "mcpServers": {
     "composio": {
       "transport": "sse",
-      "url": "https://mcp.composio.dev/YOUR_ENDPOINT_HERE"
+      "url": "https://connect.composio.dev/mcp"
     }
   }
 }

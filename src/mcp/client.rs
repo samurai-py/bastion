@@ -68,7 +68,23 @@ impl McpClient {
                             continue;
                         }
                     };
-                    connect_sse(&url).await
+                    // Optional bearer token: literal or `${ENV_VAR}` reference. Sent as
+                    // `Authorization: Bearer <token>`.
+                    let auth_token = resolve_secret(server_cfg.get("auth_token").and_then(|v| v.as_str()));
+                    // Optional custom headers (each value: literal or `${ENV_VAR}`). Needed by
+                    // servers with non-Bearer auth, e.g. Composio's `x-consumer-api-key`.
+                    let custom_headers: Vec<(String, String)> = server_cfg
+                        .get("headers")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| {
+                            obj.iter()
+                                .filter_map(|(k, v)| {
+                                    resolve_secret(v.as_str()).map(|val| (k.clone(), val))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    connect_sse(&url, auth_token, custom_headers).await
                 }
             };
 
@@ -149,9 +165,48 @@ async fn connect_stdio(command: &str, args: &[&str]) -> anyhow::Result<RunningSe
     Ok(service)
 }
 
-async fn connect_sse(uri: &str) -> anyhow::Result<RunningService<RoleClient, ()>> {
+async fn connect_sse(
+    uri: &str,
+    auth_token: Option<String>,
+    custom_headers: Vec<(String, String)>,
+) -> anyhow::Result<RunningService<RoleClient, ()>> {
     use rmcp::transport::StreamableHttpClientTransport;
-    let transport = StreamableHttpClientTransport::from_uri(uri);
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    use reqwest::header::{HeaderName, HeaderValue};
+
+    let mut config = StreamableHttpClientTransportConfig::default();
+    config.uri = uri.into();
+    // Bearer convenience (`Authorization: Bearer <token>`).
+    config.auth_header = auth_token;
+    // Arbitrary headers — required by servers using non-Bearer auth, e.g.
+    // Composio's `x-consumer-api-key`.
+    for (name, value) in custom_headers {
+        match (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(&value)) {
+            (Ok(n), Ok(v)) => { config.custom_headers.insert(n, v); }
+            _ => tracing::warn!(header = %name, "invalid custom header name/value, skipping"),
+        }
+    }
+    let transport = StreamableHttpClientTransport::from_config(config);
     let service: RunningService<RoleClient, ()> = ().serve(transport).await?;
     Ok(service)
+}
+
+/// Resolve a config string that may reference an env var as `${VAR_NAME}`.
+/// Literal values pass through unchanged. Returns None for missing/empty.
+fn resolve_secret(raw: Option<&str>) -> Option<String> {
+    let v = raw?.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if let Some(var) = v.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        match std::env::var(var) {
+            Ok(val) if !val.trim().is_empty() => Some(val),
+            _ => {
+                tracing::warn!(env = %var, "auth_token references unset/empty env var");
+                None
+            }
+        }
+    } else {
+        Some(v.to_owned())
+    }
 }

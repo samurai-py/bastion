@@ -214,6 +214,9 @@ __marimo__/
 .env
 .env.local
 
+# MCP servers config — URL real pode conter endpoint/secret. Trackear só o .example
+.bastion/mcp-servers.json
+
 # Runtime data (generated at startup)
 config/
 personas/

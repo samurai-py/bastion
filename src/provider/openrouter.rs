@@ -7,27 +7,39 @@ use async_openai::{
 use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role, ToolCall, TokenUsage, strip_think};
 use super::Provider;
 
-pub struct OpenAIProvider {
+/// OpenAI-compatible provider pointed at OpenRouter (https://openrouter.ai).
+/// Unlocks dozens of models — including free ones — without a local GPU.
+/// Routed when the model name contains '/' (OpenRouter slugs, e.g.
+/// `meta-llama/llama-3.3-70b-instruct:free`).
+pub struct OpenRouterProvider {
     client: Client<OpenAIConfig>,
     model:  String,
 }
 
-impl OpenAIProvider {
+impl OpenRouterProvider {
     pub fn new(model: &str) -> Self {
-        // OPENAI_API_KEY is read automatically by OpenAIConfig::default().
-        // Panic with a clear message if it's missing.
-        if std::env::var("OPENAI_API_KEY").is_err() {
-            panic!("OPENAI_API_KEY required");
+        // OpenRouter requires an API key. Reject missing OR empty (avoids opaque 401).
+        let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+        if api_key.trim().is_empty() {
+            panic!("OPENROUTER_API_KEY required (missing or empty) — get one at https://openrouter.ai/keys");
         }
+
+        let base = std::env::var("OPENROUTER_BASE_URL")
+            .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_owned());
+
+        let config = OpenAIConfig::default()
+            .with_api_base(base)
+            .with_api_key(api_key);
+
         Self {
-            client: Client::new(),
+            client: Client::with_config(config),
             model:  model.to_owned(),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl Provider for OpenAIProvider {
+impl Provider for OpenRouterProvider {
     async fn complete(&self, messages: &[Message], config: &CallConfig) -> anyhow::Result<LlmResponse> {
         let oai_messages = super::build_openai_messages(&config.system_prompt, messages);
 
@@ -43,7 +55,7 @@ impl Provider for OpenAIProvider {
         let response = self.client.chat().create(request).await?;
 
         let choice = response.choices.into_iter().next()
-            .ok_or_else(|| anyhow::anyhow!("OpenAI returned no choices"))?;
+            .ok_or_else(|| anyhow::anyhow!("OpenRouter returned no choices"))?;
 
         let raw_text = choice.message.content.unwrap_or_default();
         let text = strip_think(&raw_text);
@@ -90,5 +102,5 @@ impl Provider for OpenAIProvider {
 
     fn context_limit(&self) -> usize { 128_000 }
     fn model_name(&self) -> &str { &self.model }
-    fn name(&self) -> &'static str { "openai" }
+    fn name(&self) -> &'static str { "openrouter" }
 }

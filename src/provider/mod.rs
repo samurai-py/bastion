@@ -1,11 +1,148 @@
 pub mod anthropic;
 pub mod openai;
 pub mod ollama;
+pub mod openrouter;
+pub mod gemini;
 pub mod registry;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::types::{Message, CallConfig, LlmResponse};
+use async_openai::types::chat::{
+    ChatCompletionTools, ChatCompletionTool, FunctionObject,
+    ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
+    ChatCompletionMessageToolCalls, ChatCompletionMessageToolCall, FunctionCall,
+};
+use crate::types::{Message, MessageContent, ContentPart, Role, CallConfig, LlmResponse};
+
+/// Convert Anthropic-format tool defs (`{name, description, input_schema}`,
+/// as built by AgentLoop) into async-openai `ChatCompletionTools` for the
+/// OpenAI-compatible providers (OpenAI, Gemini, OpenRouter, Ollama).
+pub(crate) fn anthropic_tools_to_openai(tools: &[serde_json::Value]) -> Vec<ChatCompletionTools> {
+    tools.iter().filter_map(|t| {
+        let name = t.get("name")?.as_str()?.to_owned();
+        let description = t.get("description").and_then(|d| d.as_str()).map(str::to_owned);
+        let parameters = t.get("input_schema").cloned();
+        Some(ChatCompletionTools::Function(ChatCompletionTool {
+            function: FunctionObject { name, description, parameters, strict: None },
+        }))
+    }).collect()
+}
+
+/// Flatten a MessageContent to plain text (joins Text parts; ignores tool parts).
+fn content_text(content: &MessageContent) -> String {
+    match content {
+        MessageContent::Text(t) => t.clone(),
+        MessageContent::Parts(parts) => parts.iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// Build the full OpenAI-compatible message list (system prompt + conversation)
+/// for the OpenAI/Gemini/OpenRouter/Ollama providers. Handles the tool round-trip:
+/// assistant `ToolUse` parts → `tool_calls`; `ToolResult` parts → `role:"tool"`
+/// messages with `tool_call_id`. Without this, tool-using models never converge.
+pub(crate) fn build_openai_messages(
+    system_prompt: &str,
+    messages: &[Message],
+) -> Vec<ChatCompletionRequestMessage> {
+    let mut out = Vec::new();
+
+    if !system_prompt.is_empty() {
+        out.push(ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+            content: ChatCompletionRequestSystemMessageContent::Text(system_prompt.to_owned()),
+            name: None,
+        }));
+    }
+
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                out.push(ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                    content: ChatCompletionRequestSystemMessageContent::Text(content_text(&msg.content)),
+                    name: None,
+                }));
+            }
+            Role::User => {
+                out.push(ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Text(content_text(&msg.content)),
+                    name: None,
+                }));
+            }
+            Role::Assistant => {
+                let mut text = String::new();
+                let mut tool_calls = Vec::new();
+                if let MessageContent::Parts(parts) = &msg.content {
+                    for p in parts {
+                        match p {
+                            ContentPart::Text { text: t } => {
+                                if !text.is_empty() { text.push('\n'); }
+                                text.push_str(t);
+                            }
+                            ContentPart::ToolUse { id, name, input } => {
+                                tool_calls.push(ChatCompletionMessageToolCalls::Function(
+                                    ChatCompletionMessageToolCall {
+                                        id: id.clone(),
+                                        function: FunctionCall {
+                                            name: name.clone(),
+                                            arguments: input.to_string(),
+                                        },
+                                    },
+                                ));
+                            }
+                            ContentPart::ToolResult { .. } => {}
+                        }
+                    }
+                } else {
+                    text = content_text(&msg.content);
+                }
+                out.push(ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                    // content is optional when tool_calls are present
+                    content: if text.is_empty() && !tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionRequestAssistantMessageContent::Text(text))
+                    },
+                    name: None,
+                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                    refusal: None,
+                    audio: None,
+                    #[allow(deprecated)]
+                    function_call: None,
+                }));
+            }
+            Role::Tool => {
+                // Each ToolResult → its own tool message keyed by tool_call_id.
+                if let MessageContent::Parts(parts) = &msg.content {
+                    for p in parts {
+                        if let ContentPart::ToolResult { tool_use_id, content } = p {
+                            out.push(ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+                                content: ChatCompletionRequestToolMessageContent::Text(content.clone()),
+                                tool_call_id: tool_use_id.clone(),
+                            }));
+                        }
+                    }
+                } else {
+                    // Fallback for legacy text-only tool messages (no id available).
+                    out.push(ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(content_text(&msg.content)),
+                        name: None,
+                    }));
+                }
+            }
+        }
+    }
+
+    out
+}
 
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
@@ -13,11 +150,61 @@ pub trait Provider: Send + Sync {
     async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String>;
     fn context_limit(&self) -> usize;
     fn model_name(&self) -> &str;
-    /// "anthropic" | "openai" | "ollama"
+    /// "anthropic" | "openai" | "gemini" | "openrouter" | "ollama"
     fn name(&self) -> &'static str;
 }
 
 pub type SharedProvider = Arc<RwLock<Box<dyn Provider>>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_roundtrip_produces_assistant_tool_calls_and_tool_message() {
+        // Simulate one tool round-trip: assistant emits a tool_use, then a tool result.
+        let messages = vec![
+            Message { role: Role::User, content: MessageContent::Text("read the file".into()) },
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text { text: String::new() },
+                    ContentPart::ToolUse { id: "call_1".into(), name: "read_file".into(), input: json!({"path":"/tmp/x"}) },
+                ]),
+            },
+            Message {
+                role: Role::Tool,
+                content: MessageContent::Parts(vec![
+                    ContentPart::ToolResult { tool_use_id: "call_1".into(), content: "hello".into() },
+                ]),
+            },
+        ];
+
+        let out = build_openai_messages("sys prompt", &messages);
+
+        // [System(sys), User, Assistant(tool_calls), Tool(call_1)]
+        assert_eq!(out.len(), 4);
+        match &out[2] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                let tcs = a.tool_calls.as_ref().expect("assistant must carry tool_calls");
+                assert_eq!(tcs.len(), 1);
+                match &tcs[0] {
+                    ChatCompletionMessageToolCalls::Function(f) => {
+                        assert_eq!(f.id, "call_1");
+                        assert_eq!(f.function.name, "read_file");
+                    }
+                    _ => panic!("expected function tool call"),
+                }
+            }
+            _ => panic!("out[2] must be Assistant"),
+        }
+        match &out[3] {
+            ChatCompletionRequestMessage::Tool(t) => assert_eq!(t.tool_call_id, "call_1"),
+            _ => panic!("out[3] must be a Tool message with tool_call_id"),
+        }
+    }
+}
 
 /// Exponential backoff retry wrapper for provider calls (D-13: 3 attempts).
 /// Does NOT retry on HTTP 400 (context length exceeded — AutoCompact must handle upstream).

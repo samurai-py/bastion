@@ -1,22 +1,10 @@
 use async_openai::{
     Client,
     config::OpenAIConfig,
-    types::chat::{
-        ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessage,
-        ChatCompletionRequestSystemMessageContent,
-        ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent,
-        ChatCompletionRequestAssistantMessage,
-        ChatCompletionRequestAssistantMessageContent,
-        ChatCompletionMessageToolCalls,
-        CreateChatCompletionRequestArgs,
-    },
+    types::chat::{ChatCompletionMessageToolCalls, CreateChatCompletionRequestArgs},
 };
 
-use crate::types::{
-    CallConfig, LlmResponse, Message, MessageContent, Role, ToolCall, TokenUsage, strip_think,
-};
+use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role, ToolCall, TokenUsage, strip_think};
 use super::Provider;
 
 pub struct OllamaProvider {
@@ -36,74 +24,21 @@ impl OllamaProvider {
             model:  model.to_owned(),
         }
     }
-
-    fn messages_to_openai(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
-        let mut out = Vec::new();
-        for msg in messages {
-            let text = match &msg.content {
-                MessageContent::Text(t) => t.clone(),
-                MessageContent::Parts(parts) => parts.iter()
-                    .filter_map(|p| match p {
-                        crate::types::ContentPart::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            };
-
-            let cm = match msg.role {
-                Role::System => ChatCompletionRequestMessage::System(
-                    ChatCompletionRequestSystemMessage {
-                        content: ChatCompletionRequestSystemMessageContent::Text(text),
-                        name: None,
-                    }
-                ),
-                Role::User | Role::Tool => ChatCompletionRequestMessage::User(
-                    ChatCompletionRequestUserMessage {
-                        content: ChatCompletionRequestUserMessageContent::Text(text),
-                        name: None,
-                    }
-                ),
-                Role::Assistant => ChatCompletionRequestMessage::Assistant(
-                    ChatCompletionRequestAssistantMessage {
-                        content: Some(ChatCompletionRequestAssistantMessageContent::Text(text)),
-                        name: None,
-                        tool_calls: None,
-                        refusal: None,
-                        audio: None,
-                        #[allow(deprecated)]
-                        function_call: None,
-                    }
-                ),
-            };
-
-            out.push(cm);
-        }
-        out
-    }
 }
 
 #[async_trait::async_trait]
 impl Provider for OllamaProvider {
     async fn complete(&self, messages: &[Message], config: &CallConfig) -> anyhow::Result<LlmResponse> {
-        let mut oai_messages = Vec::new();
+        let oai_messages = super::build_openai_messages(&config.system_prompt, messages);
 
-        if !config.system_prompt.is_empty() {
-            oai_messages.push(ChatCompletionRequestMessage::System(
-                ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(config.system_prompt.clone()),
-                    name: None,
-                }
-            ));
-        }
-
-        oai_messages.extend(Self::messages_to_openai(messages));
-
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(&self.model)
+        let mut args = CreateChatCompletionRequestArgs::default();
+        args.model(&self.model)
             .max_completion_tokens(config.max_tokens)
-            .messages(oai_messages)
-            .build()?;
+            .messages(oai_messages);
+        if !config.tools.is_empty() {
+            args.tools(super::anthropic_tools_to_openai(&config.tools));
+        }
+        let request = args.build()?;
 
         let response = self.client.chat().create(request).await?;
 
