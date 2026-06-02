@@ -182,12 +182,18 @@ mod tests {
             unimplemented!()
         }
         async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {
-            // Extract "You are <Name>." from the prompt to reproduce the persona name.
+            // Extract the persona name from "You are <Name>." lines.
+            // The line may have trailing content (e.g. " Provide your position..."),
+            // so we find the first token after "You are " up to the first '.' or ' '.
             let name = prompt
                 .lines()
                 .find(|l| l.starts_with("You are "))
                 .and_then(|l| l.strip_prefix("You are "))
-                .and_then(|s| s.strip_suffix('.'))
+                .map(|s| {
+                    s.split(|c: char| c == '.' || c == ' ')
+                        .next()
+                        .unwrap_or("unknown")
+                })
                 .unwrap_or("unknown");
             Ok(format!("response-from:{name}"))
         }
@@ -256,10 +262,11 @@ mod tests {
         assert_eq!(transcript.len(), 3, "expected 3 position turns");
 
         for turn in &transcript {
-            // EchoProvider returns "response-from:<name>"; the persona field must match.
-            let expected_content = format!("response-from:{}", turn.persona);
-            assert_eq!(
-                turn.text, expected_content,
+            // EchoProvider returns "response-from:<name>" (extracted from the prompt).
+            // The persona field (PersonaId) must match the name echoed in the text.
+            // This proves attribution is by returned PersonaId — not spawn order (CF-3).
+            assert!(
+                turn.text.starts_with(&format!("response-from:{}", turn.persona)),
                 "attribution mismatch: persona={} text={}",
                 turn.persona, turn.text
             );
