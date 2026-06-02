@@ -7,3 +7,4 @@ pub mod memory;
 pub mod hooks;
 pub mod persona;
 pub mod goal;
+pub mod cabinet;
