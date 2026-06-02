@@ -19,6 +19,7 @@ impl SessionManager {
 
                 CREATE TABLE IF NOT EXISTS sessions (
                     id         TEXT    PRIMARY KEY,
+                    owner_id   TEXT    NOT NULL DEFAULT '_local',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
@@ -74,21 +75,38 @@ impl SessionManager {
                     created_at       INTEGER NOT NULL
                 );
             ")?;
+            // Additive migration for pre-existing single-user DBs (idempotent —
+            // errors with "duplicate column" on fresh DBs where CREATE already added it).
+            let _ = conn.execute(
+                "ALTER TABLE sessions ADD COLUMN owner_id TEXT NOT NULL DEFAULT '_local'",
+                [],
+            );
             Ok::<_, anyhow::Error>(())
         }).await?
     }
 
+    /// Create a session owned by the default single-user identity.
+    /// Multi-owner callers (channels binding a chat to a user) MUST use
+    /// `create_session_for` so message content is owner-scoped (goal scoring,
+    /// life-log, and any per-owner read depend on sessions.owner_id).
     pub async fn create_session(&self) -> anyhow::Result<String> {
+        self.create_session_for("_local").await
+    }
+
+    /// Create a session owned by `owner_id`. The owner scopes every message
+    /// written under this session for cross-tenant isolation.
+    pub async fn create_session_for(&self, owner_id: &str) -> anyhow::Result<String> {
         let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             let now: i64 = now_nanos();
-            // Use nanosecond timestamp as session ID — unique enough for single-user daemon
+            // Use nanosecond timestamp as session ID — unique enough per owner
             let session_id = now.to_string();
             conn.execute(
-                "INSERT INTO sessions (id, created_at, updated_at) VALUES (?1, ?2, ?3)",
-                rusqlite::params![session_id, now, now],
+                "INSERT INTO sessions (id, owner_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![session_id, owner_id, now, now],
             )?;
             Ok::<_, anyhow::Error>(session_id)
         }).await?

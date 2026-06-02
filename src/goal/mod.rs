@@ -188,12 +188,15 @@ impl GoalEngine {
 
             // Fetch recent message content within window (Rust-side keyword matching —
             // avoids string-built SQL; satisfies T-02-16 injection-safety requirement).
+            // Owner-scoped JOIN (IDOR guard): only count messages from sessions owned
+            // by this goal's owner — never let another owner's activity inflate progress.
             let mut stmt = conn.prepare(
                 "SELECT m.content FROM messages m \
-                 WHERE m.created_at > ?1",
+                 JOIN sessions s ON s.id = m.session_id \
+                 WHERE m.created_at > ?1 AND s.owner_id = ?2",
             )?;
             let contents: Vec<String> = stmt
-                .query_map(rusqlite::params![window_start], |row| row.get(0))?
+                .query_map(rusqlite::params![window_start, owner_id], |row| row.get(0))?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -468,7 +471,7 @@ mod tests {
             .unwrap();
 
         // Insert only 1 message with keyword "rust" — below threshold=3
-        let sid = sm.create_session().await.unwrap();
+        let sid = sm.create_session_for("user1").await.unwrap();
         insert_raw_message(&db, &sid, "falei sobre rust hoje").await;
 
         let score = engine.score_progress("user1", goal_id).await.unwrap();
@@ -494,7 +497,7 @@ mod tests {
             .unwrap();
 
         // Insert 3 messages with keyword "aprender" — at threshold
-        let sid = sm.create_session().await.unwrap();
+        let sid = sm.create_session_for("user1").await.unwrap();
         for _ in 0..3 {
             insert_raw_message(&db, &sid, "preciso aprender mais hoje").await;
         }
@@ -549,7 +552,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sid = sm.create_session().await.unwrap();
+        let sid = sm.create_session_for("user1").await.unwrap();
         for _ in 0..3 {
             insert_raw_message(&db, &sid, "trabalhei em aprender hoje").await;
         }
