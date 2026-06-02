@@ -36,6 +36,12 @@ pub struct PersonaRegistry {
 }
 
 impl PersonaRegistry {
+    /// Construct directly from a map — used in tests and by the router/runner test fixtures.
+    #[cfg(test)]
+    pub fn new_from_map(personas: HashMap<String, Persona>) -> Self {
+        PersonaRegistry { personas }
+    }
+
     /// Scan `root/personas/<name>/SOUL.md` and build the registry.
     ///
     /// Mirrors `load_mcp_config`'s tolerance:
