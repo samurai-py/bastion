@@ -39,6 +39,40 @@ impl SessionManager {
                     date      TEXT PRIMARY KEY,
                     total_usd REAL NOT NULL DEFAULT 0.0
                 );
+
+                CREATE TABLE IF NOT EXISTS beliefs (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id    TEXT    NOT NULL,
+                    persona_tag TEXT,
+                    content     TEXT    NOT NULL,
+                    weight      REAL    NOT NULL DEFAULT 1.0,
+                    revoked     INTEGER NOT NULL DEFAULT 0,
+                    is_core     INTEGER NOT NULL DEFAULT 0,
+                    created_at  INTEGER NOT NULL,
+                    revoked_at  INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_beliefs_owner_persona
+                    ON beliefs(owner_id, persona_tag, revoked, weight);
+
+                CREATE TABLE IF NOT EXISTS provenance (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    belief_id  INTEGER NOT NULL REFERENCES beliefs(id) ON DELETE CASCADE,
+                    session_id TEXT    NOT NULL,
+                    source     TEXT,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_provenance_belief ON provenance(belief_id);
+
+                CREATE TABLE IF NOT EXISTS goals (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id         TEXT    NOT NULL,
+                    description      TEXT    NOT NULL,
+                    metric           TEXT,
+                    deadline         INTEGER,
+                    guardian_persona TEXT,
+                    last_confirmed   INTEGER,
+                    created_at       INTEGER NOT NULL
+                );
             ")?;
             Ok::<_, anyhow::Error>(())
         }).await?
