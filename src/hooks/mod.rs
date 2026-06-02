@@ -1,8 +1,18 @@
 //! Hook and Observer traits for intercepting and observing provider calls.
 //!
-//! This module defines the TRAIT layer only (HOOK-01, HOOK-04).
-//! Concrete implementations (egress, guardrails, output_validator, life-log observer)
-//! land in plan 04 (HOOK-02/03/05). AgentLoop wiring is plan 08.
+//! This module defines the TRAIT layer (HOOK-01, HOOK-04) plus the plan-04
+//! concrete implementations:
+//! - [`egress`]: fail-closed privacy egress check (PRIV-03, D-03, CF-1)
+//! - [`guardrails`]: input guardrail — malformed/oversized input (HOOK-02)
+//! - [`output_validator`]: NL contestation detection → belief revocation (HOOK-03, D-13)
+//! - [`observer`]: life-log Observer (HOOK-05)
+//!
+//! AgentLoop wiring of these hooks is plan 08.
+
+pub mod egress;
+pub mod guardrails;
+pub mod output_validator;
+pub mod observer;
 
 /// Intercepts provider calls before and after execution.
 ///
