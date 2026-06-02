@@ -1,7 +1,12 @@
 use async_openai::{
     Client,
     config::OpenAIConfig,
-    types::chat::{ChatCompletionMessageToolCalls, CreateChatCompletionRequestArgs},
+    types::chat::{
+        ChatCompletionMessageToolCalls, ChatCompletionRequestMessage,
+        ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
+        ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+        CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema,
+    },
 };
 
 use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role, ToolCall, TokenUsage, strip_think};
@@ -91,4 +96,52 @@ impl Provider for OpenAIProvider {
     fn context_limit(&self) -> usize { 128_000 }
     fn model_name(&self) -> &str { &self.model }
     fn name(&self) -> &'static str { "openai" }
+
+    async fn complete_structured(
+        &self,
+        system: &str,
+        user: &str,
+        response_schema: serde_json::Value,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> anyhow::Result<String> {
+        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+        if !system.is_empty() {
+            messages.push(ChatCompletionRequestMessage::System(
+                ChatCompletionRequestSystemMessage {
+                    content: ChatCompletionRequestSystemMessageContent::Text(system.to_owned()),
+                    name: None,
+                },
+            ));
+        }
+        messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(user.to_owned()),
+                name: None,
+            },
+        ));
+
+        let mut args = CreateChatCompletionRequestArgs::default();
+        args.model(&self.model)
+            .max_completion_tokens(max_tokens)
+            .temperature(temperature)
+            .response_format(ResponseFormat::JsonSchema {
+                json_schema: ResponseFormatJsonSchema {
+                    name: "structured".into(),
+                    description: None,
+                    schema: Some(response_schema),
+                    strict: Some(true),
+                },
+            })
+            .messages(messages);
+        let request = args.build()?;
+
+        let response = self.client.chat().create(request).await?;
+
+        let choice = response.choices.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("OpenAI returned no choices"))?;
+
+        choice.message.content
+            .ok_or_else(|| anyhow::anyhow!("OpenAI structured response had no content"))
+    }
 }

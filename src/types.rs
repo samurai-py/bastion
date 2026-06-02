@@ -110,6 +110,8 @@ pub enum BastionError {
     BudgetExceeded,
     #[error("Orphaned tool result — no preceding assistant tool_use")]
     OrphanedToolResult,
+    #[error("Privacy egress blocked: local-only context bound for non-Ollama provider")]
+    PrivacyEgressBlocked,
 }
 
 /// Strip `<think>...</think>` blocks from LLM output (CORE-09).

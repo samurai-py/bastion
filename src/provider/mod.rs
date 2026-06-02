@@ -152,6 +152,21 @@ pub trait Provider: Send + Sync {
     fn model_name(&self) -> &str;
     /// "anthropic" | "openai" | "gemini" | "openrouter" | "ollama"
     fn name(&self) -> &'static str;
+
+    /// Structured completion. Default = prompt-only fallback (complete_simple);
+    /// OpenAI-compat overrides to set response_format. Schema is a HINT — the caller
+    /// MUST serde-parse-and-retry (AI-SPEC §4b); never assume schema-valid bytes.
+    async fn complete_structured(
+        &self,
+        system: &str,
+        user: &str,
+        response_schema: serde_json::Value,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> anyhow::Result<String> {
+        let _ = (response_schema, max_tokens, temperature);
+        self.complete_simple(&format!("{system}\n\n{user}")).await
+    }
 }
 
 pub type SharedProvider = Arc<RwLock<Box<dyn Provider>>>;
