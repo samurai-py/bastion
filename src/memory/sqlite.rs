@@ -39,19 +39,23 @@ impl Memory for SqliteMemory {
         let session_id = session_id.to_owned();
         let source = source.to_owned();
         task::spawn_blocking(move || {
-            let conn = Connection::open(&path)?;
+            let mut conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             let now = now_nanos();
-            conn.execute(
+            // Atomic: belief + its provenance row commit together or not at all
+            // (audit-trail integrity — no orphan belief without provenance).
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO beliefs (owner_id, persona_tag, content, weight, revoked, is_core, created_at) \
                  VALUES (?1, ?2, ?3, 1.0, 0, ?4, ?5)",
                 rusqlite::params![owner_id, persona_tag, content, is_core as i32, now],
             )?;
-            let belief_id = conn.last_insert_rowid();
-            conn.execute(
+            let belief_id = tx.last_insert_rowid();
+            tx.execute(
                 "INSERT INTO provenance (belief_id, session_id, source, created_at) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![belief_id, session_id, source, now],
             )?;
+            tx.commit()?;
             Ok::<i64, anyhow::Error>(belief_id)
         })
         .await?
@@ -90,16 +94,22 @@ impl Memory for SqliteMemory {
         .await?
     }
 
-    async fn revoke_belief(&self, id: i64) -> anyhow::Result<()> {
+    async fn revoke_belief(&self, owner_id: &str, id: i64) -> anyhow::Result<()> {
         let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             let now = now_nanos();
-            conn.execute(
-                "UPDATE beliefs SET weight = 0, revoked = 1, revoked_at = ?2 WHERE id = ?1",
-                rusqlite::params![id, now],
+            // Owner-scoped UPDATE (IDOR guard): a belief can only be revoked by its owner.
+            let changed = conn.execute(
+                "UPDATE beliefs SET weight = 0, revoked = 1, revoked_at = ?3 \
+                 WHERE id = ?1 AND owner_id = ?2",
+                rusqlite::params![id, owner_id, now],
             )?;
+            if changed == 0 {
+                anyhow::bail!("belief {id} not found for owner (no row revoked)");
+            }
             Ok::<(), anyhow::Error>(())
         })
         .await?
@@ -133,16 +143,25 @@ impl Memory for SqliteMemory {
         .await?
     }
 
-    async fn provenance_for(&self, belief_id: i64) -> anyhow::Result<Vec<(String, String)>> {
+    async fn provenance_for(
+        &self,
+        owner_id: &str,
+        belief_id: i64,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            // Owner-scoped JOIN (IDOR guard): only return provenance when the
+            // belief belongs to the caller; cross-owner probes get an empty vec.
             let mut stmt = conn.prepare(
-                "SELECT session_id, COALESCE(source, '') FROM provenance WHERE belief_id = ?1",
+                "SELECT p.session_id, COALESCE(p.source, '') \
+                 FROM provenance p JOIN beliefs b ON b.id = p.belief_id \
+                 WHERE p.belief_id = ?1 AND b.owner_id = ?2",
             )?;
             let rows = stmt
-                .query_map(rusqlite::params![belief_id], |row| {
+                .query_map(rusqlite::params![belief_id, owner_id], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -199,7 +218,7 @@ mod tests {
         assert_eq!(before.len(), 1);
 
         // Revoke
-        mem.revoke_belief(id).await.expect("revoke");
+        mem.revoke_belief("owner1", id).await.expect("revoke");
 
         // After revoke: retrieve_tagged excludes it
         let after = mem.retrieve_tagged("owner1", Some("finance")).await.expect("after");
@@ -245,7 +264,7 @@ mod tests {
         .await
         .unwrap();
 
-        mem.revoke_belief(id).await.expect("revoke");
+        mem.revoke_belief("owner1", id).await.expect("revoke");
 
         let path2 = mem.db_path.clone();
         let count_after = tokio::task::spawn_blocking(move || {
@@ -304,10 +323,36 @@ mod tests {
             .await
             .expect("store");
 
-        let prov = mem.provenance_for(id).await.expect("provenance");
+        let prov = mem.provenance_for("owner1", id).await.expect("provenance");
         assert_eq!(prov.len(), 1);
         assert_eq!(prov[0].0, "sess-abc");
         assert_eq!(prov[0].1, "tool");
+    }
+
+    #[tokio::test]
+    async fn test_owner_isolation_revoke_and_provenance() {
+        // IDOR guard: owner2 cannot revoke or read provenance of owner1's belief.
+        let (_f, mem) = make_db().await;
+        let id = mem
+            .store_belief("owner1", None, "Owner1 secret", "sess1", "user", false)
+            .await
+            .expect("store");
+
+        // Wrong owner cannot revoke (errors, does not silently no-op)
+        let revoked = mem.revoke_belief("owner2", id).await;
+        assert!(revoked.is_err(), "cross-owner revoke must error");
+
+        // Belief still active for the real owner
+        let still = mem.retrieve_tagged("owner1", None).await.expect("retrieve");
+        assert_eq!(still.len(), 1, "belief must survive cross-owner revoke attempt");
+
+        // Wrong owner gets empty provenance (indistinguishable from missing id)
+        let prov_wrong = mem.provenance_for("owner2", id).await.expect("prov wrong");
+        assert!(prov_wrong.is_empty(), "cross-owner provenance must be empty");
+
+        // Real owner still sees provenance
+        let prov_ok = mem.provenance_for("owner1", id).await.expect("prov ok");
+        assert_eq!(prov_ok.len(), 1);
     }
 
     #[tokio::test]

@@ -50,13 +50,22 @@ pub trait Memory: Send + Sync {
     ) -> anyhow::Result<Vec<Belief>>;
 
     /// Soft-revoke: set weight=0, revoked=1, revoked_at=now. Row is NEVER deleted (D-15).
-    async fn revoke_belief(&self, id: i64) -> anyhow::Result<()>;
+    /// Owner-scoped (IDOR guard): only the owning user's belief may be revoked.
+    /// Errors when no row matches (id, owner_id) so a wrong owner cannot silently no-op.
+    async fn revoke_belief(&self, owner_id: &str, id: i64) -> anyhow::Result<()>;
 
     /// Load frozen-core beliefs (is_core=1, revoked=0) once at session start.
     async fn load_core(&self, owner_id: &str) -> anyhow::Result<Vec<Belief>>;
 
     /// Return (session_id, source) provenance rows for a belief.
-    async fn provenance_for(&self, belief_id: i64) -> anyhow::Result<Vec<(String, String)>>;
+    /// Owner-scoped (IDOR guard): provenance is only returned when the belief is
+    /// owned by `owner_id`; cross-owner probes get an empty vec (indistinguishable
+    /// from a missing id).
+    async fn provenance_for(
+        &self,
+        owner_id: &str,
+        belief_id: i64,
+    ) -> anyhow::Result<Vec<(String, String)>>;
 }
 
 /// Clonable shared-handle alias — mirrors SharedProvider from provider/mod.rs.
