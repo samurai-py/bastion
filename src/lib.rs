@@ -5,3 +5,4 @@ pub mod mcp;
 pub mod agent;
 pub mod memory;
 pub mod hooks;
+pub mod persona;
