@@ -1,11 +1,14 @@
 //! Cargo-native eval harness (AI-SPEC §5).
 //!
-//! 4 deterministic, offline, $0 code-floor evals:
+//! Deterministic, offline, $0 code-floor evals:
 //!   1. Egress fail-closed: full (tier × destination) matrix via rstest
 //!   2. Injection adversarial: content cannot bypass the data-layer block
 //!   3. Revocation: soft-revoke leaves row present, excludes from retrieval
 //!   4. Cabinet dissent: synthesize preserves dissent on divergent transcripts
 //!   5. Proactive suppression: CronService enqueues, daemon drains only when idle
+//!   6. Runner egress on run_single + run_parallel (CR-01 gap closure)
+//!   7. Owner isolation: distinct sessions per owner (CR-04 gap closure)
+//!   8. Webhook denial maps to non-2xx (CR-05 gap closure)
 //!
 //! CI gate: `cargo test --test evals`
 //! Must-pass gate: `cargo test --test evals privacy_ injection_`
@@ -364,5 +367,230 @@ async fn proactive_suppressed_during_active_session() {
         delivered[0].contains("proactive"),
         "delivered message must be the enqueued proactive text; got: {:?}",
         delivered[0]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. Runner egress — run_single and run_parallel fire fail-closed (CR-01)
+// ---------------------------------------------------------------------------
+
+/// runner_egress_single_local_only_blocks_cloud_provider:
+/// A LocalOnly persona with a cloud SpyProvider (name="openai") must return
+/// PrivacyEgressBlocked and the SpyProvider must record ZERO calls.
+#[tokio::test]
+async fn runner_egress_single_local_only_blocks_cloud_provider() {
+    use bastion::persona::{Persona, PersonaRegistry};
+    use bastion::persona::router::{ResponseMode, RouterDecision};
+    use bastion::persona::runner::run;
+    use std::collections::HashMap;
+    use tokio::sync::RwLock;
+
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let spy = SpyProvider::new("openai", Arc::clone(&calls));
+    let provider = Arc::new(RwLock::new(Box::new(spy) as Box<dyn bastion::provider::Provider>));
+
+    let mut personas = HashMap::new();
+    personas.insert(
+        "Saúde".to_string(),
+        Persona {
+            name: "Saúde".to_string(),
+            description: None,
+            system_prompt: "You are Saúde.".to_string(),
+            tier: PrivacyTier::LocalOnly,
+            weight: 0.9,
+            skills: vec![],
+        },
+    );
+    let registry = PersonaRegistry::new_from_map(personas);
+
+    let decision = RouterDecision {
+        personas: vec!["Saúde".to_string()],
+        owner: "user1".to_string(),
+        mode: ResponseMode::Single,
+        convene_reason: None,
+    };
+
+    let result = run(decision, &registry, provider, "my health data").await;
+
+    // Must return PrivacyEgressBlocked error
+    assert!(result.is_err(), "LocalOnly + cloud provider must return Err");
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.contains("Privacy egress blocked"),
+        "Expected PrivacyEgressBlocked; got: {err_str}"
+    );
+
+    // SpyProvider must record ZERO calls — provider never invoked on block
+    let call_log = calls.lock().unwrap();
+    assert_eq!(
+        call_log.len(),
+        0,
+        "SpyProvider must have 0 calls (egress blocked before provider); got: {:?}",
+        *call_log
+    );
+}
+
+/// runner_egress_parallel_local_only_blocks_all_cloud_calls:
+/// In Parallel mode with LocalOnly personas and a cloud SpyProvider:
+/// - All persona tasks must fail (egress blocked per task)
+/// - run() returns Err because ALL tasks failed
+/// - SpyProvider records ZERO calls
+#[tokio::test]
+async fn runner_egress_parallel_local_only_blocks_all_cloud_calls() {
+    use bastion::persona::{Persona, PersonaRegistry};
+    use bastion::persona::router::{ResponseMode, RouterDecision};
+    use bastion::persona::runner::run;
+    use std::collections::HashMap;
+    use tokio::sync::RwLock;
+
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let spy = SpyProvider::new("openai", Arc::clone(&calls));
+    let provider = Arc::new(RwLock::new(Box::new(spy) as Box<dyn bastion::provider::Provider>));
+
+    let mut personas = HashMap::new();
+    for name in &["Saúde", "Privado"] {
+        personas.insert(
+            name.to_string(),
+            Persona {
+                name: name.to_string(),
+                description: None,
+                system_prompt: format!("You are {name}."),
+                tier: PrivacyTier::LocalOnly,
+                weight: 0.8,
+                skills: vec![],
+            },
+        );
+    }
+    let registry = PersonaRegistry::new_from_map(personas);
+
+    let decision = RouterDecision {
+        personas: vec!["Saúde".to_string(), "Privado".to_string()],
+        owner: "user1".to_string(),
+        mode: ResponseMode::Parallel,
+        convene_reason: None,
+    };
+
+    let result = run(decision, &registry, provider, "sensitive message").await;
+
+    // All tasks blocked → Err (all parallel persona calls failed)
+    assert!(result.is_err(), "All LocalOnly + cloud tasks must return Err collectively");
+
+    // SpyProvider must record ZERO calls
+    let call_log = calls.lock().unwrap();
+    assert_eq!(
+        call_log.len(),
+        0,
+        "SpyProvider must have 0 calls (all egress blocked); got: {:?}",
+        *call_log
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. Owner isolation — distinct sessions per owner (CR-04)
+// ---------------------------------------------------------------------------
+
+/// owner_isolation_distinct_sessions:
+/// Two owners get distinct sessions; their histories never mix.
+#[tokio::test]
+async fn owner_isolation_distinct_sessions() {
+    use bastion::session::SessionManager;
+    use tempfile::NamedTempFile;
+
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_str().unwrap().to_owned();
+
+    let sm = SessionManager::new(&path);
+    sm.init_schema().await.expect("init_schema");
+
+    // Create sessions for two distinct owners
+    let sess_a = sm.create_session_for("owner-a").await.expect("create_session_for a");
+    let sess_b = sm.create_session_for("owner-b").await.expect("create_session_for b");
+
+    // Sessions must be distinct
+    assert_ne!(sess_a, sess_b, "each owner must get a distinct session_id");
+
+    // load_most_recent_id_for must return the correct session per owner
+    let found_a = sm.load_most_recent_id_for("owner-a").await.expect("lookup a");
+    let found_b = sm.load_most_recent_id_for("owner-b").await.expect("lookup b");
+
+    assert_eq!(found_a.as_deref(), Some(sess_a.as_str()), "owner-a must get their own session");
+    assert_eq!(found_b.as_deref(), Some(sess_b.as_str()), "owner-b must get their own session");
+
+    // A new / unknown owner has no session
+    let found_c = sm.load_most_recent_id_for("owner-c").await.expect("lookup c");
+    assert!(found_c.is_none(), "unknown owner must have no session");
+}
+
+/// owner_isolation_spoofed_sender_rejected:
+/// A sender not in the Telegram OwnerMap is rejected; the AgentHandle never receives a message.
+#[tokio::test]
+async fn owner_isolation_spoofed_sender_rejected() {
+    use bastion::agent::handle;
+    use bastion::channel::OwnerMap;
+    use bastion::channel::telegram::handle_update;
+
+    let (h, mut rx) = handle::channel();
+
+    // Do NOT spawn a consumer — if any request arrives at rx, the test will detect it.
+    let map = OwnerMap::from_pairs(&[("42", "mario")]);
+
+    // Spoofed/unmapped chat_id "999" → must be rejected, never reach AgentHandle
+    let result = handle_update("spy payload".into(), "999".into(), &h, &map).await;
+    assert!(result.is_err(), "unmapped sender must be rejected");
+    assert!(
+        result.unwrap_err().to_string().contains("not in owner map"),
+        "error must name the rejection reason"
+    );
+
+    // Confirm nothing was sent to the AgentHandle receiver
+    assert!(
+        rx.try_recv().is_err(),
+        "AgentHandle must not receive any message from unmapped sender"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8. Webhook denial maps to non-2xx with no content leak (CR-05)
+// ---------------------------------------------------------------------------
+
+/// webhook_error_status_maps_egress_block_to_403:
+/// error_status maps PrivacyEgressBlocked → 403, BudgetExceeded → 429,
+/// guardrail errors → 400, and other errors → 500. No body leak.
+#[test]
+fn webhook_error_status_maps_correct_http_status() {
+    use bastion::channel::webhook::error_status;
+    use bastion::types::BastionError;
+    use axum::http::StatusCode;
+
+    // PrivacyEgressBlocked → 403 Forbidden
+    let egress_err = anyhow::anyhow!(BastionError::PrivacyEgressBlocked);
+    assert_eq!(
+        error_status(&egress_err),
+        StatusCode::FORBIDDEN,
+        "PrivacyEgressBlocked must map to 403"
+    );
+
+    // BudgetExceeded → 429 Too Many Requests
+    let budget_err = anyhow::anyhow!(BastionError::BudgetExceeded);
+    assert_eq!(
+        error_status(&budget_err),
+        StatusCode::TOO_MANY_REQUESTS,
+        "BudgetExceeded must map to 429"
+    );
+
+    // Guardrail string → 400 Bad Request
+    let guard_err = anyhow::anyhow!("input guardrail: input is empty");
+    assert_eq!(
+        error_status(&guard_err),
+        StatusCode::BAD_REQUEST,
+        "Guardrail rejection must map to 400"
+    );
+
+    // Unknown error → 500 Internal Server Error (no detail leaked)
+    let internal_err = anyhow::anyhow!("connection pool exhausted");
+    assert_eq!(
+        error_status(&internal_err),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Unknown error must map to 500"
     );
 }

@@ -80,7 +80,7 @@ struct AppState {
 
 /// Categorize an anyhow error for safe HTTP status mapping.
 /// NEVER include the error message in the response body — only log it.
-pub(crate) fn error_status(e: &anyhow::Error) -> StatusCode {
+pub fn error_status(e: &anyhow::Error) -> StatusCode {
     // Walk the error chain looking for BastionError variants
     if let Some(be) = e.downcast_ref::<BastionError>() {
         return match be {
