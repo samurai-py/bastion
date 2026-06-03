@@ -98,11 +98,13 @@ async fn telegram_loop(
                 backoff_secs = 0;
                 resp.result
             }
-            Err(_) => {
-                // CR-06: exponential backoff — do NOT log the error string if it may contain token.
-                // Do NOT log the error string — it may embed the bot token (T-02-23).
+            Err(e) => {
+                // CR-06: exponential backoff. T-02-23: the error may embed the bot token in the
+                // request URL — redact the token before logging so it never lands in the log.
+                let redacted = e.to_string().replace(token, "***TOKEN***");
                 tracing::warn!(
                     event = "telegram_get_updates_error",
+                    error = %redacted,
                     backoff_secs,
                 );
                 // Apply current backoff, then double (capped at 30s).
