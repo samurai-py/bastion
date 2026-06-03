@@ -81,7 +81,7 @@ impl Provider for OllamaProvider {
             content: MessageContent::Text(prompt.to_owned()),
         }];
         let config = CallConfig {
-            max_tokens: 512,
+            max_tokens: 2048,
             ..Default::default()
         };
         let resp = self.complete(&messages, &config).await?;

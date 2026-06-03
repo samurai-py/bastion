@@ -85,6 +85,16 @@ pub async fn route(
         let json = extract_json(&raw);
         match serde_json::from_str::<RouterDecisionLlm>(json) {
             Ok(d) => {
+                // Observability: log the DECISION metadata (personas/mode/reason) — never the
+                // message content (Pitfall 7). Lets operators/UAT confirm routing from logs.
+                tracing::info!(
+                    event = "router_decision",
+                    personas = ?d.personas,
+                    mode = ?d.mode,
+                    convene_reason = ?d.convene_reason,
+                    owner,
+                    "router classified message"
+                );
                 return Ok(RouterDecision {
                     personas: d.personas,
                     owner: owner.to_string(),
