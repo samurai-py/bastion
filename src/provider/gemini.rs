@@ -86,6 +86,43 @@ impl Provider for GeminiProvider {
         })
     }
 
+    async fn complete_structured(
+        &self,
+        system: &str,
+        user: &str,
+        _response_schema: serde_json::Value,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> anyhow::Result<String> {
+        use async_openai::types::chat::ResponseFormat;
+
+        // Gemini's OpenAI-compat endpoint honors response_format=json_object, which forces
+        // a clean JSON object (no prose, no ```fences```). The exact field set is described
+        // in the system prompt; json_object reliably stops the free-prose/truncation failures
+        // the default fallback produced. max_tokens + temperature are respected here, unlike
+        // the discard-everything default in the trait.
+        let msgs = vec![Message {
+            role: Role::User,
+            content: MessageContent::Text(user.to_owned()),
+        }];
+        let oai_messages = super::build_openai_messages(system, &msgs);
+
+        let mut args = CreateChatCompletionRequestArgs::default();
+        args.model(&self.model)
+            .max_completion_tokens(max_tokens)
+            .temperature(temperature)
+            .response_format(ResponseFormat::JsonObject)
+            .messages(oai_messages);
+        let request = args.build()?;
+
+        let response = self.client.chat().create(request).await?;
+        let choice = response.choices.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("Gemini returned no choices"))?;
+        let raw = choice.message.content
+            .ok_or_else(|| anyhow::anyhow!("Gemini structured response had no content"))?;
+        Ok(strip_think(&raw))
+    }
+
     async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {
         let messages = vec![Message {
             role:    Role::User,
