@@ -37,7 +37,7 @@ pub struct PersonaRegistry {
 
 impl PersonaRegistry {
     /// Construct directly from a map — used in tests and by the router/runner test fixtures.
-    #[cfg(test)]
+    /// Production code should use `load_dir`; this constructor is a test/harness fixture.
     pub fn new_from_map(personas: HashMap<String, Persona>) -> Self {
         PersonaRegistry { personas }
     }

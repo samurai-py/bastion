@@ -129,6 +129,27 @@ impl SessionManager {
         }).await?
     }
 
+    /// Owner-scoped session lookup — returns the most recent session for `owner_id`.
+    /// Used by `run_turn_for` to ensure each owner gets their own conversation thread
+    /// and never sees another owner's history (CR-04).
+    pub async fn load_most_recent_id_for(&self, owner_id: &str) -> anyhow::Result<Option<String>> {
+        let path = self.db_path.clone();
+        let owner = owner_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM sessions WHERE owner_id = ?1 ORDER BY updated_at DESC LIMIT 1"
+            )?;
+            let mut rows = stmt.query(rusqlite::params![owner])?;
+            if let Some(row) = rows.next()? {
+                Ok::<_, anyhow::Error>(Some(row.get::<_, String>(0)?))
+            } else {
+                Ok(None)
+            }
+        }).await?
+    }
+
     pub async fn load_recent(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
         let path = self.db_path.clone();
         let sid = session_id.to_owned();

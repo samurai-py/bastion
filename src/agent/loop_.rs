@@ -85,15 +85,22 @@ impl AgentLoop {
         // HOOK-02: input guardrail before routing (screens empty/oversized/spam input)
         self.input_guard.screen(user_input)?;
 
+        // CR-04: resolve or create a session PER OWNER so two owners never share history.
+        // The stored self.session_id is the local CLI default (DEFAULT_OWNER path).
+        let session_id: String = match self.session.load_most_recent_id_for(owner).await? {
+            Some(id) => id,
+            None => self.session.create_session_for(owner).await?,
+        };
+
         // 1. Persist user message
         self.session.append(
-            &self.session_id,
+            &session_id,
             Message { role: Role::User, content: MessageContent::Text(user_input.to_owned()) },
             None,
         ).await?;
 
         // 2. Load history and build token estimate
-        let mut history = self.session.load_recent(&self.session_id).await?;
+        let mut history = self.session.load_recent(&session_id).await?;
 
         // 3. Token ratio check and compaction BEFORE LLM call (D-08, AI-SPEC §4b.4).
         //    MEM-09: memory_flush runs before compaction.
@@ -105,7 +112,7 @@ impl AgentLoop {
 
             let provider_ref = self.provider.read().await;
             history = self.compactor.compact(
-                &self.session_id,
+                &session_id,
                 &history,
                 &**provider_ref,
                 &self.session,
@@ -137,6 +144,10 @@ impl AgentLoop {
                     self.provider.clone(),
                     crate::cabinet::orchestrator::DEFAULT_ROUNDS,
                 ).await?;
+                // CR-02: fail-closed egress on synthesis — the transcript may contain LocalOnly
+                // content. Gate synthesis on the table tier before touching the cloud provider.
+                let synth_provider_name = self.provider.read().await.name().to_owned();
+                crate::hooks::egress::check_egress(Some(table.tier), &synth_provider_name)?;
                 let provider_ref = self.provider.read().await;
                 let verdict = crate::cabinet::synth::synthesize(&**provider_ref, &transcript).await?;
                 drop(provider_ref);
@@ -156,11 +167,11 @@ impl AgentLoop {
 
         // 6. Graceful degradation: if registry is empty, fall back to plain tool-loop provider.
         let final_text = if route_text.is_empty() {
-            self.run_provider_fallback(&mut history).await?
+            self.run_provider_fallback(&mut history, &session_id).await?
         } else {
             // Persist the assistant response
             self.session.append(
-                &self.session_id,
+                &session_id,
                 Message { role: Role::Assistant, content: MessageContent::Text(route_text.clone()) },
                 None,
             ).await?;
@@ -175,7 +186,7 @@ impl AgentLoop {
         tracing::info!(
             event = "turn_complete",
             latency_ms,
-            session_id = %self.session_id,
+            session_id = %session_id,
             owner,
         );
 
@@ -183,9 +194,11 @@ impl AgentLoop {
     }
 
     /// Classic tool-loop provider call — used as fallback when registry is empty.
+    /// `session_id` is the per-owner session resolved by the caller (run_turn_for).
     async fn run_provider_fallback(
         &mut self,
         history: &mut Vec<Message>,
+        session_id: &str,
     ) -> anyhow::Result<String> {
         // Build tool definitions from ToolRegistry.
         let tools: Vec<serde_json::Value> = self.mcp.registry().list_tool_names()
@@ -215,7 +228,7 @@ impl AgentLoop {
                 tracing::error!(
                     event = "tool_loop_cap",
                     rounds = rounds,
-                    session_id = %self.session_id
+                    session_id = %session_id
                 );
                 anyhow::bail!(BastionError::ToolLoopCap);
             }
@@ -260,7 +273,7 @@ impl AgentLoop {
                 MessageContent::Text(response.text.clone())
             };
             self.session.append(
-                &self.session_id,
+                session_id,
                 Message { role: Role::Assistant, content: assistant_content.clone() },
                 Some(response.usage.output_tokens),
             ).await?;
@@ -283,7 +296,7 @@ impl AgentLoop {
                                 content: result_str,
                             }]),
                         };
-                        self.session.append(&self.session_id, tool_msg.clone(), None).await?;
+                        self.session.append(session_id, tool_msg.clone(), None).await?;
                         history.push(tool_msg);
                     }
                     rounds += 1;
@@ -302,6 +315,36 @@ impl AgentLoop {
             &self.memory,
             &mut self.forced_persona,
         ).await
+    }
+
+    /// Drain an `AgentHandle` receiver, serializing channel messages through `run_turn_for`.
+    ///
+    /// This is the single consumer that connects every channel (webhook, Telegram) to the
+    /// AgentLoop. Call this from the daemon spawn task to wire channel turns with per-owner
+    /// sessions and egress checks (CR-03/CR-04).
+    ///
+    /// Each request carries a trusted `owner` resolved by the channel layer.
+    /// Replies are sent back through the oneshot in `AgentRequest`.
+    pub async fn drain_handle(&mut self, mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
+        while let Some(req) = rx.recv().await {
+            let reply_text = match self.run_turn_for(&req.text, &req.owner).await {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!(
+                        event = "handle_turn_error",
+                        owner = %req.owner,
+                        error = %e,
+                        "channel turn failed"
+                    );
+                    // Do not send internal error detail back to the channel — the channel
+                    // layer (webhook CR-05) maps errors to HTTP status; here we just close
+                    // the reply so the AgentHandle caller gets an Err("AgentLoop reply dropped").
+                    // drop req.reply here is intentional — caller sees Err.
+                    continue;
+                }
+            };
+            let _ = req.reply.send(reply_text);
+        }
     }
 }
 

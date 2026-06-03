@@ -6,6 +6,7 @@
 
 use tokio::task::JoinSet;
 
+use crate::hooks::egress::check_egress;
 use crate::persona::router::RouterDecision;
 use crate::persona::{Persona, PersonaRegistry};
 use crate::provider::SharedProvider;
@@ -66,6 +67,12 @@ async fn run_single(
         .next()
         .ok_or_else(|| anyhow::anyhow!("RouterDecision.personas is empty for Single mode"))?;
 
+    // Fail-closed egress gate (CF-1, PRIV-03): check before EVERY provider call.
+    // Resolve name first (no payload held across lock), then tier, then gate.
+    let provider_name = provider.read().await.name().to_owned();
+    let tier = registry.get(&persona_id).map(|p| p.tier);
+    check_egress(tier, &provider_name)?;
+
     let system_prompt = get_system_prompt(registry, &persona_id);
     let full_prompt = build_prompt(&system_prompt, msg);
 
@@ -93,8 +100,17 @@ async fn run_parallel(
         let system_prompt = get_system_prompt(registry, &persona_id);
         let full_prompt = build_prompt(&system_prompt, msg);
         let provider_clone = provider.clone(); // clone Arc, not the inner value
+        // Capture tier before spawning — registry not Send so resolve here.
+        let tier = registry.get(&persona_id).map(|p| p.tier);
 
         set.spawn(async move {
+            // Fail-closed egress gate (CF-1, PRIV-03): resolve provider name INSIDE task,
+            // check before ANY provider call. Never bypass on block.
+            let provider_name = provider_clone.read().await.name().to_owned();
+            if let Err(e) = check_egress(tier, &provider_name) {
+                return (persona_id, Err(e));
+            }
+
             // Acquire read lock INSIDE the task — loop_.rs:118-125 pattern.
             let text = {
                 let guard = provider_clone.read().await;
