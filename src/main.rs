@@ -5,8 +5,12 @@ use tracing_subscriber::fmt;
 
 use bastion::agent::loop_::AgentLoop;
 use bastion::mcp::McpClient;
+use bastion::memory::sqlite::SqliteMemory;
 use bastion::provider::registry::resolve_provider;
 use bastion::session::SessionManager;
+use bastion::persona::PersonaRegistry;
+use bastion::goal::{GoalEngine, ScoringConfig};
+use bastion::proactive::CronService;
 
 #[derive(Parser)]
 #[command(name = "bastion", about = "Bastion AI agent runtime", version)]
@@ -79,7 +83,27 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(5.0);
 
-    let mut agent = AgentLoop::new(provider, session, mcp_client, session_id, daily_budget);
+    // Init persona registry (load from "./personas/" directory; empty if missing — PERS-07)
+    let registry = PersonaRegistry::load_dir(".").await?;
+
+    // Init shared memory
+    let memory: bastion::memory::SharedMemory = Arc::new(RwLock::new(
+        Box::new(SqliteMemory::new(&db_path)) as Box<dyn bastion::memory::Memory>
+    ));
+
+    // Init goal engine
+    let goals = GoalEngine::new(&db_path, ScoringConfig::default());
+
+    let mut agent = AgentLoop::new(
+        provider.clone(),
+        session,
+        mcp_client,
+        session_id,
+        daily_budget,
+        registry,
+        memory.clone(),
+        goals,
+    );
 
     match cli.command {
         Command::Agent { message } => {
@@ -95,10 +119,28 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// REPL daemon loop: stdin line by line, slash commands, graceful shutdown (D-01).
+/// Fourth select arm drains pending_rx — proactive messages delivered ONLY between turns (PROACT-05).
 async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::signal::unix::{signal, SignalKind};
     use bastion::agent::command::CommandResult;
+
+    // PROACT-05: take pending_rx out of the agent so we own it in the select! loop.
+    // Because select! processes ONE branch per iteration and run_turn fully awaits,
+    // a pending message is only picked up BETWEEN turns — this IS the structural guarantee.
+    let mut pending_rx = agent.pending_rx.take().expect("pending_rx must be available at daemon start");
+
+    // Spawn CronService heartbeat into the pending queue (PROACT-01 / PROACT-02).
+    // It feeds goal-drift nudges into pending_tx. On tick the daemon will pick them up
+    // between turns via the pending_rx arm.
+    {
+        let cron = CronService::new(agent.pending_tx.clone(), agent.goals.clone());
+        let owner = bastion::agent::loop_::DEFAULT_OWNER.to_string();
+        // Only spawn heartbeat if there are goals to nudge (fire-and-forget task)
+        tokio::spawn(async move {
+            cron.run_heartbeat(std::time::Duration::from_secs(86_400), &owner).await;
+        });
+    }
 
     let mut stdin   = BufReader::new(tokio::io::stdin()).lines();
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -134,6 +176,16 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
                             }
                         }
                     }
+                }
+            }
+            // PROACT-05: 4th select arm — proactive messages delivered ONLY between turns.
+            // select! processes ONE branch per iteration; run_turn is fully awaited in stdin arm,
+            // so a pending message is never picked up mid-turn. This is the structural guarantee.
+            Some(msg) = pending_rx.recv() => {
+                tracing::info!(event = "proactive_turn", msg_len = msg.len());
+                match agent.run_turn(&msg).await {
+                    Ok(r) => println!("{r}"),
+                    Err(e) => tracing::error!(event = "proactive_turn_error", error = %e),
                 }
             }
             _ = sigterm.recv() => {
