@@ -90,17 +90,19 @@ impl Provider for GeminiProvider {
         &self,
         system: &str,
         user: &str,
-        _response_schema: serde_json::Value,
+        response_schema: serde_json::Value,
         max_tokens: u32,
         temperature: f32,
     ) -> anyhow::Result<String> {
         use async_openai::types::chat::ResponseFormat;
 
-        // Gemini's OpenAI-compat endpoint honors response_format=json_object, which forces
-        // a clean JSON object (no prose, no ```fences```). The exact field set is described
-        // in the system prompt; json_object reliably stops the free-prose/truncation failures
-        // the default fallback produced. max_tokens + temperature are respected here, unlike
-        // the discard-everything default in the trait.
+        // Gemini's OpenAI-compat endpoint honors response_format=json_object (forces a clean JSON
+        // object, no prose/fences). We do NOT use json_schema here: schemars emits $ref/$defs for
+        // nested enums (RouterDecision modes, etc.) which Gemini's strict json_schema parser
+        // rejects, silently breaking the router. json_object + an explicit field list in the system
+        // prompt + the caller's parse-retry is the reliable combination. The schema is still used
+        // by the caller to describe the fields; it is not sent to Gemini.
+        let _ = &response_schema;
         let msgs = vec![Message {
             role: Role::User,
             content: MessageContent::Text(user.to_owned()),

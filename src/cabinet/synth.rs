@@ -58,7 +58,7 @@ pub async fn synthesize(
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
         let raw = provider
-            .complete_structured(&system, &user, response_schema.clone(), 1024, 0.3)
+            .complete_structured(&system, &user, response_schema.clone(), 4096, 0.3)
             .await
             .map_err(|e| {
                 anyhow::anyhow!("cabinet synthesis provider call failed (attempt {attempt}): {e}")
@@ -96,7 +96,10 @@ Rules:
 2. For ANY persona whose position materially diverged from the recommendation, you MUST include a Dissent entry with their name and their position. This field is REQUIRED — do not omit dissents even if consensus appears strong.
 3. If all personas were fully aligned, dissents may be empty — but only if there is ZERO divergence.
 4. NEVER fabricate agreement. If in doubt, record the dissent.
-5. Respond ONLY with valid JSON matching the CabinetVerdict schema. No prose, no markdown fences."#.to_string()
+
+Respond ONLY with a JSON object with exactly these fields:
+  {"recommendation": "<the unified recommendation text>", "dissents": [{"persona": "<name>", "position": "<their diverging position>"}]}
+"dissents" must be an array (empty [] only if there was zero divergence). No prose, no markdown fences."#.to_string()
 }
 
 fn build_transcript_text(transcript: &[Turn]) -> String {
