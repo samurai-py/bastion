@@ -35,17 +35,19 @@ impl InputGuardrail {
     }
 
     /// Screen `input` and return `Ok(())` if it passes all structural checks.
-    /// Returns `Err` with a descriptive message on rejection.
+    /// Returns `Err(BastionError::InputGuardrailRejected(...))` on rejection (WR-09).
+    /// The rejection detail is safe to log but MUST NOT be echoed to channel callers.
     pub fn screen(&self, input: &str) -> anyhow::Result<()> {
+        use crate::types::BastionError;
         if input.is_empty() {
-            anyhow::bail!("input guardrail: input is empty");
+            return Err(anyhow::anyhow!(BastionError::InputGuardrailRejected(
+                "input is empty".to_owned()
+            )));
         }
         if input.len() > self.max_len {
-            anyhow::bail!(
-                "input guardrail: input length {} exceeds maximum {} bytes",
-                input.len(),
-                self.max_len
-            );
+            return Err(anyhow::anyhow!(BastionError::InputGuardrailRejected(
+                format!("input length {} exceeds maximum {} bytes", input.len(), self.max_len)
+            )));
         }
         // Reject input where >50% of characters are ASCII control chars (excluding
         // common whitespace \t \n \r). This catches binary garbage or control-char spam.
@@ -54,11 +56,9 @@ impl InputGuardrail {
         }).count();
         let total_count = input.chars().count();
         if total_count > 0 && control_count * 2 > total_count {
-            anyhow::bail!(
-                "input guardrail: input contains too many control characters ({}/{})",
-                control_count,
-                total_count
-            );
+            return Err(anyhow::anyhow!(BastionError::InputGuardrailRejected(
+                format!("input contains too many control characters ({}/{})", control_count, total_count)
+            )));
         }
         Ok(())
     }
@@ -70,20 +70,27 @@ mod tests {
 
     #[test]
     fn rejects_empty_input() {
+        use crate::types::BastionError;
         let g = InputGuardrail::default();
         assert!(g.screen("").is_err());
-        let err = g.screen("").unwrap_err().to_string();
-        assert!(err.contains("empty"), "got: {err}");
+        let err = g.screen("").unwrap_err();
+        // Must be a typed InputGuardrailRejected, not a bare string (WR-09)
+        assert!(err.downcast_ref::<BastionError>().is_some(), "must be BastionError; got: {err}");
+        let err_str = err.to_string();
+        assert!(err_str.contains("empty"), "got: {err_str}");
     }
 
     #[test]
     fn rejects_oversized_input() {
+        use crate::types::BastionError;
         let g = InputGuardrail::new(10);
         let long_input = "a".repeat(11);
         let result = g.screen(&long_input);
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("exceeds maximum"), "got: {err}");
+        let err = result.unwrap_err();
+        assert!(err.downcast_ref::<BastionError>().is_some(), "must be BastionError; got: {err}");
+        let err_str = err.to_string();
+        assert!(err_str.contains("exceeds maximum"), "got: {err_str}");
     }
 
     #[test]

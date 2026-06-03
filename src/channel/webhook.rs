@@ -80,19 +80,17 @@ struct AppState {
 
 /// Categorize an anyhow error for safe HTTP status mapping.
 /// NEVER include the error message in the response body — only log it.
+///
+/// Matches typed BastionError variants — no string-prefix detection (WR-09).
 pub fn error_status(e: &anyhow::Error) -> StatusCode {
     // Walk the error chain looking for BastionError variants
     if let Some(be) = e.downcast_ref::<BastionError>() {
         return match be {
             BastionError::PrivacyEgressBlocked => StatusCode::FORBIDDEN,
             BastionError::BudgetExceeded => StatusCode::TOO_MANY_REQUESTS,
+            BastionError::InputGuardrailRejected(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-    }
-    // Guardrail errors arrive as plain anyhow strings — detect by message prefix.
-    let msg = e.to_string();
-    if msg.starts_with("input guardrail:") {
-        return StatusCode::BAD_REQUEST;
     }
     StatusCode::INTERNAL_SERVER_ERROR
 }
@@ -157,7 +155,7 @@ mod tests {
     fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
-                let _ = req.reply.send(format!("echo:{}", req.text));
+                let _ = req.reply.send(Ok(format!("echo:{}", req.text)));
             }
         });
     }
@@ -254,7 +252,7 @@ mod tests {
         assert!(!text.contains("panicked"), "panic in response: {text}");
     }
 
-    /// Verify error_status maps BastionError variants correctly.
+    /// Verify error_status maps BastionError variants correctly (WR-09: typed, no string prefix).
     #[test]
     fn error_status_maps_variants() {
         let egress_err = anyhow::anyhow!(BastionError::PrivacyEgressBlocked);
@@ -263,8 +261,8 @@ mod tests {
         let budget_err = anyhow::anyhow!(BastionError::BudgetExceeded);
         assert_eq!(error_status(&budget_err), StatusCode::TOO_MANY_REQUESTS);
 
-        // Guardrail errors arrive as plain anyhow strings
-        let guard_err = anyhow::anyhow!("input guardrail: input is empty");
+        // Guardrail errors are now typed BastionError::InputGuardrailRejected (WR-09)
+        let guard_err = anyhow::anyhow!(BastionError::InputGuardrailRejected("input is empty".to_owned()));
         assert_eq!(error_status(&guard_err), StatusCode::BAD_REQUEST);
 
         // Unknown errors → 500

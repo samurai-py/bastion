@@ -164,7 +164,7 @@ mod tests {
     fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
-                let _ = req.reply.send(format!("echo:{}", req.text));
+                let _ = req.reply.send(Ok(format!("echo:{}", req.text)));
             }
         });
     }
