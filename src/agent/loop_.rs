@@ -137,6 +137,10 @@ impl AgentLoop {
                     self.provider.clone(),
                     crate::cabinet::orchestrator::DEFAULT_ROUNDS,
                 ).await?;
+                // CR-02: fail-closed egress on synthesis — the transcript may contain LocalOnly
+                // content. Gate synthesis on the table tier before touching the cloud provider.
+                let synth_provider_name = self.provider.read().await.name().to_owned();
+                crate::hooks::egress::check_egress(Some(table.tier), &synth_provider_name)?;
                 let provider_ref = self.provider.read().await;
                 let verdict = crate::cabinet::synth::synthesize(&**provider_ref, &transcript).await?;
                 drop(provider_ref);
