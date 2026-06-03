@@ -1,10 +1,14 @@
 use tokio::sync::{mpsc, oneshot};
 
 /// A single request sent through the AgentHandle.
+///
+/// `reply` carries a typed `Result` so real errors propagate back to the caller (WR-10).
+/// The channel layer (e.g. `webhook::error_status`) can then classify the error correctly
+/// instead of receiving a generic "reply dropped" anyhow string.
 pub struct AgentRequest {
     pub text:  String,
     pub owner: String,
-    pub reply: oneshot::Sender<String>,
+    pub reply: oneshot::Sender<anyhow::Result<String>>,
 }
 
 /// A clonable handle that serializes all inbound messages into ONE AgentLoop task.
@@ -25,13 +29,18 @@ pub fn channel() -> (AgentHandle, mpsc::Receiver<AgentRequest>) {
 
 impl AgentHandle {
     /// Send `text` from `owner` to the serialized AgentLoop and await its reply.
+    ///
+    /// Returns the typed result from the AgentLoop — callers receive real `BastionError`
+    /// variants (e.g. PrivacyEgressBlocked, InputGuardrailRejected) so the channel layer
+    /// can map them to correct HTTP/transport status codes (WR-10).
     pub async fn ask(&self, text: String, owner: String) -> anyhow::Result<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(AgentRequest { text, owner, reply: reply_tx })
             .await
             .map_err(|_| anyhow::anyhow!("AgentLoop receiver dropped"))?;
-        Ok(reply_rx.await.map_err(|_| anyhow::anyhow!("AgentLoop reply dropped"))?)
+        // Unwrap the outer oneshot (channel dropped = agent crashed) then the inner Result.
+        reply_rx.await.map_err(|_| anyhow::anyhow!("AgentLoop reply dropped"))?
     }
 }
 
@@ -56,7 +65,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((req.text.clone(), req.owner.clone()));
-                let _ = req.reply.send(format!("echo:{}", req.text));
+                let _ = req.reply.send(Ok(format!("echo:{}", req.text)));
             }
         });
         log

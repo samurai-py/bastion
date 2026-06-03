@@ -86,10 +86,15 @@ impl AgentLoop {
         self.input_guard.screen(user_input)?;
 
         // CR-04: resolve or create a session PER OWNER so two owners never share history.
-        // The stored self.session_id is the local CLI default (DEFAULT_OWNER path).
-        let session_id: String = match self.session.load_most_recent_id_for(owner).await? {
-            Some(id) => id,
-            None => self.session.create_session_for(owner).await?,
+        // WR-08: for DEFAULT_OWNER (CLI path) reuse self.session_id chosen at startup to
+        // avoid load_most_recent_id_for resurrecting an older _local session.
+        let session_id: String = if owner == DEFAULT_OWNER {
+            self.session_id.clone()
+        } else {
+            match self.session.load_most_recent_id_for(owner).await? {
+                Some(id) => id,
+                None => self.session.create_session_for(owner).await?,
+            }
         };
 
         // 1. Persist user message
@@ -325,25 +330,25 @@ impl AgentLoop {
     ///
     /// Each request carries a trusted `owner` resolved by the channel layer.
     /// Replies are sent back through the oneshot in `AgentRequest`.
+    /// Drain an `AgentHandle` receiver, serializing channel messages through `run_turn_for`.
+    ///
+    /// Errors are propagated as typed `Err` through the reply oneshot so the channel layer
+    /// (e.g. `webhook::error_status`) can map them to the correct HTTP status (WR-10).
+    /// Internal error detail is never echoed to the channel caller — only logged here.
+    #[cfg(test)]
     pub async fn drain_handle(&mut self, mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
         while let Some(req) = rx.recv().await {
-            let reply_text = match self.run_turn_for(&req.text, &req.owner).await {
-                Ok(text) => text,
-                Err(e) => {
-                    tracing::warn!(
-                        event = "handle_turn_error",
-                        owner = %req.owner,
-                        error = %e,
-                        "channel turn failed"
-                    );
-                    // Do not send internal error detail back to the channel — the channel
-                    // layer (webhook CR-05) maps errors to HTTP status; here we just close
-                    // the reply so the AgentHandle caller gets an Err("AgentLoop reply dropped").
-                    // drop req.reply here is intentional — caller sees Err.
-                    continue;
-                }
-            };
-            let _ = req.reply.send(reply_text);
+            let result = self.run_turn_for(&req.text, &req.owner).await;
+            if let Err(ref e) = result {
+                tracing::warn!(
+                    event = "handle_turn_error",
+                    owner = %req.owner,
+                    error = %e,
+                    "channel turn failed"
+                );
+            }
+            // Send Ok(text) or Err(e) — caller receives the typed error (WR-10).
+            let _ = req.reply.send(result);
         }
     }
 }

@@ -112,6 +112,10 @@ pub enum BastionError {
     OrphanedToolResult,
     #[error("Privacy egress blocked: local-only context bound for non-Ollama provider")]
     PrivacyEgressBlocked,
+    /// Input guardrail rejection — structural input check failed (HOOK-02).
+    /// Carries a detail string for logging; MUST NOT be echoed to the client.
+    #[error("Input guardrail rejected: {0}")]
+    InputGuardrailRejected(String),
 }
 
 /// Strip `<think>...</think>` blocks from LLM output (CORE-09).
