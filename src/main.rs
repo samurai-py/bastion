@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::fmt;
 
 use bastion::agent::loop_::AgentLoop;
+use bastion::agent::handle;
+use bastion::channel::OwnerMap;
 use bastion::mcp::McpClient;
 use bastion::memory::sqlite::SqliteMemory;
 use bastion::provider::registry::resolve_provider;
@@ -119,7 +121,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// REPL daemon loop: stdin line by line, slash commands, graceful shutdown (D-01).
-/// Fourth select arm drains pending_rx — proactive messages delivered ONLY between turns (PROACT-05).
+/// Five select arms: stdin, pending_rx (proactive), inbound_rx (channel), SIGTERM, Ctrl-C.
+/// All arms serialize through ONE `&mut agent` — single-turn invariant holds (CR-07).
 async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::signal::unix::{signal, SignalKind};
@@ -129,6 +132,49 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
     // Because select! processes ONE branch per iteration and run_turn fully awaits,
     // a pending message is only picked up BETWEEN turns — this IS the structural guarantee.
     let mut pending_rx = agent.pending_rx.take().expect("pending_rx must be available at daemon start");
+
+    // CR-07: create AgentHandle + inbound receiver BEFORE the select! loop.
+    // Channels (Telegram, webhook) hold clones of `handle` and send messages into `inbound_rx`.
+    // The select! arm below serializes all channel turns through the SAME agent as stdin/proactive.
+    let (agent_handle, mut inbound_rx) = handle::channel();
+
+    // Build OwnerMap from environment (mirrors how the provider is built above).
+    // Format: BASTION_WEBHOOK_OWNERS=token1:owner1,token2:owner2
+    //         BASTION_TELEGRAM_OWNERS=chat_id1:owner1,chat_id2:owner2
+    let webhook_owner_map = parse_owner_map_env("BASTION_WEBHOOK_OWNERS");
+    let telegram_owner_map = parse_owner_map_env("BASTION_TELEGRAM_OWNERS");
+
+    // Spawn webhook channel if BASTION_WEBHOOK_ADDR is set.
+    if let Ok(addr) = std::env::var("BASTION_WEBHOOK_ADDR") {
+        let h = agent_handle.clone();
+        let owner_map = webhook_owner_map;
+        tokio::spawn(async move {
+            if let Err(e) = bastion::channel::webhook::serve(h, &addr, owner_map).await {
+                tracing::error!(event = "webhook_error", error = %e, "webhook channel terminated");
+            }
+        });
+        tracing::info!(event = "webhook_started", addr = %std::env::var("BASTION_WEBHOOK_ADDR").unwrap_or_default());
+    }
+
+    // Spawn Telegram channel if TELEGRAM_BOT_TOKEN is set.
+    if std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
+        match bastion::channel::telegram::TelegramChannel::from_env() {
+            Ok(tg) => {
+                let tg = tg.with_owner_map(telegram_owner_map);
+                let h = agent_handle.clone();
+                tokio::spawn(async move {
+                    use bastion::channel::Channel;
+                    if let Err(e) = Box::new(tg).run(h).await {
+                        tracing::error!(event = "telegram_error", error = %e, "telegram channel terminated");
+                    }
+                });
+                tracing::info!(event = "telegram_started");
+            }
+            Err(e) => {
+                tracing::warn!(event = "telegram_start_failed", error = %e);
+            }
+        }
+    }
 
     // Spawn CronService heartbeat into the pending queue (PROACT-01 / PROACT-02).
     // It feeds goal-drift nudges into pending_tx. On tick the daemon will pick them up
@@ -178,15 +224,28 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
                     }
                 }
             }
-            // PROACT-05: 4th select arm — proactive messages delivered ONLY between turns.
-            // select! processes ONE branch per iteration; run_turn is fully awaited in stdin arm,
-            // so a pending message is never picked up mid-turn. This is the structural guarantee.
+            // PROACT-05: proactive messages delivered ONLY between turns.
             Some(msg) = pending_rx.recv() => {
                 tracing::info!(event = "proactive_turn", msg_len = msg.len());
                 match agent.run_turn(&msg).await {
                     Ok(r) => println!("{r}"),
                     Err(e) => tracing::error!(event = "proactive_turn_error", error = %e),
                 }
+            }
+            // CR-07: channel inbound arm — serializes Telegram/webhook turns through the SAME
+            // agent as stdin/proactive. The trusted owner was resolved by the channel layer.
+            // Typed Result propagated back through the oneshot (WR-10).
+            Some(req) = inbound_rx.recv() => {
+                let res = agent.run_turn_for(&req.text, &req.owner).await;
+                if let Err(ref e) = res {
+                    tracing::warn!(
+                        event = "channel_turn_error",
+                        owner = %req.owner,
+                        error = %e,
+                        "channel turn failed"
+                    );
+                }
+                let _ = req.reply.send(res);
             }
             _ = sigterm.recv() => {
                 tracing::info!(event = "sigterm_received");
@@ -201,4 +260,24 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Parse a `KEY=val1:owner1,val2:owner2` env var into an [`OwnerMap`].
+/// Returns an empty map if the variable is absent or empty.
+/// Mirrors the CSV-pair format used by other Bastion env config (e.g. MCP servers).
+fn parse_owner_map_env(var: &str) -> OwnerMap {
+    let raw = match std::env::var(var) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return OwnerMap::default(),
+    };
+    let pairs: Vec<(&str, &str)> = raw
+        .split(',')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, ':');
+            let key = parts.next()?.trim();
+            let val = parts.next()?.trim();
+            if key.is_empty() || val.is_empty() { None } else { Some((key, val)) }
+        })
+        .collect();
+    OwnerMap::from_pairs(&pairs)
 }
