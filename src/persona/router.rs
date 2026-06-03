@@ -41,6 +41,18 @@ pub struct RouterDecision {
     pub convene_reason: Option<ConveneReason>,
 }
 
+/// What the LLM actually decides. `owner` is NOT here — it is contextual and is
+/// injected by `route()` from its caller, never produced by the model. Using this
+/// as the structured-output schema/parse target stops the router from failing with
+/// "missing field `owner`" when the model (correctly) omits it.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct RouterDecisionLlm {
+    personas: Vec<String>,
+    mode: ResponseMode,
+    #[serde(default)]
+    convene_reason: Option<ConveneReason>,
+}
+
 // ---------------------------------------------------------------------------
 // route() — the main entry point
 // ---------------------------------------------------------------------------
@@ -54,21 +66,32 @@ pub async fn route(
     msg: &str,
     owner: &str,
 ) -> anyhow::Result<RouterDecision> {
-    let schema = schemars::schema_for!(RouterDecision);
+    // Schema/parse target is the owner-less DTO — owner is injected below, not by the model.
+    let schema = schemars::schema_for!(RouterDecisionLlm);
     let response_schema = serde_json::to_value(&schema)
-        .map_err(|e| anyhow::anyhow!("failed to serialize RouterDecision schema: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to serialize router schema: {e}"))?;
 
     let system_prompt = build_router_system_prompt(registry);
 
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
         let raw = provider
-            .complete_structured(&system_prompt, msg, response_schema.clone(), 256, 0.0)
+            .complete_structured(&system_prompt, msg, response_schema.clone(), 512, 0.0)
             .await
             .map_err(|e| anyhow::anyhow!("router provider call failed (attempt {attempt}): {e}"))?;
 
-        match serde_json::from_str::<RouterDecision>(&raw) {
-            Ok(decision) => return Ok(decision),
+        // Defensive: some providers (e.g. Gemini) wrap JSON in ```fences``` or leading prose
+        // despite the instruction. Extract the outermost {...} before parsing.
+        let json = extract_json(&raw);
+        match serde_json::from_str::<RouterDecisionLlm>(json) {
+            Ok(d) => {
+                return Ok(RouterDecision {
+                    personas: d.personas,
+                    owner: owner.to_string(),
+                    mode: d.mode,
+                    convene_reason: d.convene_reason,
+                })
+            }
             Err(parse_err) => {
                 // Pitfall 7: do NOT log raw for local-only context.
                 // Log metadata only (attempt count + error shape), never raw content.
@@ -103,6 +126,15 @@ pub async fn route(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Extract the outermost JSON object from a model response that may be wrapped in
+/// markdown fences or surrounded by prose. Falls back to the trimmed input.
+fn extract_json(s: &str) -> &str {
+    match (s.find('{'), s.rfind('}')) {
+        (Some(a), Some(b)) if b > a => &s[a..=b],
+        _ => s.trim(),
+    }
+}
 
 fn build_router_system_prompt(registry: &PersonaRegistry) -> String {
     let persona_list = registry
@@ -139,9 +171,11 @@ Rules:
 1. high-stakes messages MUST set mode=cabinet and convene_reason=high_weight (D-04/D-05).
 2. convene_reason is ONLY set when mode=cabinet; otherwise it must be null/absent.
 3. personas must contain at least one valid persona name from the list above.
-4. owner is passed through from the caller.
 
-Respond ONLY with valid JSON matching the RouterDecision schema. No prose, no markdown fences."#
+Respond ONLY with a JSON object with exactly these fields:
+  {{"personas": ["<name>", ...], "mode": "single|parallel|cabinet", "convene_reason": null}}
+Set convene_reason to one of the reasons above ONLY when mode is "cabinet", otherwise null.
+Do NOT include an "owner" field. No prose, no markdown fences."#
     )
 }
 
