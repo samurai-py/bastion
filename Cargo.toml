@@ -38,3 +38,9 @@ tracing-test = "0.2"
 tempfile     = "3"
 tower = { version = "0.5.3", features = ["util"] }
 http = "1.4.1"
+insta        = { version = "1", features = ["json"] }
+rstest       = "0.25"
+
+[[test]]
+name = "evals"
+path = "tests/evals/mod.rs"
