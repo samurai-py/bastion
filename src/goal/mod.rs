@@ -417,13 +417,17 @@ mod tests {
     use crate::session::SessionManager;
 
     fn temp_db() -> String {
-        let tmp = std::env::temp_dir().join(format!(
-            "goal_test_{}.db",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
+        // Unique per call: a process-wide atomic counter guarantees no path
+        // collision between parallel tests (subsec_nanos alone can collide and
+        // make two tests share a DB — flaky cross-contamination of `user1` rows).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp = std::env::temp_dir().join(format!("goal_test_{nanos}_{n}.db"));
         tmp.to_string_lossy().into_owned()
     }
 
