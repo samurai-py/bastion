@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Heuristic scoring config (D-09 area — Claude's discretion).
 /// Mirrors compactor.rs AutoCompact shape.
+#[derive(Clone)]
 pub struct ScoringConfig {
     /// Look-back window for interaction counting (days).
     pub window_days: i64,
@@ -63,6 +64,7 @@ pub struct ReplanResult {
 // Engine
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct GoalEngine {
     db_path: String,
     cfg: ScoringConfig,
