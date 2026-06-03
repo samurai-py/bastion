@@ -7,6 +7,7 @@
 use tokio::task::JoinSet;
 
 use crate::hooks::egress::check_egress;
+use crate::types::BastionError;
 use crate::persona::router::RouterDecision;
 use crate::persona::{Persona, PersonaRegistry};
 use crate::provider::SharedProvider;
@@ -124,13 +125,25 @@ async fn run_parallel(
 
     let mut results: Vec<(PersonaId, String)> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    // WR-12: preserve the FIRST typed egress denial so the channel boundary maps an
+    // all-blocked parallel turn to 403 (not a flattened anyhow string → 500).
+    let mut egress_denial: Option<anyhow::Error> = None;
 
     while let Some(join_result) = set.join_next().await {
         match join_result {
             Ok((pid, Ok(text))) => results.push((pid, text)),
             Ok((pid, Err(e))) => {
                 tracing::warn!(persona_id = %pid, error = %e, "parallel persona call failed");
-                errors.push(format!("{pid}: {e}"));
+                if egress_denial.is_none()
+                    && matches!(
+                        e.downcast_ref::<BastionError>(),
+                        Some(BastionError::PrivacyEgressBlocked)
+                    )
+                {
+                    egress_denial = Some(e);
+                } else {
+                    errors.push(format!("{pid}: {e}"));
+                }
             }
             Err(join_err) => {
                 tracing::warn!(error = %join_err, "JoinSet task panicked");
@@ -139,6 +152,10 @@ async fn run_parallel(
     }
 
     if results.is_empty() {
+        // Fail-closed: a typed egress denial takes precedence so it maps to 403 (WR-12).
+        if let Some(e) = egress_denial {
+            return Err(e);
+        }
         anyhow::bail!("all parallel persona calls failed: {}", errors.join("; "));
     }
 
@@ -320,5 +337,60 @@ mod tests {
             }
             other => panic!("expected ConveneCabinet, got {other:?}"),
         }
+    }
+
+    // --- WR-12: parallel egress denial must surface as a TYPED error ---
+
+    struct CloudProvider;
+
+    #[async_trait]
+    impl Provider for CloudProvider {
+        async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
+            unimplemented!()
+        }
+        async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
+            panic!("provider must NOT be called when egress is blocked");
+        }
+        fn context_limit(&self) -> usize { 8192 }
+        fn model_name(&self) -> &str { "gpt-4o" }
+        fn name(&self) -> &'static str { "openai" }
+    }
+
+    fn make_local_registry(names: &[&str]) -> PersonaRegistry {
+        let mut personas = HashMap::new();
+        for name in names {
+            personas.insert(
+                name.to_string(),
+                Persona {
+                    name: name.to_string(),
+                    description: None,
+                    system_prompt: format!("You are {name}."),
+                    tier: PrivacyTier::LocalOnly,
+                    weight: 0.5,
+                    skills: vec![],
+                },
+            );
+        }
+        PersonaRegistry::new_from_map(personas)
+    }
+
+    #[tokio::test]
+    async fn parallel_egress_block_surfaces_typed_error() {
+        // All-LocalOnly personas on a cloud provider: every parallel task is egress-blocked,
+        // and the runner must return a TYPED PrivacyEgressBlocked (not a flattened string) so
+        // the channel boundary maps it to 403, not 500 (WR-12). Provider is never called.
+        let registry = make_local_registry(&["Saúde", "Aria"]);
+        let provider: SharedProvider =
+            Arc::new(RwLock::new(Box::new(CloudProvider) as Box<dyn Provider>));
+        let err = run(parallel_decision(&["Saúde", "Aria"]), &registry, provider, "query")
+            .await
+            .expect_err("all-blocked parallel turn must error");
+        assert!(
+            matches!(
+                err.downcast_ref::<BastionError>(),
+                Some(BastionError::PrivacyEgressBlocked)
+            ),
+            "expected typed PrivacyEgressBlocked, got: {err:?}"
+        );
     }
 }
