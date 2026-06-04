@@ -41,16 +41,20 @@ class TestSnapshot:
         time.sleep(0.05)
         assert list_snapshots(ghost) == []
 
-    def test_multiple_snapshots_are_sorted(self, tmp_skill):
-        from versioning import list_snapshots, snapshot
+    def test_multiple_snapshots_are_sorted(self, tmp_path):
+        from versioning import VERSIONS_DIR, SNAPSHOT_PREFIX, list_snapshots
 
-        snapshot(tmp_skill)
-        time.sleep(0.05)
-        tmp_skill.write_text("v2", encoding="utf-8")
-        time.sleep(0.01)
-        snapshot(tmp_skill)
-        time.sleep(0.05)
-        snaps = list_snapshots(tmp_skill)
+        # Create two snapshots manually with distinct timestamps (avoids 1-second resolution gap)
+        skill_path = tmp_path / "SKILL.md"
+        skill_path.write_text("v1", encoding="utf-8")
+        versions_dir = tmp_path / VERSIONS_DIR
+        versions_dir.mkdir()
+        snap1 = versions_dir / f"{SNAPSHOT_PREFIX}20260601T100000Z"
+        snap2 = versions_dir / f"{SNAPSHOT_PREFIX}20260601T110000Z"
+        snap1.write_text("v1", encoding="utf-8")
+        snap2.write_text("v2", encoding="utf-8")
+
+        snaps = list_snapshots(skill_path)
         assert len(snaps) == 2
         # Sorted oldest first
         assert snaps[0].name < snaps[1].name
