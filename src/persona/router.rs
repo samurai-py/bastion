@@ -181,6 +181,17 @@ Rules:
 1. high-stakes messages MUST set mode=cabinet and convene_reason=high_weight (D-04/D-05).
 2. convene_reason is ONLY set when mode=cabinet; otherwise it must be null/absent.
 3. personas must contain at least one valid persona name from the list above.
+4. Match domain keywords carefully — work/job topics go to the career/work persona, not personal projects.
+
+Few-shot examples (use as reference for ambiguous inputs):
+  - "reuniões de trabalho" → career/work persona (NOT personal projects)
+  - "quero pedir aumento de salário" → career/work persona
+  - "receita de bolo" → personal-life/lifestyle persona
+  - "plano de fitness" → health/wellness persona
+  - "aniversário da esposa" → family/relationships persona
+  - "minha meta de 2026" → goals/objectives persona (or parallel if multiple domains)
+  - "devo investir em ações?" → finance persona, mode=cabinet if high-stakes amount mentioned
+  - "dor no peito" → health persona, mode=cabinet with convene_reason=high_weight
 
 Respond ONLY with a JSON object with exactly these fields:
   {{"personas": ["<name>", ...], "mode": "single|parallel|cabinet", "convene_reason": null}}
@@ -361,5 +372,84 @@ mod tests {
             .expect("route failed");
 
         assert_eq!(decision.mode, ResponseMode::Parallel);
+    }
+
+    // --- Few-shot routing coverage (misroute prevention) ---
+
+    #[tokio::test]
+    async fn routes_work_meeting_to_career_not_projects() {
+        // "reuniões de trabalho" must route to a work/career persona, not personal projects.
+        // MockProvider simulates LLM correctly following few-shot guidance.
+        let json = serde_json::json!({
+            "personas": ["Aria"],
+            "mode": "single",
+            "convene_reason": null
+        })
+        .to_string();
+
+        let provider = MockProvider::always(&json);
+        let registry = make_registry();
+        let decision = route(&provider, &registry, "reuniões de trabalho", "user1")
+            .await
+            .expect("route failed");
+
+        assert_eq!(decision.mode, ResponseMode::Single);
+        assert!(!decision.personas.is_empty(), "must have at least one persona");
+    }
+
+    #[tokio::test]
+    async fn routes_fitness_to_health_persona() {
+        // "plano de fitness" → health persona
+        let json = serde_json::json!({
+            "personas": ["Saúde"],
+            "mode": "single",
+            "convene_reason": null
+        })
+        .to_string();
+
+        let provider = MockProvider::always(&json);
+        let registry = make_registry();
+        let decision = route(&provider, &registry, "plano de fitness para perder peso", "user1")
+            .await
+            .expect("route failed");
+
+        assert_eq!(decision.personas, vec!["Saúde"]);
+        assert_eq!(decision.mode, ResponseMode::Single);
+    }
+
+    #[tokio::test]
+    async fn routes_recipe_to_single_persona() {
+        // "receita de bolo" → personal-life/lifestyle persona (single mode)
+        let json = serde_json::json!({
+            "personas": ["Aria"],
+            "mode": "single",
+            "convene_reason": null
+        })
+        .to_string();
+
+        let provider = MockProvider::always(&json);
+        let registry = make_registry();
+        let decision = route(&provider, &registry, "receita de bolo de chocolate", "user1")
+            .await
+            .expect("route failed");
+
+        assert_eq!(decision.mode, ResponseMode::Single);
+        assert!(!decision.personas.is_empty(), "must have at least one persona");
+    }
+
+    #[test]
+    fn system_prompt_contains_few_shot_examples() {
+        // Structural check: the router system prompt must include few-shot examples
+        // to reduce persona misroute (WR / live-UAT finding 2026-06-03).
+        let registry = make_registry();
+        let prompt = build_router_system_prompt(&registry);
+        assert!(
+            prompt.contains("Few-shot examples") || prompt.contains("few-shot") || prompt.contains("few_shot"),
+            "Router system prompt must contain few-shot examples section"
+        );
+        assert!(
+            prompt.contains("reuniões de trabalho") || prompt.contains("fitness") || prompt.contains("Examples"),
+            "Router system prompt must contain at least one routing example"
+        );
     }
 }
