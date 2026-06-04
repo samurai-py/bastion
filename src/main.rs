@@ -13,6 +13,7 @@ use bastion::session::SessionManager;
 use bastion::persona::PersonaRegistry;
 use bastion::goal::{GoalEngine, ScoringConfig};
 use bastion::proactive::CronService;
+use axum;
 
 #[derive(Parser)]
 #[command(name = "bastion", about = "Bastion AI agent runtime", version)]
@@ -176,6 +177,28 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
         }
     }
 
+    // Spawn /api/infer gateway for Python MCP containers (D-08 / D-09).
+    // Port: BASTION_INFER_ADDR env var, default "0.0.0.0:3000".
+    // Python containers call this endpoint; they never hold raw API keys.
+    {
+        let infer_addr = std::env::var("BASTION_INFER_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:3000".to_owned());
+        let infer_router = bastion::api::infer::router(agent.provider.clone());
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(&infer_addr).await {
+                Ok(listener) => {
+                    tracing::info!(event = "infer_gateway_started", addr = %infer_addr);
+                    if let Err(e) = axum::serve(listener, infer_router).await {
+                        tracing::error!(event = "infer_gateway_error", error = %e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(event = "infer_gateway_bind_failed", addr = %infer_addr, error = %e);
+                }
+            }
+        });
+    }
+
     // Spawn CronService heartbeat into the pending queue (PROACT-01 / PROACT-02).
     // It feeds goal-drift nudges into pending_tx. On tick the daemon will pick them up
     // between turns via the pending_rx arm.
@@ -276,7 +299,12 @@ fn parse_owner_map_env(var: &str) -> OwnerMap {
             let mut parts = pair.splitn(2, ':');
             let key = parts.next()?.trim();
             let val = parts.next()?.trim();
-            if key.is_empty() || val.is_empty() { None } else { Some((key, val)) }
+            if key.is_empty() || val.is_empty() {
+                // IN-08: log malformed pairs instead of silently dropping them.
+                tracing::warn!(event = "owner_map_malformed_pair", pair = pair.trim());
+                return None;
+            }
+            Some((key, val))
         })
         .collect();
     OwnerMap::from_pairs(&pairs)

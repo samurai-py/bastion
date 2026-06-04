@@ -97,7 +97,13 @@ impl AgentLoop {
             }
         };
 
-        // 1. Persist user message
+        // 1. Persist user message.
+        // WR-13: user message is appended here, before the egress gate in step 5.
+        // Risk: if egress blocks later, the user message is already stored in session history.
+        // Acceptable for this phase: the user's own input is not the sensitive data — the egress
+        // gate protects outbound LLM calls (sending local-only context to cloud providers), not
+        // inbound user messages. A full transactional rollback requires a session.remove_last()
+        // API that does not exist yet; deferred to Phase 4 (plan 08 session hardening).
         self.session.append(
             &session_id,
             Message { role: Role::User, content: MessageContent::Text(user_input.to_owned()) },
@@ -292,6 +298,27 @@ impl AgentLoop {
                         tracing::debug!(event = "tool_dispatch", tool = %tc.name);
                         let result = self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
                             .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+
+                        // D-06: handle skill_reloaded signal from skill-writer container.
+                        // When the skill-writer writes a new SKILL.md and emits this signal,
+                        // AgentLoop hot-loads the metadata so future turns see updated skill info.
+                        if result.get("skill_reloaded").and_then(|v| v.as_bool()) == Some(true) {
+                            if let Some(path) = result.get("skill_path").and_then(|v| v.as_str()) {
+                                tracing::info!(event = "skill_reload_signal", path = %path);
+                                match crate::agent::skills::SkillsLoader::rescan(path) {
+                                    Ok(meta) => tracing::info!(
+                                        event = "skill_loaded",
+                                        name = %meta.name,
+                                        path = %path
+                                    ),
+                                    Err(e) => tracing::warn!(
+                                        event = "skill_reload_failed",
+                                        path = %path,
+                                        err = %e
+                                    ),
+                                }
+                            }
+                        }
 
                         let result_str = result.to_string();
                         let tool_msg = Message {

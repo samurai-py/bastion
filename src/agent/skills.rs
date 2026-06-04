@@ -16,7 +16,36 @@ impl SkillsLoader {
         Ok(vec![])
     }
 
-    // RED: rescan not implemented yet — tests will fail to compile
+    /// Parse a single SKILL.md at `skill_path` and return its metadata.
+    ///
+    /// Called by AgentLoop after a `skill_reloaded` signal from skill-writer (D-06).
+    /// Extracts `<name>` and `<description>` XML-like tags. If `<name>` is absent,
+    /// falls back to the parent directory name (the skill directory name convention).
+    pub fn rescan(skill_path: &str) -> anyhow::Result<SkillMetadata> {
+        let content = std::fs::read_to_string(std::path::Path::new(skill_path))
+            .map_err(|e| anyhow::anyhow!("skills rescan: cannot read {}: {}", skill_path, e))?;
+
+        let name = Self::extract_tag(&content, "name")
+            .unwrap_or_else(|| {
+                std::path::Path::new(skill_path)
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+
+        let description = Self::extract_tag(&content, "description").unwrap_or_default();
+
+        Ok(SkillMetadata { name, description })
+    }
+
+    fn extract_tag(content: &str, tag: &str) -> Option<String> {
+        let open = format!("<{}>", tag);
+        let close = format!("</{}>", tag);
+        let start = content.find(&open)? + open.len();
+        let end = content[start..].find(&close)?;
+        Some(content[start..start + end].trim().to_owned())
+    }
 }
 
 #[cfg(test)]
