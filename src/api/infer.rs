@@ -4,7 +4,83 @@
 //! and routes through the existing Provider trait + egress check.
 //! Python containers hold ZERO raw API keys.
 
-// RED phase: tests only — implementation pending
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+use serde::{Deserialize, Serialize};
+
+use crate::hooks::egress::check_egress;
+use crate::memory::PrivacyTier;
+use crate::provider::SharedProvider;
+use crate::types::BastionError;
+
+#[derive(Deserialize)]
+struct InferRequest {
+    prompt: String,
+    privacy_tier: String, // "cloud_ok" | "local_only"
+}
+
+#[derive(Serialize)]
+struct InferResponse {
+    text: String,
+}
+
+#[derive(Clone)]
+pub struct InferState {
+    pub provider: SharedProvider,
+}
+
+fn parse_tier(s: &str) -> Option<PrivacyTier> {
+    match s {
+        "cloud_ok" => Some(PrivacyTier::CloudOk),
+        "local_only" => Some(PrivacyTier::LocalOnly),
+        _ => None,
+    }
+}
+
+async fn handle_infer(
+    State(state): State<InferState>,
+    Json(body): Json<InferRequest>,
+) -> impl IntoResponse {
+    let tier = match parse_tier(&body.privacy_tier) {
+        Some(t) => t,
+        None => {
+            tracing::warn!(event = "infer_bad_tier", tier = %body.privacy_tier);
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({}))).into_response();
+        }
+    };
+
+    let prov = state.provider.read().await;
+
+    if let Err(e) = check_egress(Some(tier), prov.name()) {
+        let status = if e
+            .downcast_ref::<BastionError>()
+            .map(|b| matches!(b, BastionError::PrivacyEgressBlocked))
+            .unwrap_or(false)
+        {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        tracing::warn!(event = "infer_egress_blocked", provider = %prov.name());
+        return (status, Json(serde_json::json!({}))).into_response();
+    }
+
+    match prov.complete_simple(&body.prompt).await {
+        Ok(text) => Json(InferResponse { text }).into_response(),
+        Err(e) => {
+            tracing::error!(event = "infer_provider_error", err = %e);
+            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({}))).into_response()
+        }
+    }
+}
+
+/// Build the axum Router for the /api/infer endpoint.
+/// Mount this router in main.rs to expose the inference gateway.
+pub fn router(provider: SharedProvider) -> Router {
+    let state = InferState { provider };
+    Router::new()
+        .route("/api/infer", post(handle_infer))
+        .with_state(state)
+}
 
 #[cfg(test)]
 mod tests {
@@ -12,12 +88,9 @@ mod tests {
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    /// Build a stub router for test use — calls `super::router`.
-    /// This will fail to compile until `router` is implemented.
     fn build_router() -> axum::Router {
         use std::sync::Arc;
         use tokio::sync::RwLock;
-        // Stub provider that always returns "ok"
         let provider: crate::provider::SharedProvider =
             Arc::new(RwLock::new(Box::new(StubProvider { name: "anthropic", fail: false })
                 as Box<dyn crate::provider::Provider>));
@@ -67,9 +140,15 @@ mod tests {
                 Ok("ok".into())
             }
         }
-        fn context_limit(&self) -> usize { 4096 }
-        fn model_name(&self) -> &str { self.name }
-        fn name(&self) -> &'static str { self.name }
+        fn context_limit(&self) -> usize {
+            4096
+        }
+        fn model_name(&self) -> &str {
+            self.name
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
     }
 
     #[tokio::test]
@@ -159,7 +238,10 @@ mod tests {
         assert_ne!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8_lossy(&bytes);
-        assert!(!text.contains("provider error"), "must not leak internal error: {text}");
+        assert!(
+            !text.contains("provider error"),
+            "must not leak internal error: {text}"
+        );
         assert!(!text.contains("panicked"), "must not leak panic: {text}");
     }
 }
