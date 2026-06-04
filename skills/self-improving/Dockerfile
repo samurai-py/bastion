@@ -20,7 +20,7 @@ RUN chown -R bastion:bastion /app
 VOLUME ["/skills", "/data"]
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8003/mcp')" || exit 1
+    CMD python -c "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('localhost',8003)))" || exit 1
 
 USER bastion
 

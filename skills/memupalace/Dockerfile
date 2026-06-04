@@ -13,21 +13,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Download multilingual ONNX model at build time (not runtime)
 # Ensures zero egress at runtime — model is baked into the image
-RUN python -c " \
-from huggingface_hub import snapshot_download; \
-snapshot_download( \
-    repo_id='Qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q', \
-    local_dir='/models', \
-    ignore_patterns=['*.msgpack','*.h5','*.bin'], \
-)"
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q', local_dir='/models', ignore_patterns=['*.msgpack','*.h5','*.bin'])"
 
-# Copy code
-COPY . .
+# Copy code under its package path so the absolute `skills.memupalace.*` imports
+# used throughout this module resolve in-container (skills/ is a PEP-420 namespace
+# package; memupalace/ carries its own __init__.py). Run via `python -m` below.
+COPY . ./skills/memupalace/
 RUN chown -R bastion:bastion /app
 
 # Healthcheck: ensure MCP endpoint responds
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/mcp')" || exit 1
+    CMD python -c "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('localhost',8001)))" || exit 1
 
 USER bastion
 
@@ -39,6 +35,7 @@ ENV MEMUPALACE_PORT=8001
 ENV MEMUPALACE_CHROMA_PATH=/db/memupalace/chroma
 ENV MEMUPALACE_ONNX_MODEL_PATH=/models/model_quantized.onnx
 ENV MEMUPALACE_TOKENIZER_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-ENV CORE_GATEWAY_URL=http://core:3000/api/infer
+ENV CORE_GATEWAY_URL=http://openclaw:3000/api/infer
+ENV PYTHONPATH=/app
 
-CMD ["python", "mcp_server.py"]
+CMD ["python", "-m", "skills.memupalace.mcp_server"]

@@ -17,7 +17,7 @@ RUN chown -R bastion:bastion /app
 VOLUME ["/skills", "/data"]
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/mcp')" || exit 1
+    CMD python -c "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('localhost',8002)))" || exit 1
 
 USER bastion
 EXPOSE 8002
@@ -25,7 +25,7 @@ EXPOSE 8002
 ENV SKILL_WRITER_PORT=8002
 ENV SKILLS_DIR=/skills
 ENV SKILL_WRITER_PENDING_FILE=/data/pending_distillations.jsonl
-ENV CORE_GATEWAY_URL=http://core:3000/api/infer
+ENV CORE_GATEWAY_URL=http://openclaw:3000/api/infer
 ENV MEMUPALACE_URL=http://memupalace:8001/mcp
 
 CMD ["python", "mcp_server.py"]
