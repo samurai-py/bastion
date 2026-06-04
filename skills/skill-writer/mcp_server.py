@@ -336,12 +336,8 @@ def skill_distill_candidate(
     for human approval (D-04/D-11 invariant). Returns approval_required=True always
     when status='queued' to document the invariant explicitly.
     """
-    # is_distillation_candidate is zero-LLM (sync); use empty list for memupalace
-    # (HTTP search not available sync — heuristic gate is sufficient here)
-    def _no_search(q: str, w: str, lim: int) -> list[dict]:
-        return []
-
-    candidate, reason = is_distillation_candidate(tool_calls, _no_search)
+    # CR-03 fix: step-count-only gate — no memupalace search injection required
+    candidate, reason = is_distillation_candidate(tool_calls)
     if not candidate:
         return {"status": "not_candidate", "reason": reason}
 
