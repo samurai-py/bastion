@@ -1,5 +1,22 @@
 {
   "mcpServers": {
+    "fs": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    },
+    "memupalace": {
+      "transport": "sse",
+      "url": "http://memupalace:8001/mcp"
+    },
+    "skill-writer": {
+      "transport": "sse",
+      "url": "http://skill-writer:8002/mcp"
+    },
+    "self-improving": {
+      "transport": "sse",
+      "url": "http://self-improving:8003/mcp"
+    },
     "composio": {
       "transport": "sse",
       "url": "https://connect.composio.dev/mcp"
