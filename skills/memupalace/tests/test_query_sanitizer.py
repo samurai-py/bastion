@@ -8,7 +8,10 @@ from skills.memupalace.query_sanitizer import sanitize, SanitizeResult, SAFE_LEN
 SYSTEM_PROMPT = (
     "You are a helpful personal assistant. "
     "Answer the user's questions concisely and accurately. "
-    "Always be polite and professional in your responses."
+    "Always be polite and professional in your responses. "
+    "Be thorough and provide examples when relevant. "
+    "Consider the user's context carefully before responding. "
+    "Use clear and simple language at all times."
 )
 
 # Pares (raw_query_with_system_prompt, expected_keyword_in_clean)
