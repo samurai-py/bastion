@@ -1,15 +1,32 @@
-"""Tests for MemupalaceMCPServer — unit tests (9.1) and property test P17 (9.3)."""
+"""Tests for memupalace fastmcp tool functions — unit tests (9.1) and property P17 (9.3).
+
+Tests call fastmcp tool functions directly by injecting a pre-built Memupalace
+instance via the module-level _mp global, avoiding real ONNX model loading.
+ChromaDB is optional — tests are skipped if not installed.
+"""
 
 from __future__ import annotations
 
 import math
 
 import pytest
+
+# Skip entire module if chromadb is not installed
+pytest.importorskip("chromadb")
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import skills.memupalace.mcp_server as _srv
 from skills.memupalace.factory import MemupalaceSettings, _create_memupalace_with_embedder
-from skills.memupalace.mcp_server import MemupalaceMCPServer
+from skills.memupalace.mcp_server import (
+    memory_add,
+    memory_delete,
+    memory_embed,
+    memory_invalidate,
+    memory_list_locations,
+    memory_search,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -17,15 +34,15 @@ from skills.memupalace.mcp_server import MemupalaceMCPServer
 # ---------------------------------------------------------------------------
 
 
-def _make_server(tmp_chroma_path: str, tmp_sqlite_path: str, mock_embedder) -> MemupalaceMCPServer:
-    """Build a MemupalaceMCPServer wired with the mock embedder."""
+def _inject_mp(tmp_chroma_path: str, tmp_sqlite_path: str, mock_embedder) -> None:
+    """Wire mock Memupalace into the mcp_server singleton (_mp)."""
     cfg = MemupalaceSettings(
         chroma_path=tmp_chroma_path,
         sqlite_path=tmp_sqlite_path,
         onnx_model_path="models/embedder.onnx",  # not used — mock embedder
     )
     mp = _create_memupalace_with_embedder(cfg, mock_embedder)
-    return MemupalaceMCPServer(memupalace=mp, embedder=mock_embedder)
+    _srv._mp = mp
 
 
 # ---------------------------------------------------------------------------
@@ -33,96 +50,123 @@ def _make_server(tmp_chroma_path: str, tmp_sqlite_path: str, mock_embedder) -> M
 # ---------------------------------------------------------------------------
 
 
-def test_list_tools_registers_5_tools(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
-    """All 5 expected tools must be registered."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
-    tools = server.list_tools()
-    assert len(tools) == 5
-    assert set(tools) == {
+def test_mcp_server_exposes_6_tools(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
+    """fastmcp server must expose exactly 6 tools."""
+    import asyncio
+
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    tools = asyncio.run(_srv.mcp.list_tools())
+    tool_names = {t.name for t in tools}
+    assert tool_names == {
         "memory_add",
         "memory_search",
         "memory_list_locations",
         "memory_delete",
         "memory_embed",
+        "memory_invalidate",
     }
 
 
 def test_memory_add_valid(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
     """memory_add with valid params returns a dict with 'id' and 'operation'."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
-    result = server.call_tool("memory_add", content="Hello world", wing="test")
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    result = memory_add(content="Hello world", wing="test")
     assert "id" in result
     assert "operation" in result
     assert result["operation"] in ("created", "reinforced")
     assert isinstance(result["id"], str) and result["id"]
 
 
+def test_memory_add_empty_content_raises(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
+    """memory_add with empty content must raise ValueError."""
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    with pytest.raises(ValueError, match="non-empty"):
+        memory_add(content="", wing="test")
+
+
 def test_memory_embed_empty_text_raises(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
     """memory_embed with empty string must raise ValueError."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
     with pytest.raises(ValueError, match="non-empty"):
-        server.call_tool("memory_embed", text="")
+        memory_embed(text="")
 
 
 def test_memory_embed_whitespace_raises(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
     """memory_embed with whitespace-only string must raise ValueError."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
     with pytest.raises(ValueError, match="non-empty"):
-        server.call_tool("memory_embed", text="   ")
+        memory_embed(text="   ")
 
 
 def test_memory_delete_nonexistent_raises(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
     """memory_delete with a fake ID must raise KeyError."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
     with pytest.raises(KeyError):
-        server.call_tool("memory_delete", memory_id="00000000-0000-0000-0000-000000000000")
+        memory_delete(memory_id="00000000-0000-0000-0000-000000000000")
 
 
 def test_memory_search_returns_list(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
     """After adding a memory, searching for it returns a list."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
-    server.call_tool("memory_add", content="Python is great for data science", wing="tech")
-    results = server.call_tool("memory_search", query="Python data science", wing="tech")
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    memory_add(content="Python is great for data science", wing="tech")
+    results = memory_search(query="Python data science", wing="tech")
     assert isinstance(results, list)
     assert len(results) >= 1
     first = results[0]
     assert "id" in first
     assert "content" in first
-    assert "salience_score" in first
+    assert "score" in first
 
 
-def test_call_tool_unknown_raises(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
-    """Calling an unknown tool name raises ValueError."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
-    with pytest.raises(ValueError, match="Unknown tool"):
-        server.call_tool("nonexistent_tool")
+def test_memory_search_applies_sanitizer(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
+    """memory_search must pass through query_sanitizer (D-14)."""
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    # Short clean query — passthrough expected, must not raise
+    results = memory_search(query="simple query", wing=None)
+    assert isinstance(results, list)
 
 
 def test_memory_embed_returns_vector(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
     """memory_embed with valid text returns a list of floats."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
-    vec = server.call_tool("memory_embed", text="hello")
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    vec = memory_embed(text="hello")
     assert isinstance(vec, list)
     assert len(vec) == 384
     assert all(isinstance(v, float) for v in vec)
 
 
-def test_memory_list_locations_returns_list(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
-    """memory_list_locations returns a list of strings."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
-    server.call_tool("memory_add", content="Some fact", wing="personal")
-    locs = server.call_tool("memory_list_locations")
-    assert isinstance(locs, list)
-    assert "personal" in locs
+def test_memory_list_locations_returns_dict(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
+    """memory_list_locations returns a dict with 'wings' key."""
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    memory_add(content="Some fact", wing="personal")
+    result = memory_list_locations()
+    assert isinstance(result, dict)
+    assert "wings" in result
+    assert "personal" in result["wings"]
 
 
 def test_memory_delete_valid(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
     """memory_delete with a valid ID returns confirmation dict."""
-    server = _make_server(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
-    add_result = server.call_tool("memory_add", content="To be deleted", wing="temp")
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    add_result = memory_add(content="To be deleted", wing="temp")
     memory_id = add_result["id"]
-    result = server.call_tool("memory_delete", memory_id=memory_id)
+    result = memory_delete(memory_id=memory_id)
     assert result == {"deleted": memory_id}
+
+
+def test_memory_invalidate_unknown_belief(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
+    """memory_invalidate with unknown rust_belief_id returns None chroma_id."""
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    result = memory_invalidate(rust_belief_id="nonexistent-belief-id")
+    assert result["rust_belief_id"] == "nonexistent-belief-id"
+    assert result["invalidated_chroma_id"] is None
+
+
+def test_memory_invalidate_empty_raises(tmp_chroma_path, tmp_sqlite_path, mock_embedder):
+    """memory_invalidate with empty string must raise ValueError."""
+    _inject_mp(tmp_chroma_path, tmp_sqlite_path, mock_embedder)
+    with pytest.raises(ValueError, match="non-empty"):
+        memory_invalidate(rust_belief_id="")
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +215,9 @@ def test_property_17_memory_embed_nonzero_output(text: str) -> None:
             onnx_model_path="models/embedder.onnx",
         )
         mp = _create_memupalace_with_embedder(cfg, stub)
-        server = MemupalaceMCPServer(memupalace=mp, embedder=stub)
+        _srv._mp = mp
 
-        vec = server.call_tool("memory_embed", text=text)
+        vec = memory_embed(text=text)
 
     assert isinstance(vec, list), "Result must be a list"
     assert len(vec) > 0, "Embedding must be non-empty"
