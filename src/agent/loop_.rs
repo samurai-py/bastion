@@ -333,8 +333,19 @@ impl AgentLoop {
                                     let skills_base = std::path::Path::new(&skills_dir);
                                     let local_path = skills_base.join(&tail);
                                     // Defense in depth: Normal-only components cannot escape
-                                    // skills_base, but assert containment explicitly.
-                                    if !local_path.starts_with(skills_base) {
+                                    // skills_base lexically, but a symlink planted inside
+                                    // SKILLS_DIR could still redirect rescan outside it. Resolve
+                                    // symlinks before the containment check (mirrors the Python
+                                    // guard's resolve()). A not-yet-existing path can't be
+                                    // canonicalized — fall back to the lexical check; rescan then
+                                    // fails closed on the missing file.
+                                    let canon_base = std::fs::canonicalize(skills_base)
+                                        .unwrap_or_else(|_| skills_base.to_path_buf());
+                                    let contained = match std::fs::canonicalize(&local_path) {
+                                        Ok(canon) => canon.starts_with(&canon_base),
+                                        Err(_) => local_path.starts_with(skills_base),
+                                    };
+                                    if !contained {
                                         tracing::warn!(
                                             event = "skill_reload_rejected",
                                             path = %local_path.to_string_lossy(),

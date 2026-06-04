@@ -1,6 +1,6 @@
 """Insight cache — avoids redundant LLM round-trips (MUPL-02).
 
-TTL-based in-memory cache for distilled insights. Key = hash(content_prefix + wing).
+TTL-based in-memory cache for distilled insights. Key = hash(full content + wing).
 Not persisted — intentional: insights are derived, not source of truth.
 """
 
@@ -31,8 +31,15 @@ class InsightCache:
 
     @staticmethod
     def make_key(content: str, wing: str = "general") -> str:
-        """Stable key from first 100 chars of content + wing."""
-        raw = f"{content[:100]}::{wing}"
+        """Stable key from full content + wing.
+
+        Hashes the entire content (not a prefix): when used as a cache-aside
+        guard over a write path (MUPL-02), keying on a prefix would let two
+        distinct entries sharing a leading prefix collide, silently dropping
+        the second store. Full-content hashing makes collisions cryptographically
+        improbable.
+        """
+        raw = f"{content}::{wing}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def get(self, key: str) -> str | None:

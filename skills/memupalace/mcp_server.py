@@ -69,7 +69,12 @@ def memory_add(
     returns the cached result without a redundant store.add() call.
     """
     _validate_str("content", content)
-    cache_key = InsightCache.make_key(content, wing)
+    # MUPL-02: key the cache-aside on the FULL memory identity (content + wing +
+    # placement + belief link). Keying on content alone would silently collapse
+    # two distinct memories that differ only in hall/room/rust_belief_id into one
+    # store and return a stale id (data loss).
+    key_material = f"{content}::{hall}::{room}::{rust_belief_id}"
+    cache_key = InsightCache.make_key(key_material, wing)
     cached = _insight_cache.get(cache_key)
     if cached is not None:
         logger.debug("memory_add: insight cache hit (wing=%s)", wing)

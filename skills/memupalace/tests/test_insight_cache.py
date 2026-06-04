@@ -40,6 +40,18 @@ class TestInsightCache:
         k2 = InsightCache.make_key("content-b", "wing")
         assert k1 != k2
 
+    def test_make_key_no_prefix_collision(self):
+        """Regression: keys must hash full content, not a prefix.
+
+        Two distinct contents sharing the first 100 chars must produce
+        different keys — otherwise the cache-aside guard in memory_add silently
+        drops the second store (data loss).
+        """
+        shared_prefix = "x" * 100
+        k1 = InsightCache.make_key(shared_prefix + "-alpha", "wing")
+        k2 = InsightCache.make_key(shared_prefix + "-beta", "wing")
+        assert k1 != k2
+
     def test_invalidate_removes_entry(self):
         cache = InsightCache()
         cache.set("k1", "insight")
