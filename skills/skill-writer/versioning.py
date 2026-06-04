@@ -22,18 +22,25 @@ def snapshot(skill_path: Path) -> None:
     """Save current SKILL.md to .versions/ before any edit (non-blocking).
 
     Called by skill_create and skill_edit in mcp_server before writing.
+    Content is captured on the CALLER THREAD at submit time — the background
+    thread only writes bytes it already received, never re-reads skill_path
+    (CR-01 fix: eliminates race with synchronous main-thread overwrite).
     Failure is logged but never propagated — edit must not fail due to versioning.
     """
+    if not skill_path.exists():
+        return
     ts = datetime.now(UTC).strftime(_TS_FMT)
     dest = skill_path.parent / VERSIONS_DIR / f"{SNAPSHOT_PREFIX}{ts}"
+    try:
+        content = skill_path.read_text(encoding="utf-8")  # captured NOW, on caller thread
+    except Exception as e:
+        logger.error("versioning.snapshot: cannot read %s: %s", skill_path, e)
+        return
 
     def _write() -> None:
         try:
-            if not skill_path.exists():
-                logger.warning("versioning.snapshot: skill_path not found: %s", skill_path)
-                return
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(skill_path.read_text(encoding="utf-8"), encoding="utf-8")
+            dest.write_text(content, encoding="utf-8")
             logger.debug("versioning.snapshot: saved %s", dest.name)
         except Exception as e:
             logger.error("versioning.snapshot failed for %s: %s", skill_path, e)
