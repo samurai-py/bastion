@@ -302,37 +302,60 @@ impl AgentLoop {
                         // D-06: handle skill_reloaded signal from skill-writer container.
                         // CR-02 fix: rebase skill_path to core's own SKILLS_DIR —
                         // skill-writer returns /skills/<name>/SKILL.md (its container path).
-                        // We trust only the last two components (<name>/SKILL.md) and
-                        // resolve them under our SKILLS_DIR to get the correct local path.
                         if result.get("skill_reloaded").and_then(|v| v.as_bool()) == Some(true) {
                             if let Some(raw_path) = result.get("skill_path").and_then(|v| v.as_str()) {
                                 let skills_dir = std::env::var("SKILLS_DIR")
                                     .unwrap_or_else(|_| "/skills".to_string());
-                                // Extract last two components: <skill_name>/SKILL.md
-                                let rebased = std::path::Path::new(raw_path)
-                                    .components()
-                                    .collect::<Vec<_>>();
-                                let local_path = if rebased.len() >= 2 {
-                                    let tail: std::path::PathBuf = rebased[rebased.len() - 2..]
-                                        .iter()
+                                // SEC: skill_path crosses the skill-writer→core container trust
+                                // boundary. Keep ONLY Normal components — discarding RootDir,
+                                // Prefix, CurDir and ParentDir ("..") — so a malicious segment
+                                // cannot escape SKILLS_DIR. Then take the last two
+                                // (<skill_name>/SKILL.md) and resolve under SKILLS_DIR.
+                                let normals: Vec<std::path::PathBuf> =
+                                    std::path::Path::new(raw_path)
+                                        .components()
+                                        .filter_map(|c| match c {
+                                            std::path::Component::Normal(s) => {
+                                                Some(std::path::PathBuf::from(s))
+                                            }
+                                            _ => None,
+                                        })
                                         .collect();
-                                    std::path::Path::new(&skills_dir).join(tail)
+                                if normals.len() < 2 {
+                                    tracing::warn!(
+                                        event = "skill_reload_rejected",
+                                        raw_path = %raw_path,
+                                        reason = "fewer than two normal path components"
+                                    );
                                 } else {
-                                    std::path::PathBuf::from(raw_path)
-                                };
-                                let path_str = local_path.to_string_lossy();
-                                tracing::info!(event = "skill_reload_signal", path = %path_str);
-                                match crate::agent::skills::SkillsLoader::rescan(&path_str) {
-                                    Ok(meta) => tracing::info!(
-                                        event = "skill_loaded",
-                                        name = %meta.name,
-                                        path = %path_str
-                                    ),
-                                    Err(e) => tracing::warn!(
-                                        event = "skill_reload_failed",
-                                        path = %path_str,
-                                        err = %e
-                                    ),
+                                    let tail: std::path::PathBuf =
+                                        normals[normals.len() - 2..].iter().collect();
+                                    let skills_base = std::path::Path::new(&skills_dir);
+                                    let local_path = skills_base.join(&tail);
+                                    // Defense in depth: Normal-only components cannot escape
+                                    // skills_base, but assert containment explicitly.
+                                    if !local_path.starts_with(skills_base) {
+                                        tracing::warn!(
+                                            event = "skill_reload_rejected",
+                                            path = %local_path.to_string_lossy(),
+                                            reason = "resolved path escapes SKILLS_DIR"
+                                        );
+                                    } else {
+                                        let path_str = local_path.to_string_lossy();
+                                        tracing::info!(event = "skill_reload_signal", path = %path_str);
+                                        match crate::agent::skills::SkillsLoader::rescan(&path_str) {
+                                            Ok(meta) => tracing::info!(
+                                                event = "skill_loaded",
+                                                name = %meta.name,
+                                                path = %path_str
+                                            ),
+                                            Err(e) => tracing::warn!(
+                                                event = "skill_reload_failed",
+                                                path = %path_str,
+                                                err = %e
+                                            ),
+                                        }
+                                    }
                                 }
                             }
                         }
