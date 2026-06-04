@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
     from skills.memupalace.embedder import ONNXEmbedder
     from skills.memupalace.knowledge_graph import KnowledgeGraph
     from skills.memupalace.store import MemoryStore
+
+logger = logging.getLogger(__name__)
 
 
 class Memupalace:
@@ -36,11 +39,15 @@ class Memupalace:
     def add(
         self,
         content: str,
-        wing: str,
+        wing: str = "general",
         hall: str | None = None,
         room: str | None = None,
+        rust_belief_id: str | None = None,
     ) -> AddResult:
         """Embed content, check for duplicates, then store or reinforce.
+
+        rust_belief_id links this memory to a Rust SQLite belief (D-03).
+        KG is populated with concept entities from content words (D-15/MUPL-03).
 
         Raises:
             ValueError: If content is empty/whitespace or location slugs are invalid.
@@ -51,6 +58,7 @@ class Memupalace:
 
         # Validate location slugs via the Memory model validator
         import re
+
         _LOCATION_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
         for field_name, value in [("wing", wing), ("hall", hall), ("room", room)]:
             if value is not None and not _LOCATION_PATTERN.match(value):
@@ -70,11 +78,28 @@ class Memupalace:
             self._store.reinforce(duplicate.id)
             return AddResult(id=duplicate.id, operation="reinforced")
 
-        # New memory
-        new_id = self._store.add(content, embedding, wing, hall, room)
+        # New memory — store with correlation id
+        new_id = self._store.add(
+            content, embedding, wing, hall, room, rust_belief_id=rust_belief_id
+        )
 
-        # KG update — placeholder for MVP, can be extended later
-        # self._kg.upsert_entity(content[:50], "concept")
+        # KG update — extract simple noun-like tokens without LLM (D-15/MUPL-03)
+        try:
+            now_iso = datetime.now(tz=timezone.utc).isoformat()
+            words = [w for w in content.split() if len(w) > 4][:3]
+            for word in words:
+                entity_id = self._kg.upsert_entity(word, "concept", valid_from=now_iso)
+                if entity_id:
+                    self._kg.add_relation(
+                        new_id,
+                        entity_id,
+                        "mentioned_in",
+                        new_id,
+                        valid_from=now_iso,
+                    )
+        except Exception as exc:
+            # KG is best-effort — never block memory storage on KG errors
+            logger.warning("KG update failed for memory %s: %s", new_id, exc)
 
         return AddResult(id=new_id, operation="created")
 
