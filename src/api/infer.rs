@@ -4,7 +4,13 @@
 //! and routes through the existing Provider trait + egress check.
 //! Python containers hold ZERO raw API keys.
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::post,
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::hooks::egress::check_egress;
@@ -26,6 +32,10 @@ struct InferResponse {
 #[derive(Clone)]
 pub struct InferState {
     pub provider: SharedProvider,
+    /// Shared secret required as `Authorization: Bearer <token>`. When `None`,
+    /// auth is disabled (loopback-only dev mode — main.rs refuses non-loopback
+    /// binds without a token). See SEC: unauthenticated token-minting.
+    pub token: Option<String>,
 }
 
 fn parse_tier(s: &str) -> Option<PrivacyTier> {
@@ -36,10 +46,47 @@ fn parse_tier(s: &str) -> Option<PrivacyTier> {
     }
 }
 
+/// Constant-time byte comparison. Length is allowed to leak (acceptable for a
+/// fixed-length bearer token); the equal-length comparison itself does not
+/// short-circuit, preventing timing oracles on the secret's contents.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Validate the bearer token. Returns true when auth is disabled (`token: None`)
+/// or the presented `Authorization: Bearer …` matches in constant time.
+fn authorized(state: &InferState, headers: &HeaderMap) -> bool {
+    let expected = match &state.token {
+        Some(t) => t,
+        None => return true,
+    };
+    let provided = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "));
+    match provided {
+        Some(tok) => constant_time_eq(tok.as_bytes(), expected.as_bytes()),
+        None => false,
+    }
+}
+
 async fn handle_infer(
     State(state): State<InferState>,
+    headers: HeaderMap,
     Json(body): Json<InferRequest>,
 ) -> impl IntoResponse {
+    if !authorized(&state, &headers) {
+        tracing::warn!(event = "infer_unauthorized");
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({}))).into_response();
+    }
+
     let tier = match parse_tier(&body.privacy_tier) {
         Some(t) => t,
         None => {
@@ -75,8 +122,11 @@ async fn handle_infer(
 
 /// Build the axum Router for the /api/infer endpoint.
 /// Mount this router in main.rs to expose the inference gateway.
-pub fn router(provider: SharedProvider) -> Router {
-    let state = InferState { provider };
+///
+/// `token` is the shared secret required on every request as
+/// `Authorization: Bearer <token>`. Pass `None` only for loopback-only dev.
+pub fn router(provider: SharedProvider, token: Option<String>) -> Router {
+    let state = InferState { provider, token };
     Router::new()
         .route("/api/infer", post(handle_infer))
         .with_state(state)
@@ -94,7 +144,7 @@ mod tests {
         let provider: crate::provider::SharedProvider =
             Arc::new(RwLock::new(Box::new(StubProvider { name: "anthropic", fail: false })
                 as Box<dyn crate::provider::Provider>));
-        super::router(provider)
+        super::router(provider, None)
     }
 
     fn build_router_fail() -> axum::Router {
@@ -103,7 +153,7 @@ mod tests {
         let provider: crate::provider::SharedProvider =
             Arc::new(RwLock::new(Box::new(StubProvider { name: "anthropic", fail: true })
                 as Box<dyn crate::provider::Provider>));
-        super::router(provider)
+        super::router(provider, None)
     }
 
     fn build_router_ollama() -> axum::Router {
@@ -112,7 +162,16 @@ mod tests {
         let provider: crate::provider::SharedProvider =
             Arc::new(RwLock::new(Box::new(StubProvider { name: "ollama", fail: false })
                 as Box<dyn crate::provider::Provider>));
-        super::router(provider)
+        super::router(provider, None)
+    }
+
+    fn build_router_with_token(token: &str) -> axum::Router {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let provider: crate::provider::SharedProvider =
+            Arc::new(RwLock::new(Box::new(StubProvider { name: "anthropic", fail: false })
+                as Box<dyn crate::provider::Provider>));
+        super::router(provider, Some(token.to_owned()))
     }
 
     struct StubProvider {
@@ -243,5 +302,49 @@ mod tests {
             "must not leak internal error: {text}"
         );
         assert!(!text.contains("panicked"), "must not leak panic: {text}");
+    }
+
+    #[tokio::test]
+    async fn infer_missing_token_returns_401() {
+        let app = build_router_with_token("s3cret");
+        let body = serde_json::json!({"prompt": "hi", "privacy_tier": "cloud_ok"}).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/infer")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn infer_wrong_token_returns_401() {
+        let app = build_router_with_token("s3cret");
+        let body = serde_json::json!({"prompt": "hi", "privacy_tier": "cloud_ok"}).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/infer")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer wrong")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn infer_correct_token_authorizes() {
+        let app = build_router_with_token("s3cret");
+        let body = serde_json::json!({"prompt": "hi", "privacy_tier": "cloud_ok"}).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/infer")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer s3cret")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

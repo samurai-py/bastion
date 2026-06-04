@@ -178,25 +178,56 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
     }
 
     // Spawn /api/infer gateway for Python MCP containers (D-08 / D-09).
-    // Port: BASTION_INFER_ADDR env var, default "0.0.0.0:3000".
+    // Port: BASTION_INFER_ADDR env var, default "127.0.0.1:3000" (loopback).
     // Python containers call this endpoint; they never hold raw API keys.
+    //
+    // SEC (unauthenticated token-minting): this endpoint proxies inference using
+    // Bastion's provider credentials, so it MUST NOT be reachable unauthenticated.
+    // Defense in depth:
+    //   1. Default bind is loopback; widening requires explicit BASTION_INFER_ADDR.
+    //   2. BASTION_INFER_TOKEN enforces `Authorization: Bearer <token>` per request.
+    //   3. Fail closed: refuse to bind a non-loopback interface without a token.
+    // In Docker, the token is injected and the port stays on a private, unpublished
+    // network (see plan 03-06).
     {
-        let infer_addr = std::env::var("BASTION_INFER_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:3000".to_owned());
-        let infer_router = bastion::api::infer::router(agent.provider.clone());
-        tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(&infer_addr).await {
-                Ok(listener) => {
-                    tracing::info!(event = "infer_gateway_started", addr = %infer_addr);
-                    if let Err(e) = axum::serve(listener, infer_router).await {
-                        tracing::error!(event = "infer_gateway_error", error = %e);
+        let infer_token = std::env::var("BASTION_INFER_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        let infer_addr =
+            std::env::var("BASTION_INFER_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
+        let host = infer_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&infer_addr);
+        let is_loopback = host == "127.0.0.1" || host == "::1" || host == "[::1]" || host == "localhost";
+
+        if infer_token.is_none() && !is_loopback {
+            tracing::error!(
+                event = "infer_gateway_refused",
+                addr = %infer_addr,
+                "refusing to expose /api/infer on a non-loopback interface without BASTION_INFER_TOKEN (SEC: unauthenticated token-minting)"
+            );
+        } else {
+            if infer_token.is_none() {
+                tracing::warn!(
+                    event = "infer_gateway_no_auth",
+                    addr = %infer_addr,
+                    "/api/infer running without BASTION_INFER_TOKEN — loopback-only dev mode"
+                );
+            }
+            let infer_router =
+                bastion::api::infer::router(agent.provider.clone(), infer_token);
+            tokio::spawn(async move {
+                match tokio::net::TcpListener::bind(&infer_addr).await {
+                    Ok(listener) => {
+                        tracing::info!(event = "infer_gateway_started", addr = %infer_addr);
+                        if let Err(e) = axum::serve(listener, infer_router).await {
+                            tracing::error!(event = "infer_gateway_error", error = %e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(event = "infer_gateway_bind_failed", addr = %infer_addr, error = %e);
                     }
                 }
-                Err(e) => {
-                    tracing::error!(event = "infer_gateway_bind_failed", addr = %infer_addr, error = %e);
-                }
-            }
-        });
+            });
+        }
     }
 
     // Spawn CronService heartbeat into the pending queue (PROACT-01 / PROACT-02).
