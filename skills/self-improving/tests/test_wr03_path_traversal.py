@@ -43,11 +43,19 @@ class TestSafeSegment:
         with pytest.raises(ValueError):
             mcp_server._safe_segment("foo/bar")
 
-    def test_uppercase_raises(self):
+    def test_uppercase_normalized_not_raised(self):
+        """_safe_segment lowercases before validating, so uppercase input is normalized.
+
+        Note: plan behavior spec listed uppercase → raises, but the reference
+        implementation (and plan action spec) lowercases first, so UPPER_CASE
+        becomes upper_case which passes. Lowercasing is the correct behaviour
+        per skill-writer mirror spec.
+        """
         import mcp_server
 
-        with pytest.raises(ValueError):
-            mcp_server._safe_segment("UPPER_CASE")
+        # UPPER_CASE lowercases to upper_case which matches [a-z0-9][a-z0-9_-]{0,63}
+        result = mcp_server._safe_segment("UPPER_CASE")
+        assert result == "upper_case"
 
     def test_too_long_raises(self):
         """Segment longer than 64 chars must be rejected."""
@@ -116,12 +124,20 @@ class TestSuggestPromotionPathTraversal:
         with pytest.raises(ValueError):
             suggest_promotion("pattern-123", "../../etc/passwd")
 
-    def test_uppercase_persona_slug_raises(self):
-        """Allowlist rejects uppercase persona slug."""
+    def test_uppercase_persona_slug_normalized(self):
+        """Uppercase persona slug is lowercased and accepted (mirrors skill-writer behaviour)."""
+        from unittest.mock import patch
+
         from mcp_server import suggest_promotion
 
-        with pytest.raises(ValueError):
-            suggest_promotion("pattern-123", "UPPER_CASE")
+        with patch("mcp_server._get_adapter") as mock_adapter:
+            mock_adapter.return_value.get_pattern.return_value = None
+            result = suggest_promotion("pattern-123", "UPPER_CASE")
+        # Slug lowercased; reaches adapter with normalized value.
+        # not_found dict (per plan spec) carries the normalized slug in `reason`,
+        # not as a top-level persona_slug key.
+        assert result["status"] == "not_found"
+        assert "upper_case" in result["reason"]
 
     def test_traversal_pattern_id_raises(self):
         """WR-03: ../../evil in pattern_id must also be blocked."""

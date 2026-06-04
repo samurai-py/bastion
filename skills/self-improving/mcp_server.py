@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,8 +39,32 @@ def _validate_str(name: str, value: object) -> str:
     return str(value)
 
 
-def _get_adapter(persona_slug: str) -> FileSystemAdapter:
-    """Build FileSystemAdapter for the given persona from the skills volume."""
+_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _safe_segment(value: str) -> str:
+    """Allowlist single path segment (SEC: path traversal — WR-03 fix).
+
+    Mirrors skill-writer._safe_segment. Lowercases, then requires
+    ^[a-z0-9][a-z0-9_-]{0,63}$ — no '..', '/', '\\', dots-only, or empty segments.
+    """
+    seg = str(value).strip().lower()
+    if not _SEGMENT_RE.match(seg):
+        raise ValueError(f"invalid path segment: {value!r}")
+    return seg
+
+
+def _assert_inside_skills_dir(path: Path) -> Path:
+    """Verify the path stays under SKILLS_DIR (fail-closed — WR-03 fix)."""
+    base = SKILLS_DIR.resolve()
+    resolved = path.resolve()
+    if resolved != base and not resolved.is_relative_to(base):
+        raise ValueError("path traversal detected")
+    return path
+
+
+def _get_adapter() -> FileSystemAdapter:
+    """Build FileSystemAdapter for the skills volume."""
     personas_path = SKILLS_DIR / "personas"
     return FileSystemAdapter(
         personas_dir=personas_path,
@@ -86,28 +111,36 @@ def suggest_promotion(pattern_id: str, persona_slug: str) -> dict:
 
     SELF observes and suggests; SKWR executes.
     Returns status: 'pending_approval' invariably — never auto-applies (D-11).
+    SEC (WR-03 fix): persona_slug and pattern_id are allowlist-sanitized before
+    reaching the filesystem adapter.
     """
     _validate_str("pattern_id", pattern_id)
     _validate_str("persona_slug", persona_slug)
 
-    adapter = _get_adapter(persona_slug)
-    pattern = adapter.get_pattern(persona_slug, pattern_id)
+    # SEC: allowlist-sanitize before any filesystem path construction (WR-03 fix)
+    safe_slug = _safe_segment(persona_slug)
+    safe_pattern_id = _safe_segment(pattern_id)
+    # Verify resolved path stays under SKILLS_DIR/personas (defense in depth)
+    _assert_inside_skills_dir(SKILLS_DIR / "personas" / safe_slug)
+
+    adapter = _get_adapter()
+    pattern = adapter.get_pattern(safe_slug, safe_pattern_id)
     if pattern is None:
         return {
             "eligible": False,
-            "reason": f"Pattern '{pattern_id}' not found for persona '{persona_slug}'",
-            "pattern_id": pattern_id,
+            "reason": f"Pattern '{safe_pattern_id}' not found for persona '{safe_slug}'",
+            "pattern_id": safe_pattern_id,
             "status": "not_found",
         }
 
-    current_weight = adapter.get_current_weight(persona_slug)
+    current_weight = adapter.get_current_weight(safe_slug)
     eligible, reason = should_promote(pattern, current_weight)
 
     suggestion = {
         "eligible": eligible,
         "reason": reason,
-        "pattern_id": pattern_id,
-        "persona_slug": persona_slug,
+        "pattern_id": safe_pattern_id,
+        "persona_slug": safe_slug,
         "status": "pending_approval",  # D-11 invariant — SELF never applies
     }
 
@@ -115,8 +148,8 @@ def suggest_promotion(pattern_id: str, persona_slug: str) -> dict:
         _save_suggestion(suggestion)
         logger.info(
             "self-improving: suggestion queued for pattern=%s persona=%s",
-            pattern_id,
-            persona_slug,
+            safe_pattern_id,
+            safe_slug,
         )
 
     return suggestion
