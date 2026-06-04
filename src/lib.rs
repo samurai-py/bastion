@@ -10,3 +10,4 @@ pub mod goal;
 pub mod cabinet;
 pub mod channel;
 pub mod proactive;
+pub mod api;

@@ -45,12 +45,17 @@ pub fn check_egress(tier: Option<PrivacyTier>, provider_name: &str) -> anyhow::R
     }
 }
 
-/// Egress hook: wraps `check_egress` as an `impl Hook` for the AgentLoop
-/// (wiring is plan 08). The `before_provider` call is the fail-closed
-/// pre-call gate — mirrors the budget-gate position in loop_.rs:110-116.
+/// Egress hook: wraps `check_egress` as an `impl Hook` for composable wiring.
+///
+/// EgressHook is retained for composability but egress is also enforced inline
+/// at provider dispatch sites (`check_egress` call sites in loop_.rs / api/infer.rs).
+/// Removing inline enforcement would regress PRIV-03. (IN-07)
+///
+/// Full Hook-trait wiring is planned for Phase 4 (plan 08).
 ///
 /// CRITICAL: Do NOT log `system` or `user` payloads here when the tier is
 /// LocalOnly — that would itself constitute an egress violation (pitfall 7).
+#[allow(dead_code)]
 pub struct EgressHook;
 
 #[async_trait::async_trait]
