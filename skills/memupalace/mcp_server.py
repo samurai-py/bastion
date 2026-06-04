@@ -16,6 +16,7 @@ from fastmcp import FastMCP
 
 from skills.memupalace import query_sanitizer
 from skills.memupalace.factory import Memupalace, _create_memupalace_with_embedder
+from skills.memupalace.insight_cache import InsightCache
 from skills.memupalace.models import MemupalaceSettings
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ mcp = FastMCP("memupalace")
 
 # Singleton instance — initialized lazily on first tool call
 _mp: Memupalace | None = None
+
+# MUPL-02: TTL cache — avoids redundant LLM insight round-trips
+_insight_cache: InsightCache = InsightCache()
 
 
 def _get_mp() -> Memupalace:
@@ -59,11 +63,22 @@ def memory_add(
     room: str | None = None,
     rust_belief_id: str | None = None,
 ) -> dict:
-    """Add a memory to memupalace. rust_belief_id links to Rust SQLite belief (D-03)."""
+    """Add a memory to memupalace. rust_belief_id links to Rust SQLite belief (D-03).
+
+    MUPL-02: checks InsightCache first — if content+wing was recently cached,
+    returns the cached result without a redundant store.add() call.
+    """
     _validate_str("content", content)
+    cache_key = InsightCache.make_key(content, wing)
+    cached = _insight_cache.get(cache_key)
+    if cached is not None:
+        logger.debug("memory_add: insight cache hit (wing=%s)", wing)
+        return {"id": cached, "operation": "cache_hit"}
+
     result = _get_mp().add(
         content, wing=wing, hall=hall, room=room, rust_belief_id=rust_belief_id
     )
+    _insight_cache.set(cache_key, result.id)
     return {"id": result.id, "operation": result.operation}
 
 
