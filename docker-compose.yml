@@ -31,7 +31,7 @@ services:
       - "127.0.0.1:18794:18794"
     volumes:
       - ./config:/home/node/.openclaw:rw
-      - ./skills:/home/node/.openclaw/workspace/skills:ro
+      - ./skills:/skills:ro
       - ./db:/home/node/.openclaw/workspace/db:rw
       - ./personas:/home/node/.openclaw/workspace/personas:rw
       - ./SOUL.md:/home/node/.openclaw/workspace/SOUL.md:ro
@@ -54,6 +54,7 @@ services:
       # SEC: shared secret — Python containers send Authorization: Bearer <token>
       # Define BASTION_INFER_TOKEN in .env (never hardcode here)
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
+      - SKILLS_DIR=/skills
     depends_on:
       memupalace:
         condition: service_healthy
@@ -118,7 +119,7 @@ services:
     networks:
       - bastion-net
     volumes:
-      - skills-volume:/skills
+      - ./skills:/skills
       - skill-writer-data:/data
     environment:
       - SKILL_WRITER_PORT=8002
@@ -148,7 +149,7 @@ services:
     networks:
       - bastion-net
     volumes:
-      - skills-volume:/skills:ro    # read-only — D-10: SELF never writes skills (T-03-06-04)
+      - ./skills:/skills:ro    # read-only — D-10: SELF never writes skills (T-03-06-04)
       - self-improving-data:/data
     environment:
       - SELF_IMPROVING_PORT=8003
@@ -180,6 +181,5 @@ volumes:
   tmp:
   memupalace-data:
   onnx-models:
-  skills-volume:
   skill-writer-data:
   self-improving-data:
