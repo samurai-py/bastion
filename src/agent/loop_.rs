@@ -300,20 +300,37 @@ impl AgentLoop {
                             .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
 
                         // D-06: handle skill_reloaded signal from skill-writer container.
-                        // When the skill-writer writes a new SKILL.md and emits this signal,
-                        // AgentLoop hot-loads the metadata so future turns see updated skill info.
+                        // CR-02 fix: rebase skill_path to core's own SKILLS_DIR —
+                        // skill-writer returns /skills/<name>/SKILL.md (its container path).
+                        // We trust only the last two components (<name>/SKILL.md) and
+                        // resolve them under our SKILLS_DIR to get the correct local path.
                         if result.get("skill_reloaded").and_then(|v| v.as_bool()) == Some(true) {
-                            if let Some(path) = result.get("skill_path").and_then(|v| v.as_str()) {
-                                tracing::info!(event = "skill_reload_signal", path = %path);
-                                match crate::agent::skills::SkillsLoader::rescan(path) {
+                            if let Some(raw_path) = result.get("skill_path").and_then(|v| v.as_str()) {
+                                let skills_dir = std::env::var("SKILLS_DIR")
+                                    .unwrap_or_else(|_| "/skills".to_string());
+                                // Extract last two components: <skill_name>/SKILL.md
+                                let rebased = std::path::Path::new(raw_path)
+                                    .components()
+                                    .collect::<Vec<_>>();
+                                let local_path = if rebased.len() >= 2 {
+                                    let tail: std::path::PathBuf = rebased[rebased.len() - 2..]
+                                        .iter()
+                                        .collect();
+                                    std::path::Path::new(&skills_dir).join(tail)
+                                } else {
+                                    std::path::PathBuf::from(raw_path)
+                                };
+                                let path_str = local_path.to_string_lossy();
+                                tracing::info!(event = "skill_reload_signal", path = %path_str);
+                                match crate::agent::skills::SkillsLoader::rescan(&path_str) {
                                     Ok(meta) => tracing::info!(
                                         event = "skill_loaded",
                                         name = %meta.name,
-                                        path = %path
+                                        path = %path_str
                                     ),
                                     Err(e) => tracing::warn!(
                                         event = "skill_reload_failed",
-                                        path = %path,
+                                        path = %path_str,
                                         err = %e
                                     ),
                                 }
