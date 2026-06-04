@@ -10,7 +10,6 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +23,12 @@ PENDING_FILE = Path(_PENDING_FILE_ENV)
 
 def is_distillation_candidate(
     tool_calls: list[str],
-    memupalace_search_fn: Callable[[str, str, int], list[dict]],
 ) -> tuple[bool, str]:
     """Zero-LLM heuristic: is this task worth distilling into a reusable skill? (D-05).
 
-    Args:
-        tool_calls: ordered list of tool names used in the task
-        memupalace_search_fn: injected function — avoids hard import cycle.
-            Signature: (query: str, wing: str, limit: int) -> list[dict]
+    Gates on step count alone (CR-03 fix): the memupalace similarity requirement
+    was driven by _no_search stub that always returned [] — making this function
+    always return False. Step count is the reliable, dependency-free gate.
 
     Returns:
         (is_candidate, reason) — mirrors should_promote() pattern in promotion.py
@@ -39,18 +36,7 @@ def is_distillation_candidate(
     if len(tool_calls) < MIN_STEPS:
         return False, f"Too few steps: {len(tool_calls)} < {MIN_STEPS}"
 
-    # Build a short query from first tool names to search for recurrent patterns
-    query_text = " ".join(tool_calls[:3])
-    try:
-        similar = memupalace_search_fn(query_text, "procedural-patterns", 1)
-    except Exception as exc:
-        logger.warning("distiller: memupalace search failed: %s", exc)
-        return False, f"memupalace search failed: {exc}"
-
-    if not similar:
-        return False, "No similar procedural pattern found in memupalace"
-
-    return True, f"Recurrent pattern detected: {len(tool_calls)} steps, similar found"
+    return True, f"Distillation candidate: {len(tool_calls)} steps >= {MIN_STEPS} threshold"
 
 
 def enqueue_pending(prompt: str, context_tier: str) -> None:
