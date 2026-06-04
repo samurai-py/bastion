@@ -44,15 +44,26 @@ pub struct CabinetVerdict {
 /// - Retries serde-parse up to 3 attempts (AI-SPEC §4b).
 /// - On exhaustion: returns a raw-positions `CabinetVerdict` assembled from the
 ///   transcript (never a fabricated consensus verdict — AI-SPEC §6).
+/// - `response_language`: BCP-47 language tag for the synthesis output (e.g. "pt-BR").
+///   Defaults to "pt-BR" when callers use `synthesize()` — the primary user is Mario (PT).
 pub async fn synthesize(
     provider: &dyn Provider,
     transcript: &[Turn],
+) -> anyhow::Result<CabinetVerdict> {
+    synthesize_in_language(provider, transcript, "pt-BR").await
+}
+
+/// Like `synthesize()` but with an explicit response language tag.
+pub async fn synthesize_in_language(
+    provider: &dyn Provider,
+    transcript: &[Turn],
+    response_language: &str,
 ) -> anyhow::Result<CabinetVerdict> {
     let schema = schemars::schema_for!(CabinetVerdict);
     let response_schema = serde_json::to_value(&schema)
         .map_err(|e| anyhow::anyhow!("failed to serialize CabinetVerdict schema: {e}"))?;
 
-    let system = build_synthesis_prompt();
+    let system = build_synthesis_prompt(response_language);
     let user = build_transcript_text(transcript);
 
     const MAX_ATTEMPTS: u32 = 3;
@@ -88,18 +99,22 @@ pub async fn synthesize(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn build_synthesis_prompt() -> String {
-    r#"You are the Cabinet synthesis engine. Your task is to produce a single unified response from a multi-persona deliberation transcript.
+fn build_synthesis_prompt(response_language: &str) -> String {
+    format!(
+        r#"You are the Cabinet synthesis engine. Your task is to produce a single unified response from a multi-persona deliberation transcript.
 
 Rules:
 1. Synthesize a clear, unified RECOMMENDATION that represents the collective position.
 2. For ANY persona whose position materially diverged from the recommendation, you MUST include a Dissent entry with their name and their position. This field is REQUIRED — do not omit dissents even if consensus appears strong.
 3. If all personas were fully aligned, dissents may be empty — but only if there is ZERO divergence.
 4. NEVER fabricate agreement. If in doubt, record the dissent.
+5. Respond in {response_language}.
 
 Respond ONLY with a JSON object with exactly these fields:
-  {"recommendation": "<the unified recommendation text>", "dissents": [{"persona": "<name>", "position": "<their diverging position>"}]}
-"dissents" must be an array (empty [] only if there was zero divergence). No prose, no markdown fences."#.to_string()
+  {{"recommendation": "<the unified recommendation text>", "dissents": [{{"persona": "<name>", "position": "<their diverging position>"}}]}}
+"dissents" must be an array (empty [] only if there was zero divergence). No prose, no markdown fences."#,
+        response_language = response_language,
+    )
 }
 
 fn build_transcript_text(transcript: &[Turn]) -> String {
@@ -270,5 +285,26 @@ mod tests {
         let verdict = synthesize(&provider, &[]).await.unwrap();
         // No panic, recommendation mentions raw positions
         assert!(verdict.recommendation.contains("raw positions") || verdict.recommendation.contains("No transcript"));
+    }
+
+    #[test]
+    fn synth_prompt_contains_language_instruction() {
+        // Structural check: synth prompt must instruct the LLM to respond in the given language.
+        // Fixes live-UAT finding: verdict came out in EN while persona positions were PT (2026-06-03).
+        let prompt = build_synthesis_prompt("pt-BR");
+        assert!(
+            prompt.contains("pt-BR") || prompt.contains("Respond in"),
+            "Synth prompt must contain language instruction; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn synth_prompt_language_is_injected() {
+        // Verify that the language tag is actually interpolated into the prompt.
+        let prompt_ptbr = build_synthesis_prompt("pt-BR");
+        let prompt_en = build_synthesis_prompt("en-US");
+        assert!(prompt_ptbr.contains("pt-BR"), "pt-BR must appear in prompt");
+        assert!(prompt_en.contains("en-US"), "en-US must appear in prompt");
+        assert_ne!(prompt_ptbr, prompt_en, "prompts for different languages must differ");
     }
 }
