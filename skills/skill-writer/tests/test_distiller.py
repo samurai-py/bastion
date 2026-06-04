@@ -1,4 +1,8 @@
-"""Tests for distiller.py (D-04/D-05/SKWR-06)."""
+"""Tests for distiller.py (D-04/D-05/SKWR-06).
+
+CR-03 fix: is_distillation_candidate gates on step count alone.
+memupalace_search_fn parameter removed — no search injection required.
+"""
 from __future__ import annotations
 
 import json
@@ -7,65 +11,66 @@ from pathlib import Path
 import pytest
 
 
-def _search_returns_result(query, wing, limit):
-    return [{"id": "abc", "content": "file search + parse + validate + write"}]
-
-
-def _search_returns_empty(query, wing, limit):
-    return []
-
-
-def _search_raises(query, wing, limit):
-    raise RuntimeError("memupalace down")
-
-
 class TestIsDistillationCandidate:
+    """CR-03 fix: step-count-only gate, no memupalace dependency."""
+
+    def test_zero_steps_returns_false(self):
+        from distiller import MIN_STEPS, is_distillation_candidate
+
+        ok, reason = is_distillation_candidate([])
+        assert ok is False
+        assert "0" in reason
+        assert str(MIN_STEPS) in reason
+
     def test_too_few_steps_returns_false(self):
         from distiller import MIN_STEPS, is_distillation_candidate
 
-        short = ["tool_a", "tool_b"]
-        ok, reason = is_distillation_candidate(short, _search_returns_result)
+        short = ["tool_a", "tool_b", "tool_c"]
+        ok, reason = is_distillation_candidate(short)
         assert ok is False
         assert str(MIN_STEPS) in reason
 
-    def test_enough_steps_but_no_similar_returns_false(self):
-        from distiller import is_distillation_candidate
-
-        calls = ["tool_a", "tool_b", "tool_c", "tool_d"]
-        ok, reason = is_distillation_candidate(calls, _search_returns_empty)
-        assert ok is False
-        assert "similar" in reason.lower()
-
-    def test_candidate_with_enough_steps_and_similar_found(self):
-        from distiller import is_distillation_candidate
-
-        calls = ["tool_a", "tool_b", "tool_c", "tool_d", "tool_e"]
-        ok, reason = is_distillation_candidate(calls, _search_returns_result)
-        assert ok is True
-        assert "Recurrent" in reason
-
-    def test_search_exception_returns_false_not_raises(self):
-        from distiller import is_distillation_candidate
-
-        calls = ["tool_a", "tool_b", "tool_c", "tool_d"]
-        ok, reason = is_distillation_candidate(calls, _search_raises)
-        assert ok is False
-        assert "failed" in reason.lower()
-
-    def test_exactly_min_steps_with_similar_is_candidate(self):
+    def test_exactly_min_steps_returns_true(self):
         from distiller import MIN_STEPS, is_distillation_candidate
 
         calls = [f"tool_{i}" for i in range(MIN_STEPS)]
-        ok, reason = is_distillation_candidate(calls, _search_returns_result)
+        ok, reason = is_distillation_candidate(calls)
+        assert ok is True
+        assert str(MIN_STEPS) in reason
+
+    def test_more_than_min_steps_returns_true(self):
+        from distiller import MIN_STEPS, is_distillation_candidate
+
+        calls = [f"tool_{i}" for i in range(MIN_STEPS + 2)]
+        ok, reason = is_distillation_candidate(calls)
         assert ok is True
 
     def test_reason_contains_step_count_when_candidate(self):
         from distiller import is_distillation_candidate
 
-        calls = ["a", "b", "c", "d", "e"]
-        ok, reason = is_distillation_candidate(calls, _search_returns_result)
+        calls = ["a", "b", "c", "d", "e", "f"]
+        ok, reason = is_distillation_candidate(calls)
         assert ok is True
-        assert "5" in reason
+        assert "6" in reason
+
+    def test_no_memupalace_parameter(self):
+        """Verify the function signature accepts exactly one argument (CR-03 fix)."""
+        import inspect
+        from distiller import is_distillation_candidate
+
+        sig = inspect.signature(is_distillation_candidate)
+        assert len(sig.parameters) == 1, (
+            f"is_distillation_candidate should have 1 param, got {list(sig.parameters)}"
+        )
+
+    def test_does_not_require_memupalace(self):
+        """No memupalace search fn — always reachable with enough steps."""
+        from distiller import is_distillation_candidate
+
+        # Calling with only tool_calls (no second arg) must not raise
+        calls = ["a", "b", "c", "d"]
+        ok, reason = is_distillation_candidate(calls)
+        assert ok is True
 
 
 class TestEnqueuePending:
