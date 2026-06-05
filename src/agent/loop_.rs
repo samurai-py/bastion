@@ -321,16 +321,35 @@ impl AgentLoop {
                                             _ => None,
                                         })
                                         .collect();
-                                if normals.len() < 2 {
+                                let skills_base = std::path::Path::new(&skills_dir);
+                                // Strip the shared skills-base prefix and keep the FULL relative
+                                // remainder (e.g. "personas/<slug>/<name>/SKILL.md" for private
+                                // skills). Taking only the last two components would drop the
+                                // personas/<slug>/ segment and rescan the wrong slot (WR-01).
+                                let base_norm_count = skills_base
+                                    .components()
+                                    .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                                    .count();
+                                let tail_components: Vec<std::path::PathBuf> =
+                                    if normals.len() > base_norm_count {
+                                        normals[base_norm_count..].to_vec()
+                                    } else {
+                                        normals.clone()
+                                    };
+                                // Require the reload target to be <name>/SKILL.md (at least two
+                                // components, ending in SKILL.md) — guards the format coupling.
+                                let last_is_skill_md = tail_components
+                                    .last()
+                                    .and_then(|p| p.to_str())
+                                    == Some("SKILL.md");
+                                if tail_components.len() < 2 || !last_is_skill_md {
                                     tracing::warn!(
                                         event = "skill_reload_rejected",
                                         raw_path = %raw_path,
-                                        reason = "fewer than two normal path components"
+                                        reason = "path does not resolve to <name>/SKILL.md under SKILLS_DIR"
                                     );
                                 } else {
-                                    let tail: std::path::PathBuf =
-                                        normals[normals.len() - 2..].iter().collect();
-                                    let skills_base = std::path::Path::new(&skills_dir);
+                                    let tail: std::path::PathBuf = tail_components.iter().collect();
                                     let local_path = skills_base.join(&tail);
                                     // Defense in depth: Normal-only components cannot escape
                                     // skills_base lexically, but a symlink planted inside

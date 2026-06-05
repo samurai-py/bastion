@@ -374,6 +374,11 @@ def skill_list(scope: str = "global", persona_slug: str | None = None) -> list[d
         # Skip .versions/ snapshots
         if ".versions" in skill_md.parts:
             continue
+        # Global scope must not leak persona-private skills (rglob from SKILLS_DIR
+        # would otherwise descend into personas/<slug>/). Private scope sets base
+        # to personas/<slug> directly, so this filter only applies to global.
+        if scope != "private" and "personas" in skill_md.parts:
+            continue
         skills.append({"path": str(skill_md), "name": skill_md.parent.name})
     return skills
 

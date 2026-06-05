@@ -15,7 +15,7 @@ import os
 from fastmcp import FastMCP
 
 from skills.memupalace import query_sanitizer
-from skills.memupalace.factory import Memupalace, _create_memupalace_with_embedder
+from skills.memupalace.factory import Memupalace
 from skills.memupalace.insight_cache import InsightCache
 from skills.memupalace.models import MemupalaceSettings
 

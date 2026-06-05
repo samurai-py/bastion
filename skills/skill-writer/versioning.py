@@ -4,6 +4,7 @@ Users never interact with .versions/ directly — rollback via natural language.
 """
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import logging
 from datetime import UTC, date, datetime, timedelta
@@ -11,6 +12,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+# Flush in-flight snapshot writes on interpreter shutdown so a SIGTERM mid-edit
+# doesn't silently drop the pre-edit version (IN-02).
+atexit.register(_executor.shutdown, wait=True)
 
 VERSIONS_DIR = ".versions"
 SNAPSHOT_PREFIX = "SKILL.md."
@@ -106,6 +110,9 @@ def rollback_to_date(skill_path: Path, date_hint: str) -> str | None:
         logger.warning("versioning.rollback: no snapshot <= %s for %s", target_date, skill_path)
         return None
 
+    # Snapshot the CURRENT state before overwriting it, so a rollback is itself
+    # reversible (mirrors skill_create/skill_edit, which always snapshot first).
+    snapshot(skill_path)
     try:
         skill_path.write_text(best.read_text(encoding="utf-8"), encoding="utf-8")
         logger.info("versioning.rollback: restored %s from %s", skill_path, best.name)
