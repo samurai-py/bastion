@@ -18,8 +18,23 @@ atexit.register(_executor.shutdown, wait=True)
 
 VERSIONS_DIR = ".versions"
 SNAPSHOT_PREFIX = "SKILL.md."
-# Timestamp format — sortable, UTC
-_TS_FMT = "%Y%m%dT%H%M%SZ"
+# Timestamp format — sortable, UTC. Microsecond resolution so two snapshots in the
+# same clock second (e.g. snapshot-before-rollback) get distinct, lexically-sortable
+# filenames instead of colliding and silently dropping history.
+_TS_FMT = "%Y%m%dT%H%M%S.%fZ"
+# Legacy second-resolution format — still parsed for snapshots written before the
+# microsecond bump, so old history stays visible to rollback.
+_TS_FMT_LEGACY = "%Y%m%dT%H%M%SZ"
+
+
+def _parse_snapshot_ts(ts_str: str) -> datetime | None:
+    """Parse a snapshot timestamp, tolerating both current and legacy formats."""
+    for fmt in (_TS_FMT, _TS_FMT_LEGACY):
+        try:
+            return datetime.strptime(ts_str, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
 
 
 def snapshot(skill_path: Path) -> None:
@@ -97,14 +112,13 @@ def rollback_to_date(skill_path: Path, date_hint: str) -> str | None:
     target_dt = datetime.combine(target_date, datetime.max.time()).replace(tzinfo=UTC)
     best: Path | None = None
     for snap in reversed(snaps):  # newest first
-        try:
-            ts_str = snap.name[len(SNAPSHOT_PREFIX):]
-            snap_dt = datetime.strptime(ts_str, _TS_FMT).replace(tzinfo=UTC)
-            if snap_dt <= target_dt:
-                best = snap
-                break
-        except ValueError:
+        ts_str = snap.name[len(SNAPSHOT_PREFIX):]
+        snap_dt = _parse_snapshot_ts(ts_str)
+        if snap_dt is None:
             continue
+        if snap_dt <= target_dt:
+            best = snap
+            break
 
     if best is None:
         logger.warning("versioning.rollback: no snapshot <= %s for %s", target_date, skill_path)
