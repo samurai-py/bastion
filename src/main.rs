@@ -38,12 +38,20 @@ async fn main() -> anyhow::Result<()> {
     // Load .env (if present) before any std::env::var read. Real shell env wins.
     dotenvy::dotenv().ok();
 
-    // Init structured JSON logging to .bastion/bastion.log
-    std::fs::create_dir_all(".bastion")?;
+    // Load bastion.toml config (non-secret config only; secrets stay in .env)
+    let config_path = std::env::var("BASTION_CONFIG").unwrap_or_else(|_| "bastion.toml".to_owned());
+    let cfg = bastion::config::load_config(&config_path)?;
+
+    // Init structured JSON logging
+    std::fs::create_dir_all(
+        std::path::Path::new(&cfg.logging.log_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".bastion"))
+    )?;
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(std::env::var("BASTION_LOG").unwrap_or_else(|_| ".bastion/bastion.log".into()))?;
+        .open(&cfg.logging.log_path)?;
 
     fmt()
         .json()
@@ -54,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Init SessionManager
-    let db_path = std::env::var("BASTION_DB").unwrap_or_else(|_| ".bastion/sessions.db".into());
+    let db_path = cfg.session.db_path.clone();
     let session = SessionManager::new(&db_path);
     session.init_schema().await?;
 
@@ -73,18 +81,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Init MCP client — connect_all handles missing/failed servers gracefully:
     // logs tracing::warn per failed server and continues; missing config returns Ok(empty registry).
+    // bastion.toml [mcp.servers.*] replaces .bastion/mcp-servers.json (D-09).
     let mcp_client = McpClient::connect_all(".bastion/mcp-servers.json").await?;
 
-    // Init provider from env var or default model
-    let default_model = std::env::var("BASTION_DEFAULT_MODEL")
-        .unwrap_or_else(|_| "claude-sonnet-4-5".to_owned());
+    // Init provider from config (default_model from bastion.toml, overridable via env BASTION__AGENT__DEFAULT_MODEL)
+    let default_model = cfg.agent.default_model.clone();
     let provider: bastion::provider::SharedProvider =
         Arc::new(RwLock::new(resolve_provider(&default_model)?));
 
-    let daily_budget = std::env::var("DAILY_BUDGET_USD")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(5.0);
+    let daily_budget = cfg.agent.daily_budget_usd;
 
     // Init persona registry (load from "./personas/" directory; empty if missing — PERS-07)
     let registry = PersonaRegistry::load_dir(".").await?;
