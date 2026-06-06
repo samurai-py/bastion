@@ -25,7 +25,7 @@ EXPOSE 8002
 ENV SKILL_WRITER_PORT=8002
 ENV SKILLS_DIR=/skills
 ENV SKILL_WRITER_PENDING_FILE=/data/pending_distillations.jsonl
-ENV CORE_GATEWAY_URL=http://openclaw:3000/api/infer
+ENV CORE_GATEWAY_URL=http://core:3000/api/infer
 ENV MEMUPALACE_URL=http://memupalace:8001/mcp
 
 CMD ["python", "mcp_server.py"]
