@@ -1,30 +1,53 @@
 //! Integration tests for bastion.toml + env-override config loading (PKG-04).
-//! Wave 0 stubs — all tests marked ignored until bastion.toml loader is implemented (Wave 3).
 
 #[test]
-#[ignore = "Wave 3: bastion.toml loader not yet implemented"]
 fn config_layering_toml_default_loaded() {
-    // Assert: load_config("bastion.toml") returns BastionConfig with agent.default_model = "claude-sonnet-4-5"
-    todo!()
+    // Ensure override env var is not set for this test
+    std::env::remove_var("BASTION__AGENT__DEFAULT_MODEL");
+    let cfg = bastion::config::load_config("bastion.toml")
+        .expect("bastion.toml must exist at repo root");
+    assert_eq!(cfg.agent.default_model, "claude-sonnet-4-5");
+    assert!(cfg.agent.daily_budget_usd > 0.0);
 }
 
 #[test]
-#[ignore = "Wave 3: bastion.toml loader not yet implemented"]
 fn config_layering_env_overrides_toml() {
-    // Assert: BASTION__AGENT__DEFAULT_MODEL=test-model overrides toml value
-    todo!()
+    // Set env var override before loading
+    std::env::set_var("BASTION__AGENT__DEFAULT_MODEL", "test-model-override");
+    let cfg = bastion::config::load_config("bastion.toml")
+        .expect("bastion.toml must exist at repo root");
+    let model = cfg.agent.default_model.clone();
+    // Clean up immediately
+    std::env::remove_var("BASTION__AGENT__DEFAULT_MODEL");
+    assert_eq!(model, "test-model-override");
 }
 
 #[test]
-#[ignore = "Wave 3: bastion.toml loader not yet implemented"]
 fn config_layering_mcp_servers_folded_in() {
-    // Assert: config.mcp.servers["memupalace"].url == "http://memupalace:8001/mcp"
-    todo!()
+    let cfg = bastion::config::load_config("bastion.toml")
+        .expect("bastion.toml must exist at repo root");
+    assert!(
+        cfg.mcp.servers.contains_key("memupalace"),
+        "Expected 'memupalace' in mcp.servers, got: {:?}",
+        cfg.mcp.servers.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(cfg.mcp.servers["memupalace"].url, "http://memupalace:8001/mcp");
 }
 
 #[test]
-#[ignore = "Wave 3: bastion.toml loader not yet implemented"]
 fn config_layering_secrets_not_in_toml() {
-    // Assert: bastion.toml content does not contain ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN
-    todo!()
+    let content = std::fs::read_to_string("bastion.toml")
+        .expect("bastion.toml must exist at repo root");
+    assert!(
+        !content.contains("ANTHROPIC_API_KEY"),
+        "bastion.toml must not contain ANTHROPIC_API_KEY"
+    );
+    assert!(
+        !content.contains("TELEGRAM_BOT_TOKEN"),
+        "bastion.toml must not contain TELEGRAM_BOT_TOKEN"
+    );
+    assert!(
+        !content.contains("BASTION_INFER_TOKEN"),
+        "bastion.toml must not contain BASTION_INFER_TOKEN"
+    );
 }
