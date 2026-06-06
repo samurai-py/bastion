@@ -51,10 +51,12 @@ impl Capability for DirectFnAdapter {
 /// Wraps a command router entry (slash commands: /stop, /model, /as, etc.)
 ///
 /// NAMING CONTRACT: NlCommandAdapter is registered under the key "cmd:{command_name}"
-/// (e.g. "cmd:model", "cmd:stop"). The `name()` method returns this prefixed form so
-/// that `registry.invoke` can detect it via `cap.name().starts_with("cmd:")` and route
-/// it to the "ollama" egress short-circuit (NL commands are local — they never send
-/// data to a cloud provider).
+/// (e.g. "cmd:model", "cmd:stop"). The "cmd:" prefix is a *registry-key convention* only.
+///
+/// SECURITY: the egress short-circuit is keyed on `is_local()` (a typed property of this
+/// adapter), NOT on the name string. The `cmd:` namespace is reserved — `register()` rejects
+/// any non-local capability that tries to claim it, so an MCP tool cannot impersonate a
+/// local command to bypass egress (D-13 guardrail 3).
 ///
 /// Store `command_name` as "cmd:model" (with prefix), NOT as bare "model".
 /// Use `NlCommandAdapter::registry_key(bare)` to build the prefixed form.
@@ -85,10 +87,13 @@ impl NlCommandAdapter {
 
 #[async_trait]
 impl Capability for NlCommandAdapter {
-    /// Returns "cmd:{command_name}" — MUST have "cmd:" prefix for egress short-circuit.
+    /// Returns "cmd:{command_name}" — the reserved registry-key convention.
     fn name(&self) -> &str { &self.command_name }
     fn description(&self) -> &str { &self.cap_description }
     fn input_schema(&self) -> &Value { &self.schema }
+    /// NL commands execute locally via handle_command — they never send data to a cloud
+    /// provider, so they are the only adapter type that opts into the local egress path.
+    fn is_local(&self) -> bool { true }
     async fn invoke(&self, _args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
         // NL commands are dispatched via existing handle_command in src/agent/command.rs.
         // This adapter is a thin shim for registry routing — actual execution happens in AgentLoop.

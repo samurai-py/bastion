@@ -19,6 +19,16 @@ pub trait Capability: Send + Sync {
     fn description(&self) -> &str;
     fn input_schema(&self) -> &Value;
     async fn invoke(&self, args: Value, ctx: &InvokeCtx) -> anyhow::Result<Value>;
+
+    /// Whether this capability executes entirely locally (no data leaves the host).
+    ///
+    /// SECURITY (D-13 guardrail 3): the egress policy keys on THIS typed property,
+    /// never on the capability's `name()` string. The default is `false` (treated as
+    /// external → LocalOnly tier blocks it, fail-closed). Only adapters that are local
+    /// by construction (NlCommandAdapter) override this to `true`. A remote MCP server
+    /// cannot opt into the local short-circuit by naming its tool `cmd:*` — locality is
+    /// a property of the adapter TYPE, not a forgeable string.
+    fn is_local(&self) -> bool { false }
 }
 
 /// Unified capability registry.
@@ -34,8 +44,27 @@ impl CapabilityRegistry {
         Self { inner: HashMap::new() }
     }
 
-    pub fn register(&mut self, cap: Arc<dyn Capability>) {
-        self.inner.insert(cap.name().to_owned(), cap);
+    /// Register a capability under its `name()`.
+    ///
+    /// SECURITY: rejects two impersonation vectors (D-13 guardrail):
+    /// 1. A non-local capability claiming the reserved `cmd:` namespace — only
+    ///    `is_local()` capabilities (NL commands) may use `cmd:` keys, so a remote
+    ///    MCP tool named `cmd:exfil` cannot acquire the local egress short-circuit.
+    /// 2. Overwriting an existing key — a later registration cannot shadow/impersonate
+    ///    an already-registered built-in capability.
+    pub fn register(&mut self, cap: Arc<dyn Capability>) -> anyhow::Result<()> {
+        let name = cap.name();
+        if name.starts_with("cmd:") && !cap.is_local() {
+            anyhow::bail!(
+                "capability '{}' uses the reserved 'cmd:' namespace but is not a local NL command — refusing to register",
+                name
+            );
+        }
+        if self.inner.contains_key(name) {
+            anyhow::bail!("capability '{}' is already registered — refusing to overwrite", name);
+        }
+        self.inner.insert(name.to_owned(), cap);
+        Ok(())
     }
 
     pub fn list_names(&self) -> Vec<&str> {
@@ -61,25 +90,24 @@ impl CapabilityRegistry {
         let cap = self.inner.get(name)
             .ok_or_else(|| anyhow::anyhow!("unknown capability: {}", name))?;
 
-        // Policy 1: egress check
-        // NlCommandAdapters are local (no egress) — they register under "cmd:" prefix.
-        // "cmd:" prefix → use "ollama" as provider_name → always passes check_egress.
-        // This is correct: NL commands never send data to cloud providers.
-        // MCP tools and DirectFn adapters use "external" — LocalOnly blocks them.
-        let provider_for_policy = if cap.name().starts_with("cmd:") {
-            "ollama"  // NL commands are local — always pass egress check
-        } else {
-            // MCP tools and DirectFn: use "external" so LocalOnly tier blocks them.
-            // check_egress(Some(LocalOnly), "external") → Err(PrivacyEgressBlocked)
-            // check_egress(Some(CloudOk), "external") → Ok(())
-            "external"
-        };
+        // Policy 1: egress check.
+        // Locality is a TYPED property of the adapter (`is_local()`), NEVER derived from
+        // the capability name string — a remote MCP server could otherwise forge a `cmd:`
+        // name to acquire the local short-circuit (D-13 guardrail 3). Local capabilities
+        // (NL commands) map to "ollama" (always passes); everything else maps to "external"
+        // so LocalOnly / None tiers are blocked fail-closed.
+        let provider_for_policy = if cap.is_local() { "ollama" } else { "external" };
         crate::hooks::egress::check_egress(ctx.privacy_tier, provider_for_policy)?;
 
-        // Policy 2: approval gate (Phase 3 queue wiring — currently no-op stub)
+        // Policy 2: approval gate. Fail-closed until the Phase 3 approval queue is wired.
+        // The documented invariant is "no call path bypasses the approval queue"; logging
+        // and proceeding would silently violate it. When the queue lands in Phase 3, replace
+        // this bail with the actual await on the queue.
         if ctx.needs_approval {
-            // TODO Phase 3: gate on approval_queue
-            tracing::debug!(event = "approval_gate_noop", capability = %name);
+            anyhow::bail!(
+                "capability '{}' requires approval but the approval queue is not yet available (Phase 3) — denying fail-closed",
+                name
+            );
         }
 
         // Dispatch
