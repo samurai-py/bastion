@@ -1,94 +1,52 @@
-services:
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: bastion-ollama
-  #   restart: unless-stopped
-  #   ports:
-  #     - "11434:11434"
-  #   volumes:
-  #     - ./ollama_data:/root/.ollama
-  # Se você tiver GPU NVIDIA e o nvidia-container-toolkit instalado, descomente o bloco abaixo:
-  # deploy:
-  #   resources:
-  #     reservations:
-  #       devices:
-  #         - driver: nvidia
-  #           count: all
-  #           capabilities: [ gpu ]
+# docker-compose.yml — Bastion v3
+# D-04: Two-network split — core on bastion-net + egress-net; Python servers on bastion-net only
+# D-06: core service built FROM scratch (Dockerfile in repo root)
+# D-07: Caddy dropped — Telegram long-polling only (no public ingress)
 
-  openclaw:
+services:
+  # ── Rust core ─────────────────────────────────────────────────────────────
+  core:
     build: .
-    container_name: bastion-openclaw
+    image: bastion-core:latest
+    container_name: bastion-core
     restart: unless-stopped
-    # Run as host user so all written files are owned by the installer user (no sudo chown needed)
+    # Non-root user (PKG-08) — FROM scratch has no chown script; UID/GID set here.
+    # First write creates sessions.db owned by this UID — no manual chmod needed.
     user: "${BASTION_UID:-1000}:${BASTION_GID:-1000}"
-    # Mapeamentos profundos para satisfazer o app do OpenClaw
-    ports:
-      - "127.0.0.1:18789:18789"
-      - "127.0.0.1:18791:18791"
-      - "127.0.0.1:18792:18792"
-      - "127.0.0.1:18793:18793"
-      - "127.0.0.1:18794:18794"
-    volumes:
-      - ./config:/home/node/.openclaw:rw
-      - ./skills:/skills:ro
-      - ./db:/home/node/.openclaw/workspace/db:rw
-      - ./personas:/home/node/.openclaw/workspace/personas:rw
-      - ./SOUL.md:/home/node/.openclaw/workspace/SOUL.md:ro
-      - ./USER.md:/home/node/.openclaw/workspace/USER.md:rw
-      - ./AGENTS.md:/home/node/.openclaw/workspace/AGENTS.md:ro
-      - ./HEARTBEAT.md:/home/node/.openclaw/workspace/HEARTBEAT.md:ro
-      - ${HOME}/.openclaw/extensions:/home/node/.openclaw/extensions:ro
-      - tmp:/tmp:rw
-    env_file: .env
     networks:
-      - bastion-net
+      - bastion-net    # reaches memupalace, skill-writer, self-improving
+      - egress-net     # reaches Anthropic, OpenAI, Telegram APIs (D-04)
+    volumes:
+      - bastion-data:/bastion-data                # sessions.db + bastion.log
+      - ./personas:/personas:ro                   # SOUL.md files (D-02: bind-mount, no copy)
+      - ./skills:/skills:ro                       # SKILL.md files (read-only)
+      - ./bastion.toml:/bastion.toml:ro           # non-secret config (D-09)
     environment:
-      # MCP server URLs for Rust core McpClient (bastion-net internal hostnames)
-      - MEMUPALACE_URL=http://memupalace:8001/mcp
-      - SKILL_WRITER_URL=http://skill-writer:8002/mcp
-      - SELF_IMPROVING_URL=http://self-improving:8003/mcp
-      # SEC: bind infer gateway on all interfaces within bastion-net (not loopback)
-      # Python containers call http://openclaw:3000/api/infer — port stays internal, NOT published to host
+      - BASTION_CONFIG=/bastion.toml
       - BASTION_INFER_ADDR=0.0.0.0:3000
-      # SEC: shared secret — Python containers send Authorization: Bearer <token>
-      # Define BASTION_INFER_TOKEN in .env (never hardcode here)
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
-      - SKILLS_DIR=/skills
+    env_file: .env
     depends_on:
       memupalace:
         condition: service_healthy
-    # ── Ollama Local Setup (Gemma2 27B) ──────────────────────────────
-    # Para usar o Ollama local, altere as APIs no seu .env:
-    # LLM_PROVIDER: "openai"
-    # OPENAI_BASE_URL: "http://ollama:11434/v1"
-    # AGENT_MODEL: "gemma2:27b"
-    # ────────────────────────────────────────────────────────────────
-    # depends_on:
-    #   - ollama
+      skill-writer:
+        condition: service_healthy
+      self-improving:
+        condition: service_healthy
+    # No healthcheck — FROM scratch has no shell; process liveness is sufficient
 
-  caddy:
-    image: caddy:alpine
-    restart: unless-stopped
-    ports:
-      - "443:443"
-      - "80:80"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-    depends_on: [ openclaw ]
-
-  # ── Bastion v3: Python MCP Skill Servers ──────────────────────────────────
-  # Each container runs on bastion-net (internal=true, zero egress to internet — D-02)
-  # NO Python container ports are published to the host — internal communication only.
+  # ── Python MCP Servers ────────────────────────────────────────────────────
+  # All Python servers: bastion-net ONLY (internal: true) — zero internet egress (D-04)
+  # CORE_GATEWAY_URL: all Python servers call http://core:3000/api/infer (D-04)
 
   memupalace:
     build: skills/memupalace
+    image: bastion-memupalace:latest
     container_name: bastion-memupalace
     restart: unless-stopped
     user: "1001:1001"
     networks:
-      - bastion-net
+      - bastion-net    # ONLY — zero egress invariant (D-02/D-04)
     volumes:
       - memupalace-data:/db/memupalace
       - onnx-models:/models:ro
@@ -97,37 +55,36 @@ services:
       - MEMUPALACE_CHROMA_PATH=/db/memupalace/chroma
       - MEMUPALACE_ONNX_MODEL_PATH=/models/model_quantized.onnx
       - MEMUPALACE_TOKENIZER_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-      # SEC: callback to core gateway — token required by hardened /api/infer (plan 03-00)
-      - CORE_GATEWAY_URL=http://openclaw:3000/api/infer
+      # SEC: callback to core gateway — Bearer token required (D-04)
+      - CORE_GATEWAY_URL=http://core:3000/api/infer
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
     healthcheck:
-      # TCP liveness — fastmcp /mcp returns 406 to a plain GET (needs Accept:
-      # text/event-stream), so an HTTP GET probe false-fails. Port open = alive.
+      # TCP liveness — fastmcp /mcp returns 406 to a plain GET; port open = alive.
       test: ["CMD", "python", "-c",
              "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('localhost',8001)))"]
       interval: 10s
       timeout: 5s
       start_period: 30s
       retries: 3
-    # Zero external ports — D-02: memupalace is local-safe, internal network only (T-03-06-02)
 
   skill-writer:
     build: skills/skill-writer
+    image: bastion-skill-writer:latest
     container_name: bastion-skill-writer
     restart: unless-stopped
     user: "1001:1001"
     networks:
-      - bastion-net
+      - bastion-net    # ONLY — zero egress invariant (D-04)
     volumes:
-      - ./skills:/skills
+      - ./skills:/skills    # rw: skill-writer creates SKILL.md files
       - skill-writer-data:/data
     environment:
       - SKILL_WRITER_PORT=8002
       - SKILLS_DIR=/skills
       - SKILL_WRITER_PENDING_FILE=/data/pending_distillations.jsonl
       - MEMUPALACE_URL=http://memupalace:8001/mcp
-      # SEC: callback to core gateway — Bearer token required (plan 03-00 hardening)
-      - CORE_GATEWAY_URL=http://openclaw:3000/api/infer
+      # SEC: callback to core gateway — Bearer token required (D-04)
+      - CORE_GATEWAY_URL=http://core:3000/api/infer
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
     depends_on:
       memupalace:
@@ -143,11 +100,12 @@ services:
 
   self-improving:
     build: skills/self-improving
+    image: bastion-self-improving:latest
     container_name: bastion-self-improving
     restart: unless-stopped
     user: "1001:1001"
     networks:
-      - bastion-net
+      - bastion-net    # ONLY — zero egress invariant (D-04)
     volumes:
       - ./skills:/skills:ro    # read-only — D-10: SELF never writes skills (T-03-06-04)
       - self-improving-data:/data
@@ -156,8 +114,8 @@ services:
       - SKILLS_DIR=/skills
       - SELF_SUGGESTIONS_FILE=/data/suggestions.jsonl
       - MEMUPALACE_URL=http://memupalace:8001/mcp
-      # SEC: callback to core gateway — Bearer token required (plan 03-00 hardening)
-      - CORE_GATEWAY_URL=http://openclaw:3000/api/infer
+      # SEC: callback to core gateway — Bearer token required (D-04)
+      - CORE_GATEWAY_URL=http://core:3000/api/infer
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
     depends_on:
       memupalace:
@@ -171,15 +129,18 @@ services:
       start_period: 15s
       retries: 3
 
+# ── Networks ────────────────────────────────────────────────────────────────
 networks:
   bastion-net:
     driver: bridge
-    internal: true   # D-02: zero egress to internet from this network (T-03-06-01)
+    internal: true     # D-02/D-04: Python MCP servers cannot reach internet
+  egress-net:
+    driver: bridge     # internet-capable; only core attaches here (D-04)
 
+# ── Volumes ─────────────────────────────────────────────────────────────────
 volumes:
-  caddy_data:
-  tmp:
-  memupalace-data:
-  onnx-models:
-  skill-writer-data:
-  self-improving-data:
+  bastion-data:          # core: sessions.db + bastion.log
+  memupalace-data:       # memupalace: KG + embeddings
+  onnx-models:           # memupalace: ONNX model files (read-only)
+  skill-writer-data:     # skill-writer: internal state
+  self-improving-data:   # self-improving: analysis data

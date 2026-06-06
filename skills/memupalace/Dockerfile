@@ -35,7 +35,7 @@ ENV MEMUPALACE_PORT=8001
 ENV MEMUPALACE_CHROMA_PATH=/db/memupalace/chroma
 ENV MEMUPALACE_ONNX_MODEL_PATH=/models/model_quantized.onnx
 ENV MEMUPALACE_TOKENIZER_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-ENV CORE_GATEWAY_URL=http://openclaw:3000/api/infer
+ENV CORE_GATEWAY_URL=http://core:3000/api/infer
 ENV PYTHONPATH=/app
 
 CMD ["python", "-m", "skills.memupalace.mcp_server"]
