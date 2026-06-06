@@ -45,3 +45,10 @@ rstest       = "0.25"
 [[test]]
 name = "evals"
 path = "tests/evals/mod.rs"
+
+[profile.release]
+opt-level     = "z"   # size-optimize (not speed)
+lto           = true  # link-time optimization (fat LTO — best size)
+codegen-units = 1     # single codegen unit — slower build, better LTO
+panic         = "abort" # no stack unwind tables (~10% size reduction)
+strip         = true  # strip symbols from final binary
