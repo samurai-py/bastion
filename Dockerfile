@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Bastion v3 — Multi-stage FROM scratch build (PKG-01, PKG-03, D-06)
+# Bastion v3 — Multi-stage static build, scratch final image (PKG-01, PKG-03, D-06)
 # Stage 1: builder — rust:alpine + musl toolchain
 # Stage 2: scratch image — zero OS overhead, static binary only
 #
@@ -19,7 +19,7 @@ RUN apk add --no-cache musl-dev gcc ca-certificates
 RUN rustup target add x86_64-unknown-linux-musl
 
 # Force a fully static binary (crt-static): rusqlite's bundled C otherwise links
-# dynamically against the host C runtime, which breaks FROM scratch.
+# dynamically against the host C runtime, which breaks the scratch image.
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 
 WORKDIR /build
@@ -49,7 +49,7 @@ RUN OUTPUT=$(ldd target/x86_64-unknown-linux-musl/release/bastion 2>&1 || true);
 FROM scratch
 
 # SSL certificates required for HTTPS (Anthropic, OpenAI, Telegram long-poll).
-# FROM scratch has no cert store — must be copied explicitly.
+# The scratch image has no cert store — must be copied explicitly.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # The static binary — the only executable in the image besides the cert bundle.
