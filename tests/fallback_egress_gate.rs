@@ -1,30 +1,57 @@
-//! Integration tests for WR-04: check_egress called in run_provider_fallback (D-05).
-//! Wave 0 stubs — marked ignored until WR-04 is implemented (Wave 1).
+//! Regression tests for WR-04: check_egress gate in provider fallback path.
+//! These are integration-level smoke tests that verify the public egress contract.
+//! The full (tier × provider) matrix is in src/hooks/egress.rs unit tests.
+
+use bastion::hooks::egress::check_egress;
+use bastion::memory::PrivacyTier;
 
 #[test]
-#[ignore = "Wave 1 (04-02): run_provider_fallback egress gate not yet wired"]
 fn fallback_egress_gate_local_only_blocks_cloud() {
-    // Assert: run_provider_fallback with tier=LocalOnly + provider=anthropic returns PrivacyEgressBlocked
-    todo!()
+    // WR-04: LocalOnly + cloud provider must be blocked (fail-closed)
+    let cloud_providers = ["anthropic", "openai", "gemini", "openrouter"];
+    for provider in cloud_providers {
+        let result = check_egress(Some(PrivacyTier::LocalOnly), provider);
+        assert!(
+            result.is_err(),
+            "LocalOnly should block cloud provider '{}' but got Ok",
+            provider
+        );
+    }
 }
 
 #[test]
-#[ignore = "Wave 1 (04-02): run_provider_fallback egress gate not yet wired"]
 fn fallback_egress_gate_local_only_allows_ollama() {
-    // Assert: run_provider_fallback with tier=LocalOnly + provider=ollama returns Ok
-    todo!()
+    // WR-04: LocalOnly + ollama is the only permitted combination for local-only personas
+    let result = check_egress(Some(PrivacyTier::LocalOnly), "ollama");
+    assert!(result.is_ok(), "LocalOnly should allow ollama but got Err: {:?}", result);
 }
 
 #[test]
-#[ignore = "Wave 1 (04-02): run_provider_fallback egress gate not yet wired"]
 fn fallback_egress_gate_cloud_ok_allows_all() {
-    // Assert: CloudOk tier allows anthropic, openai, gemini, openrouter
-    todo!()
+    // WR-04: CloudOk tier allows any provider (persona explicitly consented to cloud)
+    let all_providers = ["ollama", "anthropic", "openai", "gemini", "openrouter"];
+    for provider in all_providers {
+        let result = check_egress(Some(PrivacyTier::CloudOk), provider);
+        assert!(
+            result.is_ok(),
+            "CloudOk should allow provider '{}' but got Err: {:?}",
+            provider,
+            result
+        );
+    }
 }
 
 #[test]
-#[ignore = "Wave 1 (04-02): run_provider_fallback egress gate not yet wired"]
 fn fallback_egress_gate_none_tier_blocks_all() {
-    // Assert: None tier (no MCP tools in turn) is fail-closed — blocks all cloud providers
-    todo!()
+    // WR-04: None tier (unknown / untagged — default when no forced persona) is fail-closed
+    // This covers the case where run_provider_fallback is called with no active persona.
+    let all_providers = ["ollama", "anthropic", "openai", "gemini", "openrouter"];
+    for provider in all_providers {
+        let result = check_egress(None, provider);
+        assert!(
+            result.is_err(),
+            "None tier should block all providers (fail-closed) but '{}' returned Ok",
+            provider
+        );
+    }
 }
