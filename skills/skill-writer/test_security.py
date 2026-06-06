@@ -1,6 +1,6 @@
 """
 Regression tests for skill-writer path traversal security fix.
-Wave 0 stubs — tests are marked xfail until Wave 1 (04-01) implements the fix.
+Wave 1 (04-01): xfail markers removed — fix is implemented in mcp_server.py.
 
 Folded todo: .planning/todos/pending/skill-writer-path-traversal.md
 """
@@ -50,7 +50,6 @@ def _import_server():
 # Tests below will xfail until 04-01 implements _safe_segment allowlist.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(reason="Wave 1 (04-01): _safe_segment not yet implemented", strict=False)
 def test_path_traversal_dotdot_rejected():
     """../etc/passwd style slug must be rejected."""
     m = _import_server()
@@ -58,7 +57,6 @@ def test_path_traversal_dotdot_rejected():
         m._safe_segment("../etc/passwd")
 
 
-@pytest.mark.xfail(reason="Wave 1 (04-01): _safe_segment not yet implemented", strict=False)
 def test_path_traversal_absolute_path_rejected():
     """/etc/passwd style absolute path must be rejected."""
     m = _import_server()
@@ -66,7 +64,6 @@ def test_path_traversal_absolute_path_rejected():
         m._safe_segment("/etc/passwd")
 
 
-@pytest.mark.xfail(reason="Wave 1 (04-01): _safe_segment not yet implemented", strict=False)
 def test_valid_slug_accepted():
     """Valid slug 'weekly-review' must pass _safe_segment."""
     m = _import_server()
@@ -74,7 +71,6 @@ def test_valid_slug_accepted():
     assert result == "weekly-review"
 
 
-@pytest.mark.xfail(reason="Wave 1 (04-01): _safe_segment not yet implemented", strict=False)
 def test_skill_path_stays_inside_skills_dir(tmp_path):
     """_skill_path must resolve inside SKILLS_DIR; traversal attempt raises ValueError."""
     import os
@@ -88,7 +84,6 @@ def test_skill_path_stays_inside_skills_dir(tmp_path):
         m._skill_path("../outside")
 
 
-@pytest.mark.xfail(reason="Wave 1 (04-01): _safe_segment not yet implemented", strict=False)
 def test_null_byte_in_slug_rejected():
     """Null byte injection must be rejected."""
     m = _import_server()
@@ -96,7 +91,6 @@ def test_null_byte_in_slug_rejected():
         m._safe_segment("evil\x00slug")
 
 
-@pytest.mark.xfail(reason="Wave 1 (04-01): _safe_segment not yet implemented", strict=False)
 def test_skill_list_no_path_disclosure(tmp_path):
     """skill_list must not expose paths outside SKILLS_DIR."""
     import os
