@@ -37,7 +37,7 @@ def _validate_str(name: str, value: object) -> str:
     return str(value)
 
 
-_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SAFE_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def _safe_segment(value: str) -> str:
@@ -48,7 +48,7 @@ def _safe_segment(value: str) -> str:
     or empty segments survive. Used for BOTH skill names and persona slugs.
     """
     seg = str(value).strip().lower()
-    if not _SEGMENT_RE.match(seg):
+    if not _SAFE_SEGMENT.match(seg):
         raise ValueError(f"invalid path segment: {value!r}")
     return seg
 
@@ -378,6 +378,10 @@ def skill_list(scope: str = "global", persona_slug: str | None = None) -> list[d
         # would otherwise descend into personas/<slug>/). Private scope sets base
         # to personas/<slug> directly, so this filter only applies to global.
         if scope != "private" and "personas" in skill_md.parts:
+            continue
+        # SEC: filter out any skill whose directory name fails the allowlist
+        # (info disclosure guard — only well-formed names are returned).
+        if not _SAFE_SEGMENT.match(skill_md.parent.name):
             continue
         skills.append({"path": str(skill_md), "name": skill_md.parent.name})
     return skills
