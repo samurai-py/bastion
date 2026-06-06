@@ -11,6 +11,7 @@ use crate::persona::PersonaRegistry;
 use crate::goal::GoalEngine;
 use crate::hooks::guardrails::InputGuardrail;
 use crate::hooks::output_validator::OutputValidator;
+use crate::hooks::egress::EgressHook;
 
 const MAX_TOOL_ROUNDS: u32 = 10;
 const DEFAULT_SYSTEM_PROMPT: &str = "You are Bastion, a proactive personal AI assistant.";
@@ -33,6 +34,10 @@ pub struct AgentLoop {
     pub input_guard:       InputGuardrail,
     /// Output-validator — NL contestation detection → belief revocation (HOOK-03).
     pub output_validator:  OutputValidator,
+    /// Egress hook — fail-closed privacy egress check (PRIV-03, WR-04, T-04-02-04).
+    /// Wired here so EgressHook is a live component in the AgentLoop; inline check_egress
+    /// calls in run_provider_fallback and the cabinet path are the primary enforcement.
+    pub egress_hook:       EgressHook,
     /// Pending queue for proactive messages.
     /// Phase 2: consumed by daemon_loop select arm (PROACT-05).
     pub pending_tx:        mpsc::Sender<String>,
@@ -65,6 +70,7 @@ impl AgentLoop {
             goals,
             input_guard: InputGuardrail::default(),
             output_validator: OutputValidator,
+            egress_hook: EgressHook,
             pending_tx,
             pending_rx: Some(pending_rx),
             forced_persona: None,
@@ -231,6 +237,29 @@ impl AgentLoop {
             max_tokens: 4096,
             tools,
         };
+
+        // WR-04: resolve PrivacyTier for this turn before any provider call.
+        // Strategy: use the active persona's tier from registry; default to None (fail-closed).
+        // Tier is resolved from the PersonaRegistry (trusted), NOT from MCP tool results
+        // (untrusted) — T-04-02-03 mitigation.
+        let resolved_tier: Option<crate::memory::PrivacyTier> = {
+            if let Some(ref persona_name) = self.forced_persona {
+                self.registry.get(persona_name).map(|p| p.tier)
+            } else {
+                // No forced persona — None tier is always fail-closed per check_egress contract.
+                None
+            }
+        };
+
+        // WR-04: fail-closed egress gate — mirrors cabinet path (loop_.rs line 159-161, CR-02).
+        // CRITICAL: Do NOT log system/user payload on block (egress.rs invariant).
+        let provider_name_for_egress = self.provider.read().await.name().to_owned();
+        tracing::debug!(
+            event = "fallback_egress_check",
+            tier = ?resolved_tier,
+            provider = %provider_name_for_egress,
+        );
+        crate::hooks::egress::check_egress(resolved_tier, &provider_name_for_egress)?;
 
         // Agentic tool loop with hard round cap (Pitfall 4)
         let mut rounds = 0u32;

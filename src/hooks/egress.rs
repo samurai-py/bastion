@@ -51,11 +51,10 @@ pub fn check_egress(tier: Option<PrivacyTier>, provider_name: &str) -> anyhow::R
 /// at provider dispatch sites (`check_egress` call sites in loop_.rs / api/infer.rs).
 /// Removing inline enforcement would regress PRIV-03. (IN-07)
 ///
-/// Full Hook-trait wiring is planned for Phase 4 (plan 08).
+/// WR-04 / Phase 4 plan 02: EgressHook is now registered in the AgentLoop hook chain.
 ///
 /// CRITICAL: Do NOT log `system` or `user` payloads here when the tier is
 /// LocalOnly — that would itself constitute an egress violation (pitfall 7).
-#[allow(dead_code)]
 pub struct EgressHook;
 
 #[async_trait::async_trait]
