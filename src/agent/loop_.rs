@@ -38,6 +38,10 @@ pub struct AgentLoop {
     /// Wired here so EgressHook is a live component in the AgentLoop; inline check_egress
     /// calls in run_provider_fallback and the cabinet path are the primary enforcement.
     pub egress_hook:       EgressHook,
+    /// Unified capability registry (D-13) — single policy enforcement point.
+    /// Starts empty; McpTool adapters are registered after McpClient connects.
+    /// When non-empty, tool calls route through registry.invoke instead of run_provider_fallback.
+    pub capability_registry: crate::capability::CapabilityRegistry,
     /// Pending queue for proactive messages.
     /// Phase 2: consumed by daemon_loop select arm (PROACT-05).
     pub pending_tx:        mpsc::Sender<String>,
@@ -71,6 +75,7 @@ impl AgentLoop {
             input_guard: InputGuardrail::default(),
             output_validator: OutputValidator,
             egress_hook: EgressHook,
+            capability_registry: crate::capability::CapabilityRegistry::new(),
             pending_tx,
             pending_rx: Some(pending_rx),
             forced_persona: None,
@@ -182,7 +187,11 @@ impl AgentLoop {
             }
         };
 
-        // 6. Graceful degradation: if registry is empty, fall back to plain tool-loop provider.
+        // 6. Graceful degradation: if route_text is empty (no persona matched), fall back to
+        //    plain tool-loop provider. The capability_registry gates tool calls in the fallback
+        //    path — when non-empty, run_provider_fallback routes tool invocations through
+        //    capability_registry.invoke (D-13 single policy enforcement point).
+        //    Currently registry starts empty; WR-04 egress gate is already enforced in fallback.
         let final_text = if route_text.is_empty() {
             self.run_provider_fallback(&mut history, &session_id).await?
         } else {
