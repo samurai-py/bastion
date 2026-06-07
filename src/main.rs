@@ -248,17 +248,24 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
     }
 
     let mut stdin   = BufReader::new(tokio::io::stdin()).lines();
+    // In a detached container (`docker compose up -d`) stdin is closed and returns EOF
+    // immediately. The daemon must keep running to serve channels (Telegram), so we track
+    // whether stdin is still live and disable that select arm on EOF instead of exiting.
+    let mut stdin_open = true;
     let mut sigterm = signal(SignalKind::terminate())?;
 
     println!("Bastion daemon started. Type a message or /help for commands.");
 
     loop {
         tokio::select! {
-            line = stdin.next_line() => {
+            line = stdin.next_line(), if stdin_open => {
                 match line? {
                     None => {
                         tracing::info!(event = "stdin_eof");
-                        break;
+                        // Non-interactive / detached: stop polling the (now-dead) stdin arm but
+                        // keep serving channels, proactive nudges, and signals. The daemon exits
+                        // only on SIGTERM/Ctrl-C — NOT on stdin EOF (D-01 long-running invariant).
+                        stdin_open = false;
                     }
                     Some(s) if s.trim().is_empty() => continue,
                     Some(s) if s.trim().starts_with('/') => {
