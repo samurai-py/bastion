@@ -4,6 +4,31 @@
 # D-07: Caddy dropped — Telegram long-polling only (no public ingress)
 
 services:
+  # ── Volume init (PKG-08) ────────────────────────────────────────────────────
+  # Docker creates named volumes root-owned. core (UID 1000) and the Python servers
+  # (UID 1001) run non-root, and core is FROM scratch (no shell → no runtime chown).
+  # This one-shot busybox sidecar fixes data-volume ownership before the services
+  # start, then exits. Read-only mounts (personas, skills, bastion.toml, onnx-models)
+  # are NOT touched — only writable data volumes.
+  volume-init:
+    image: busybox:stable
+    container_name: bastion-volume-init
+    user: "0:0"
+    network_mode: "none"
+    command:
+      - sh
+      - -c
+      - |
+        chown -R ${BASTION_UID:-1000}:${BASTION_GID:-1000} /bastion-data &&
+        chown -R 1001:1001 /memupalace-data /skill-writer-data /self-improving-data &&
+        echo "volume ownership initialized (core=${BASTION_UID:-1000}:${BASTION_GID:-1000}, python=1001:1001)"
+    volumes:
+      - bastion-data:/bastion-data
+      - memupalace-data:/memupalace-data
+      - skill-writer-data:/skill-writer-data
+      - self-improving-data:/self-improving-data
+    restart: "no"
+
   # ── Rust core ─────────────────────────────────────────────────────────────
   core:
     build: .
@@ -11,7 +36,7 @@ services:
     container_name: bastion-core
     restart: unless-stopped
     # Non-root user (PKG-08) — FROM scratch has no chown script; UID/GID set here.
-    # First write creates sessions.db owned by this UID — no manual chmod needed.
+    # Volume ownership is fixed up-front by the volume-init sidecar (depends_on below).
     user: "${BASTION_UID:-1000}:${BASTION_GID:-1000}"
     networks:
       - bastion-net    # reaches memupalace, skill-writer, self-improving
@@ -27,6 +52,8 @@ services:
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
     env_file: .env
     depends_on:
+      volume-init:
+        condition: service_completed_successfully
       memupalace:
         condition: service_healthy
       skill-writer:
@@ -58,6 +85,9 @@ services:
       # SEC: callback to core gateway — Bearer token required (D-04)
       - CORE_GATEWAY_URL=http://core:3000/api/infer
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
     healthcheck:
       # TCP liveness — fastmcp /mcp returns 406 to a plain GET; port open = alive.
       test: ["CMD", "python", "-c",
@@ -87,6 +117,8 @@ services:
       - CORE_GATEWAY_URL=http://core:3000/api/infer
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
     depends_on:
+      volume-init:
+        condition: service_completed_successfully
       memupalace:
         condition: service_healthy
     healthcheck:
@@ -118,6 +150,8 @@ services:
       - CORE_GATEWAY_URL=http://core:3000/api/infer
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
     depends_on:
+      volume-init:
+        condition: service_completed_successfully
       memupalace:
         condition: service_healthy
     healthcheck:
