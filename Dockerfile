@@ -10,17 +10,20 @@
 FROM rust:alpine AS builder
 
 # musl-dev: musl libc headers; gcc: C compiler for rusqlite's bundled SQLite;
-# ca-certificates: SSL bundle copied into the scratch stage.
+# ca-certificates: SSL bundle copied into the scratch stage;
+# binutils: provides `readelf` for the static-linking gate below.
 # NOTE: `musl-tools` is a Debian package and does NOT exist on Alpine — on
 # rust:alpine the musl target is built with `musl-dev` + `gcc`.
-RUN apk add --no-cache musl-dev gcc ca-certificates
+RUN apk add --no-cache musl-dev gcc ca-certificates binutils
 
 # Register the musl target (static linking target).
 RUN rustup target add x86_64-unknown-linux-musl
 
-# Force a fully static binary (crt-static): rusqlite's bundled C otherwise links
-# dynamically against the host C runtime, which breaks the scratch image.
-ENV RUSTFLAGS="-C target-feature=+crt-static"
+# Force a fully static binary (crt-static). The musl target defaults to crt-static,
+# but the rust:alpine image sets RUSTFLAGS via cargo config / CARGO_ENCODED_RUSTFLAGS,
+# which silently DROPPED our setting and produced a libc-dynamic binary. We therefore
+# set the flag at the highest-precedence source — CARGO_ENCODED_RUSTFLAGS (US-separated,
+# \037) — directly on each build invocation, so no image-level config can override it.
 
 WORKDIR /build
 
@@ -29,6 +32,7 @@ COPY Cargo.toml Cargo.lock ./
 
 # Stub src for dependency pre-cache (avoids re-compiling deps on code-only changes).
 RUN mkdir src && echo 'fn main(){}' > src/main.rs && \
+    CARGO_ENCODED_RUSTFLAGS="$(printf '%s\037%s' '-C' 'target-feature=+crt-static')" \
     cargo build --release --target x86_64-unknown-linux-musl 2>/dev/null || true; \
     rm -rf src
 
@@ -37,13 +41,20 @@ COPY src ./src
 
 # Force rebuild of src (cargo detects the manifest/source timestamp).
 RUN touch src/main.rs && \
+    CARGO_ENCODED_RUSTFLAGS="$(printf '%s\037%s' '-C' 'target-feature=+crt-static')" \
     cargo build --release --target x86_64-unknown-linux-musl
 
-# Verify static linking before shipping — fail the build if the binary is dynamic.
-RUN OUTPUT=$(ldd target/x86_64-unknown-linux-musl/release/bastion 2>&1 || true); \
-    echo "$OUTPUT"; \
-    echo "$OUTPUT" | grep -q "not a dynamic executable" || \
-    (echo "ERROR: binary is dynamically linked — musl static target required" && exit 1)
+# Verify the binary will run in FROM scratch — fail the build if it needs a loader.
+# A PT_INTERP program header means the kernel requires an external dynamic loader
+# (/lib/ld-musl-*.so.1), which scratch does NOT provide. A fully static binary (or a
+# static-PIE) has NO PT_INTERP. This check is libc- and PIE-agnostic, unlike the glibc
+# `ldd` "not a dynamic executable" string (musl's ldd never prints that phrase).
+RUN BIN=target/x86_64-unknown-linux-musl/release/bastion; \
+    readelf -l "$BIN" | grep -E "INTERP|NEEDED" || true; \
+    if readelf -l "$BIN" | grep -q INTERP; then \
+        echo "ERROR: binary has PT_INTERP — dynamically linked, will NOT run in scratch"; exit 1; \
+    fi; \
+    echo "OK: no PT_INTERP — static binary, scratch-ready"
 
 # ── Stage 2: scratch — zero OS layer ──────────────────────────────────────────
 FROM scratch
