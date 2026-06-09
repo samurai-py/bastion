@@ -27,19 +27,40 @@ pub fn load_mcp_config(path: &str) -> anyhow::Result<Value> {
 }
 
 impl McpClient {
+    /// Legacy: connect from a mcp-servers.json file path. Kept for compatibility/tests.
+    /// Runtime uses [`connect_from_config`] (bastion.toml `[mcp.servers]`, D-09).
     pub async fn connect_all(config_path: &str) -> anyhow::Result<Self> {
         let config = load_mcp_config(config_path)?;
+        match config.get("mcpServers").and_then(|v| v.as_object()) {
+            Some(obj) => Self::connect_from_servers_obj(obj).await,
+            None => {
+                tracing::warn!("mcp config has no 'mcpServers' object — starting with empty registry");
+                Ok(McpClient { servers: Vec::new(), registry: ToolRegistry::new() })
+            }
+        }
+    }
+
+    /// Connect from `bastion.toml [mcp.servers]` (D-09) — the runtime path. The legacy
+    /// `.bastion/mcp-servers.json` file is no longer required (and isn't mounted in the
+    /// FROM-scratch container, which is why MCP tools were silently absent before).
+    pub async fn connect_from_config(
+        servers: &std::collections::HashMap<String, crate::config::McpServerEntry>,
+    ) -> anyhow::Result<Self> {
+        let mut obj = serde_json::Map::new();
+        for (key, entry) in servers {
+            let label = if entry.label.is_empty() { key.clone() } else { entry.label.clone() };
+            // url-based servers (streamable-http / SSE); internal network, no auth header.
+            obj.insert(label, serde_json::json!({ "url": entry.url, "transport": "sse" }));
+        }
+        Self::connect_from_servers_obj(&obj).await
+    }
+
+    /// Shared connect loop over a `{ label: {url|command,...} }` map.
+    async fn connect_from_servers_obj(
+        mcp_servers: &serde_json::Map<String, Value>,
+    ) -> anyhow::Result<Self> {
         let mut servers: Vec<(String, RunningService<RoleClient, ()>)> = Vec::new();
         let mut registry = ToolRegistry::new();
-
-        let mcp_servers_value = config.get("mcpServers").cloned();
-        let mcp_servers = match mcp_servers_value.as_ref().and_then(|v| v.as_object()) {
-            Some(obj) => obj,
-            None => {
-                tracing::warn!("mcp-servers.json has no 'mcpServers' object — starting with empty registry");
-                return Ok(McpClient { servers, registry });
-            }
-        };
 
         for (label, server_cfg) in mcp_servers {
             let transport = server_cfg.get("transport").and_then(|v| v.as_str()).unwrap_or("sse");

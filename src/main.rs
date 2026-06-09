@@ -79,10 +79,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Init MCP client — connect_all handles missing/failed servers gracefully:
-    // logs tracing::warn per failed server and continues; missing config returns Ok(empty registry).
-    // bastion.toml [mcp.servers.*] replaces .bastion/mcp-servers.json (D-09).
-    let mcp_client = McpClient::connect_all(".bastion/mcp-servers.json").await?;
+    // Init MCP client from bastion.toml [mcp.servers] (D-09). connect_from_config handles
+    // failed servers gracefully: logs tracing::warn per failed server and continues.
+    // (Previously this used the legacy .bastion/mcp-servers.json path, which isn't mounted
+    // in the FROM-scratch container — so memupalace/skill-writer tools were silently absent.)
+    let mcp_client = McpClient::connect_from_config(&cfg.mcp.servers).await?;
 
     // Init provider from config (default_model from bastion.toml, overridable via env BASTION__AGENT__DEFAULT_MODEL)
     let default_model = cfg.agent.default_model.clone();
