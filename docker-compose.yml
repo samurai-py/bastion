@@ -50,6 +50,9 @@ services:
       - BASTION_CONFIG=/bastion.toml
       - BASTION_INFER_ADDR=0.0.0.0:3000
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}
+      # Observability (PKG): without RUST_LOG the EnvFilter suppresses ALL tracing events,
+      # leaving bastion.log empty. Default to info so the soak is debuggable; override via env.
+      - RUST_LOG=${RUST_LOG:-info}
     env_file: .env
     depends_on:
       volume-init:
