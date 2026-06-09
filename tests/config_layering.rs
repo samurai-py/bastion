@@ -16,7 +16,8 @@ fn config_layering_toml_default_loaded() {
     std::env::remove_var("BASTION__AGENT__DEFAULT_MODEL");
     let cfg = bastion::config::load_config("bastion.toml")
         .expect("bastion.toml must exist at repo root");
-    assert_eq!(cfg.agent.default_model, "claude-sonnet-4-5");
+    // Deployment-specific value (overridable); assert it parsed, not a specific model.
+    assert!(!cfg.agent.default_model.is_empty(), "default_model must be set in bastion.toml");
     assert!(cfg.agent.daily_budget_usd > 0.0);
 }
 

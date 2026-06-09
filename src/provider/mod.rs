@@ -171,6 +171,45 @@ pub trait Provider: Send + Sync {
 
 pub type SharedProvider = Arc<RwLock<Box<dyn Provider>>>;
 
+/// Convert an OpenAI-compatible client error into a legible, provider-tagged error.
+///
+/// `async_openai` fails to parse non-OpenAI error bodies — OpenRouter sends `code`
+/// as an integer, Gemini wraps the error in an array — producing opaque messages like
+/// `failed to deserialize api response: invalid type: integer 401, expected a string`
+/// that bury the real cause. This pulls the API's human-readable `"message"` out of the
+/// blob so callers and logs show e.g. `openrouter API error: User not found.` instead.
+pub fn clarify_openai_error(provider: &str, err: impl std::fmt::Display) -> anyhow::Error {
+    let raw = err.to_string();
+    match extract_api_message(&raw) {
+        Some(msg) => anyhow::anyhow!("{provider} API error: {msg}"),
+        None => anyhow::anyhow!("{provider} API call failed: {raw}"),
+    }
+}
+
+/// Best-effort extraction of a JSON `"message": "..."` string value (with escape
+/// handling) from an arbitrary error blob. Returns None if absent/unparseable.
+fn extract_api_message(s: &str) -> Option<String> {
+    const KEY: &str = "\"message\"";
+    let start = s.find(KEY)? + KEY.len();
+    let after_colon = s[start..].find(':')? + start + 1;
+    let rest = s[after_colon..].trim_start();
+    let mut chars = rest.strip_prefix('"')?.chars();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => out.push(other),
+                None => break,
+            },
+            other => out.push(other),
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +257,27 @@ mod tests {
             ChatCompletionRequestMessage::Tool(t) => assert_eq!(t.tool_call_id, "call_1"),
             _ => panic!("out[3] must be a Tool message with tool_call_id"),
         }
+    }
+
+    #[test]
+    fn clarify_extracts_real_provider_error_messages() {
+        // OpenRouter 401 (code is an integer — what broke async_openai parsing).
+        let openrouter = "failed to deserialize api response: error:invalid type: integer `401`, \
+                          expected a string content:{\"error\":{\"message\":\"User not found.\",\"code\":401}}";
+        let e = clarify_openai_error("openrouter", openrouter);
+        assert_eq!(e.to_string(), "openrouter API error: User not found.");
+
+        // Gemini 429 (error wrapped in an array; message before status).
+        let gemini = "failed to deserialize api response: missing field `message` content:\
+                      [{\"error\":{\"code\":429,\"message\":\"Your prepayment credits are depleted.\",\
+                      \"status\":\"RESOURCE_EXHAUSTED\"}}]";
+        let e = clarify_openai_error("gemini", gemini);
+        assert_eq!(e.to_string(), "gemini API error: Your prepayment credits are depleted.");
+
+        // No parseable message → tagged passthrough (never silently swallow).
+        let opaque = "connection reset by peer";
+        let e = clarify_openai_error("openai", opaque);
+        assert_eq!(e.to_string(), "openai API call failed: connection reset by peer");
     }
 }
 

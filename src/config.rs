@@ -83,7 +83,9 @@ mod tests {
     #[test]
     fn load_config_from_bastion_toml() {
         let cfg = load_config("bastion.toml").expect("bastion.toml must exist at repo root");
-        assert_eq!(cfg.agent.default_model, "claude-sonnet-4-5");
+        // default_model is deployment-specific (Mario runs OpenRouter free); assert it's set,
+        // not a specific value — this test verifies config parsing, not the chosen model.
+        assert!(!cfg.agent.default_model.is_empty(), "default_model must be set in bastion.toml");
         assert!(cfg.agent.daily_budget_usd > 0.0);
         assert!(cfg.mcp.servers.contains_key("memupalace"));
         assert_eq!(cfg.mcp.servers["memupalace"].url, "http://memupalace:8001/mcp");

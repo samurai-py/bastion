@@ -51,7 +51,8 @@ impl Provider for GeminiProvider {
         }
         let request = args.build()?;
 
-        let response = self.client.chat().create(request).await?;
+        let response = self.client.chat().create(request).await
+            .map_err(|e| super::clarify_openai_error(self.name(), e))?;
 
         let choice = response.choices.into_iter().next()
             .ok_or_else(|| anyhow::anyhow!("Gemini returned no choices"))?;
@@ -117,7 +118,8 @@ impl Provider for GeminiProvider {
             .messages(oai_messages);
         let request = args.build()?;
 
-        let response = self.client.chat().create(request).await?;
+        let response = self.client.chat().create(request).await
+            .map_err(|e| super::clarify_openai_error(self.name(), e))?;
         let choice = response.choices.into_iter().next()
             .ok_or_else(|| anyhow::anyhow!("Gemini returned no choices"))?;
         let raw = choice.message.content

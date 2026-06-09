@@ -3,9 +3,9 @@
 # This file is safe to commit to git.
 
 [agent]
-# Mario's deployment uses OpenRouter (free tier) — ANTHROPIC_API_KEY unset, Gemini out of credits.
-# Slugs containing '/' route to OpenRouterProvider (OPENROUTER_API_KEY).
-# Override per-deployment via env BASTION__AGENT__DEFAULT_MODEL (double underscore).
+# Model is chosen by name: '/' -> OpenRouter, "claude*" -> Anthropic, "gemini*" -> Gemini,
+# "gpt*/o1/o3" -> OpenAI, else Ollama (see src/provider/registry.rs). This deployment uses
+# an OpenRouter free model. Override per-deployment via env BASTION__AGENT__DEFAULT_MODEL.
 default_model         = "nex-agi/nex-n2-pro:free"
 daily_budget_usd      = 5.0
 
