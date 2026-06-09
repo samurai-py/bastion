@@ -3,9 +3,10 @@
 # This file is safe to commit to git.
 
 [agent]
-# Mario's deployment uses Gemini (free tier) — ANTHROPIC_API_KEY is not set.
+# Mario's deployment uses OpenRouter (free tier) — ANTHROPIC_API_KEY unset, Gemini out of credits.
+# Slugs containing '/' route to OpenRouterProvider (OPENROUTER_API_KEY).
 # Override per-deployment via env BASTION__AGENT__DEFAULT_MODEL (double underscore).
-default_model         = "gemini-2.5-flash"
+default_model         = "nex-agi/nex-n2-pro:free"
 daily_budget_usd      = 5.0
 
 [session]
