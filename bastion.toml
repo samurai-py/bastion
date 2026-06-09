@@ -3,7 +3,9 @@
 # This file is safe to commit to git.
 
 [agent]
-default_model         = "claude-sonnet-4-5"
+# Mario's deployment uses Gemini (free tier) — ANTHROPIC_API_KEY is not set.
+# Override per-deployment via env BASTION__AGENT__DEFAULT_MODEL (double underscore).
+default_model         = "gemini-2.5-flash"
 daily_budget_usd      = 5.0
 
 [session]
