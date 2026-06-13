@@ -210,6 +210,9 @@ __marimo__/
 # Bastion — Project-specific
 # ═══════════════════════════════════════
 
+# Internal planning & strategy (dev-only, never public)
+.planning/
+
 # Environment files (contains secrets)
 .env
 .env.local
