@@ -262,15 +262,15 @@ impl AgentLoop {
 
                 // Process tool_calls if present via dispatch_tool_loop (BIG-1).
                 match output {
-                    crate::persona::runner::RunnerOutput::Single(_pid, response) => {
-                        // WR-04: resolve PrivacyTier for egress in dispatch_tool_loop.
-                        let resolved_tier: Option<crate::memory::PrivacyTier> = {
-                            if let Some(ref persona_name) = self.forced_persona {
-                                self.registry.get(persona_name).map(|p| p.tier)
-                            } else {
-                                None
-                            }
-                        };
+                    crate::persona::runner::RunnerOutput::Single(pid, response) => {
+                        // WR-04 / CR-01: resolve PrivacyTier from the persona actually
+                        // handling this turn (router-chosen or /as-forced). Re-reading
+                        // self.forced_persona here was a privacy bug: it was already
+                        // consumed by .take() above (line ~211), so a forced LocalOnly
+                        // persona resolved to None and got stamped CloudOk in
+                        // dispatch_tool_loop — a LocalOnly→cloud downgrade.
+                        let resolved_tier: Option<crate::memory::PrivacyTier> =
+                            self.registry.get(&pid).map(|p| p.tier);
                         let text = self.dispatch_tool_loop(
                             &mut history,
                             &session_id,
@@ -289,9 +289,13 @@ impl AgentLoop {
                     }
                     crate::persona::runner::RunnerOutput::Parallel(results) => {
                         // Parallel: run tool-loop for each persona result and collect texts.
-                        let resolved_tier: Option<crate::memory::PrivacyTier> = None;
                         let mut texts: Vec<String> = Vec::new();
-                        for (_pid, response) in results {
+                        for (pid, response) in results {
+                            // CR-01: resolve tier per-persona — each parallel persona may
+                            // carry a different tier. fail-closed via check_egress inside
+                            // dispatch_tool_loop (None → blocked, not defaulted to cloud).
+                            let resolved_tier: Option<crate::memory::PrivacyTier> =
+                                self.registry.get(&pid).map(|p| p.tier);
                             let text = self.dispatch_tool_loop(
                                 &mut history,
                                 &session_id,
@@ -412,7 +416,10 @@ impl AgentLoop {
                         // v1.0: approval gate disabled — Phase 3 implements the approval queue.
                         let ctx = crate::capability::InvokeCtx {
                             owner: owner.to_owned(),
-                            privacy_tier: Some(resolved_tier.unwrap_or(crate::memory::PrivacyTier::CloudOk)),
+                            // CR-01/CR-02: fail-closed — an unresolved tier is treated as the
+                            // MOST restrictive (LocalOnly), never the most permissive. A None
+                            // here previously defaulted to CloudOk, opening an egress path.
+                            privacy_tier: Some(resolved_tier.unwrap_or(crate::memory::PrivacyTier::LocalOnly)),
                             needs_approval: false,  // v1.0: approval gate desabilitado — Phase 3 implementará o approval queue
                         };
                         // SEAM #4: span filho execute_tool por tool call
@@ -463,6 +470,12 @@ impl AgentLoop {
                             anyhow::bail!(BastionError::BudgetExceeded);
                         }
                     }
+
+                    // CR-02: fail-closed egress gate before the next cloud round. `history`
+                    // now carries tool results (and prior turns) that may include LocalOnly
+                    // content; block before any of it reaches a non-local provider. Mirrors
+                    // the Cabinet synthesis gate. check_egress fails closed on None/LocalOnly.
+                    crate::hooks::egress::check_egress(resolved_tier, &provider_name)?;
 
                     // Next LLM call in the loop
                     // SEAM #4: span filho chat {model} por provider call
@@ -1004,5 +1017,98 @@ mod tests {
             mem.retrieve_tagged(DEFAULT_OWNER, None).await.expect("retrieve")
         };
         assert!(after.is_empty(), "belief must be revoked after contestation turn");
+    }
+
+    // Guards CR-01/CR-02 (privacy egress through the tool loop):
+    // 1. resolved_tier must come from the persona actually handling the turn
+    //    (the returned pid), not from self.forced_persona — which is already
+    //    consumed by .take() in run_turn_for, so re-reading it yielded None and
+    //    a LocalOnly persona was stamped CloudOk.
+    // 2. the new per-round check_egress in dispatch_tool_loop must NOT over-block
+    //    a legitimate CloudOk persona's multi-round tool loop.
+    #[tokio::test]
+    async fn cloud_ok_persona_tool_loop_passes_egress_gate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use crate::types::{ToolCall, TokenUsage};
+
+        // Round 0 returns a tool_call (forces a second provider round through
+        // dispatch_tool_loop, where the new egress gate lives); round 1 returns
+        // final text to terminate the loop.
+        struct ToolThenText { calls: AtomicUsize }
+
+        #[async_trait]
+        impl Provider for ToolThenText {
+            async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Ok(LlmResponse {
+                        text: String::new(),
+                        tool_calls: Some(vec![ToolCall {
+                            id: "t1".to_owned(),
+                            name: "noop".to_owned(),
+                            arguments: serde_json::json!({}),
+                        }]),
+                        usage: TokenUsage { input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0 },
+                    })
+                } else {
+                    Ok(LlmResponse {
+                        text: "done".to_owned(),
+                        tool_calls: None,
+                        usage: TokenUsage { input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0 },
+                    })
+                }
+            }
+            async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> { Ok("s".to_owned()) }
+            async fn complete_structured(
+                &self, _system: &str, _user: &str, _schema: serde_json::Value, _max_tokens: u32, _temperature: f32,
+            ) -> anyhow::Result<String> {
+                Ok(serde_json::json!({
+                    "personas": ["Cloudy"],
+                    "owner": DEFAULT_OWNER,
+                    "mode": "single",
+                    "convene_reason": null
+                }).to_string())
+            }
+            fn context_limit(&self) -> usize { 8192 }
+            fn model_name(&self) -> &str { "mock" }
+            fn name(&self) -> &'static str { "mock" }
+        }
+
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+
+        let session = crate::session::SessionManager::new(&path);
+        session.init_schema().await.expect("init_schema");
+        let session_id = session.create_session().await.expect("create_session");
+        let memory: SharedMemory = Arc::new(RwLock::new(
+            Box::new(SqliteMemory::new(&path)) as Box<dyn crate::memory::Memory>
+        ));
+        let mcp = McpClient::connect_all("nonexistent_mcp.json").await.expect("connect_all empty");
+
+        let mut personas = HashMap::new();
+        personas.insert("Cloudy".to_string(), Persona {
+            name: "Cloudy".to_string(),
+            description: Some("Cloud-ok persona".to_string()),
+            system_prompt: "You are Cloudy.".to_string(),
+            tier: PrivacyTier::CloudOk,
+            weight: 0.9,
+            skills: vec![],
+        });
+        let registry = PersonaRegistry::new_from_map(personas);
+
+        let provider: SharedProvider = Arc::new(RwLock::new(
+            Box::new(ToolThenText { calls: AtomicUsize::new(0) }) as Box<dyn Provider>
+        ));
+
+        let mut agent = AgentLoop::new(
+            provider, session, mcp, session_id, 10.0, registry, memory,
+            GoalEngine::new(&path, ScoringConfig::default()),
+        );
+
+        // CloudOk persona + cloud provider: the multi-round tool loop must complete,
+        // proving the per-round egress gate resolves Some(CloudOk) and lets it through.
+        let resp = agent.run_turn("do a thing").await
+            .expect("CloudOk persona tool loop must not be egress-blocked");
+        assert_eq!(resp, "done", "tool loop must run a second round and return final text");
     }
 }
