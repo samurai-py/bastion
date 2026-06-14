@@ -12,6 +12,7 @@ use crate::goal::GoalEngine;
 use crate::hooks::guardrails::InputGuardrail;
 use crate::hooks::output_validator::OutputValidator;
 use crate::hooks::egress::EgressHook;
+use crate::agent::context::TurnContextProvider;
 
 const MAX_TOOL_ROUNDS: u32 = 10;
 const DEFAULT_SYSTEM_PROMPT: &str = "You are Bastion, a proactive personal AI assistant.";
@@ -42,6 +43,10 @@ pub struct AgentLoop {
     /// Starts empty; McpTool adapters are registered after McpClient connects.
     /// When non-empty, tool calls route through registry.invoke instead of run_provider_fallback.
     pub capability_registry: crate::capability::CapabilityRegistry,
+    /// SEAM #2 — Provedores de contexto opaco para injeção no system prompt.
+    /// Cada provider contribui com zero ou mais blocos por turn.
+    /// O core inclui o conteúdo sem interpretar.
+    pub context_providers: Vec<Box<dyn TurnContextProvider>>,
     /// Pending queue for proactive messages.
     /// Phase 2: consumed by daemon_loop select arm (PROACT-05).
     pub pending_tx:        mpsc::Sender<String>,
@@ -76,10 +81,44 @@ impl AgentLoop {
             output_validator: OutputValidator,
             egress_hook: EgressHook,
             capability_registry: crate::capability::CapabilityRegistry::new(),
+            context_providers: vec![],
             pending_tx,
             pending_rx: Some(pending_rx),
             forced_persona: None,
         }
+    }
+
+    /// SEAM #2 — Constrói o system prompt para o turn atual.
+    ///
+    /// Começa com DEFAULT_SYSTEM_PROMPT como base.
+    /// Itera context_providers e concatena blocos cujo max_tier seja compatível
+    /// com o provider ativo (egress check por bloco).
+    ///
+    /// SECURITY (Pitfall 5): usa o max_tier do BLOCO, não o tier da persona —
+    /// impede que beliefs LocalOnly vazem para providers cloud quando a persona é CloudOk.
+    async fn build_system_prompt(&self, owner: &str, turn_msg: &str) -> String {
+        let provider_name = self.provider.read().await.name().to_owned();
+        let mut parts: Vec<String> = vec![DEFAULT_SYSTEM_PROMPT.to_owned()];
+
+        for provider in &self.context_providers {
+            let blocks = provider.context_for_turn(owner, turn_msg).await;
+            for block in blocks {
+                // SECURITY: verificar egress pelo tier do BLOCO, não da persona.
+                // check_egress(Some(LocalOnly), "openrouter") → Err → não injeta.
+                // check_egress(Some(CloudOk), "openrouter") → Ok → injeta.
+                if crate::hooks::egress::check_egress(Some(block.max_tier), &provider_name).is_ok() {
+                    parts.push(block.content);
+                } else {
+                    tracing::debug!(
+                        event = "context_block_skipped_egress",
+                        provider = %provider_name,
+                        tier = ?block.max_tier,
+                    );
+                }
+            }
+        }
+
+        parts.join("\n\n")
     }
 
     /// Execute one full agent turn for the default local owner.
@@ -179,10 +218,11 @@ impl AgentLoop {
             _ => {
                 // Single / Parallel path via runner.
                 // Build CallConfig with tools from capability_registry (BIG-1).
-                // SEAM #2 (plan 03) will inject persona-specific context blocks here.
+                // SEAM #2: system_prompt built dynamically — context_providers inject opaque blocks.
+                let system_prompt = self.build_system_prompt(owner, user_input).await;
                 let tools = self.capability_registry.list_tool_defs();
                 let config = CallConfig {
-                    system_prompt: DEFAULT_SYSTEM_PROMPT.to_owned(),
+                    system_prompt,   // ← dinâmico via SEAM #2
                     max_tokens: 4096,
                     tools,
                 };
@@ -256,7 +296,7 @@ impl AgentLoop {
         //    The Cabinet path also produces its own text.
         //    Only the truly empty case (no persona matched) reaches run_provider_fallback.
         let final_text = if route_text.is_empty() {
-            self.run_provider_fallback(&mut history, &session_id).await?
+            self.run_provider_fallback(&mut history, &session_id, owner, user_input).await?
         } else {
             route_text
         };
@@ -396,10 +436,14 @@ impl AgentLoop {
 
     /// Classic tool-loop provider call — used as fallback when registry is empty.
     /// `session_id` is the per-owner session resolved by the caller (run_turn_for).
+    /// `owner` and `user_input` are passed so build_system_prompt can apply the per-block
+    /// egress check (SEAM #2 / T-05-03-03: prevents LocalOnly beliefs leaking on fallback path).
     async fn run_provider_fallback(
         &mut self,
         history: &mut Vec<Message>,
         session_id: &str,
+        owner: &str,
+        user_input: &str,
     ) -> anyhow::Result<String> {
         // Build tool definitions from ToolRegistry.
         let tools: Vec<serde_json::Value> = self.mcp.registry().list_tool_names()
@@ -416,8 +460,12 @@ impl AgentLoop {
             })
             .collect();
 
+        // SEAM #2: build_system_prompt applies per-block egress check so LocalOnly blocks
+        // are not injected when the active provider is cloud. This covers the fallback path
+        // (T-05-03-03 mitigation — egress leak in fallback path).
+        let system_prompt = self.build_system_prompt(owner, user_input).await;
         let config = CallConfig {
-            system_prompt: DEFAULT_SYSTEM_PROMPT.to_owned(),
+            system_prompt,
             max_tokens: 4096,
             tools,
         };
@@ -808,6 +856,38 @@ mod tests {
 
         let resp = agent.run_turn("hello world").await.expect("run_turn failed");
         assert!(!resp.is_empty(), "response must not be empty; got: {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn context_block_local_only_dropped_on_cloud_provider() {
+        use crate::agent::context::{ContextBlock, TurnContextProvider};
+        use crate::memory::PrivacyTier;
+
+        struct LocalOnlyProvider;
+
+        #[async_trait]
+        impl TurnContextProvider for LocalOnlyProvider {
+            async fn context_for_turn(&self, _owner: &str, _msg: &str) -> Vec<ContextBlock> {
+                vec![ContextBlock {
+                    content: "secret-belief".to_owned(),
+                    max_tier: PrivacyTier::LocalOnly,
+                }]
+            }
+        }
+
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+
+        // Register a LocalOnly provider — MockProvider has name() == "mock" (non-ollama cloud).
+        agent.context_providers.push(Box::new(LocalOnlyProvider));
+
+        // build_system_prompt with a non-ollama provider must discard the LocalOnly block.
+        let system_prompt = agent.build_system_prompt(DEFAULT_OWNER, "hello").await;
+        assert!(
+            !system_prompt.contains("secret-belief"),
+            "LocalOnly block must not appear in system prompt when provider is cloud; got: {system_prompt:?}"
+        );
     }
 
     #[tokio::test]
