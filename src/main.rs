@@ -16,6 +16,41 @@ use bastion::goal::{GoalEngine, ScoringConfig};
 use bastion::proactive::CronService;
 use axum;
 
+/// Inicializa o OTel TracerProvider.
+///
+/// Por padrão usa stdout exporter (sem config necessária).
+/// Se `OTEL_EXPORTER_OTLP_ENDPOINT` estiver setado, adiciona OTLP/gRPC exporter.
+///
+/// SECURITY: não emite conteúdo de conversa por padrão —
+/// `gen_ai.input.messages` só é adicionado se `BASTION_OTEL_CONTENT_EVENTS=true`.
+///
+/// PITFALL 6: deve ser chamado ANTES de AgentLoop::new() para que spans criados
+/// dentro do AgentLoop não sejam descartados em silêncio (no-op tracer).
+fn init_otel_provider() -> anyhow::Result<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+
+    let stdout_exporter = opentelemetry_stdout::SpanExporter::default();
+
+    let provider_builder = SdkTracerProvider::builder()
+        .with_batch_exporter(stdout_exporter);
+
+    // OTLP exporter opcional — só se endpoint configurado
+    let provider = if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+        let otlp_exporter = SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&endpoint)
+            .build()?;
+        provider_builder
+            .with_batch_exporter(otlp_exporter)
+            .build()
+    } else {
+        provider_builder.build()
+    };
+
+    Ok(provider)
+}
+
 #[derive(Parser)]
 #[command(name = "bastion", about = "Bastion AI agent runtime", version)]
 struct Cli {
@@ -104,6 +139,16 @@ async fn main() -> anyhow::Result<()> {
     // Init goal engine
     let goals = GoalEngine::new(&db_path, ScoringConfig::default());
 
+    // SEAM #4: inicializar OTel TracerProvider ANTES de AgentLoop::new()
+    // (Pitfall 6: se chamado depois, spans no AgentLoop usariam no-op tracer)
+    // OTel 0.32: SdkTracerProvider shuts down on drop — keep _otel_provider alive until end of main().
+    let _otel_provider = init_otel_provider()
+        .unwrap_or_else(|e| {
+            tracing::warn!(event = "otel_init_failed", error = %e, "OTel init falhou — usando no-op tracer");
+            opentelemetry_sdk::trace::SdkTracerProvider::builder().build()
+        });
+    opentelemetry::global::set_tracer_provider(_otel_provider.clone());
+
     let mut agent = AgentLoop::new(
         provider.clone(),
         session,
@@ -124,6 +169,11 @@ async fn main() -> anyhow::Result<()> {
             daemon_loop(&mut agent).await?;
         }
     }
+
+    // SEAM #4: flush e shutdown do OTel para não perder spans buffered.
+    // OTel 0.32: SdkTracerProvider::shutdown() flushes all batch processors.
+    // _otel_provider is still alive (owns the processors) — explicit shutdown before drop.
+    let _ = _otel_provider.shutdown();
 
     Ok(())
 }
