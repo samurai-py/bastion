@@ -1,5 +1,7 @@
 use std::time::Instant;
 use tokio::sync::mpsc;
+use opentelemetry::{global as otel_global, KeyValue};
+use opentelemetry::trace::{Tracer as _, Span as _, SpanKind};
 use crate::types::{Message, Role, MessageContent, ContentPart, CallConfig, BastionError, TokenUsage};
 use crate::provider::{SharedProvider, call_with_retry};
 use crate::session::SessionManager;
@@ -135,6 +137,19 @@ impl AgentLoop {
         // HOOK-02: input guardrail before routing (screens empty/oversized/spam input)
         self.input_guard.screen(user_input)?;
 
+        // SEAM #4: span raiz invoke_agent por turn.
+        // DESIGN: nome genérico "invoke_agent" — span names são imutáveis após start().
+        // gen_ai.agent.name é setado via set_attribute APÓS o routing (quando persona é conhecida).
+        let tracer = otel_global::tracer("bastion");
+        let mut turn_span = tracer
+            .span_builder("invoke_agent")
+            .with_kind(SpanKind::Internal)
+            .with_attributes(vec![
+                KeyValue::new("gen_ai.operation.name", "invoke_agent"),
+                KeyValue::new("gen_ai.conversation.id", self.session_id.clone()),
+            ])
+            .start(&tracer);
+
         // CR-04: resolve or create a session PER OWNER so two owners never share history.
         // WR-08: for DEFAULT_OWNER (CLI path) reuse self.session_id chosen at startup to
         // avoid load_most_recent_id_for resurrecting an older _local session.
@@ -193,6 +208,11 @@ impl AgentLoop {
             decision.mode = crate::persona::router::ResponseMode::Single;
             decision.convene_reason = None;
         }
+
+        // SEAM #4: registrar persona no span raiz via atributo (span name é imutável).
+        // Após routing — persona é conhecida agora.
+        let agent_name = decision.personas.first().cloned().unwrap_or_else(|| "default".to_string());
+        turn_span.set_attribute(KeyValue::new("gen_ai.agent.name", agent_name));
 
         // 5. Dispatch on decision.mode → build response text.
         //    Empty registry → route_text will be empty → fall back to provider.
@@ -313,6 +333,9 @@ impl AgentLoop {
             owner,
         );
 
+        // SEAM #4: fechar span raiz do turn
+        turn_span.end();
+
         Ok(final_text)
     }
 
@@ -339,6 +362,8 @@ impl AgentLoop {
         owner: &str,
         resolved_tier: Option<crate::memory::PrivacyTier>,
     ) -> anyhow::Result<String> {
+        // SEAM #4: tracer handle for child spans (chat, execute_tool)
+        let tracer = otel_global::tracer("bastion");
         let mut response = initial_response;
         let mut rounds = 0u32;
 
@@ -385,14 +410,33 @@ impl AgentLoop {
                             privacy_tier: Some(resolved_tier.unwrap_or(crate::memory::PrivacyTier::CloudOk)),
                             needs_approval: false,  // v1.0: approval gate desabilitado — Phase 3 implementará o approval queue
                         };
+                        // SEAM #4: span filho execute_tool por tool call
+                        let mut tool_span = tracer
+                            .span_builder(format!("execute_tool {}", tc.name))
+                            .with_kind(SpanKind::Internal)
+                            .with_attributes(vec![
+                                KeyValue::new("gen_ai.operation.name", "execute_tool"),
+                                KeyValue::new("gen_ai.tool.name", tc.name.clone()),
+                                KeyValue::new("gen_ai.tool.call.id", tc.id.clone()),
+                            ])
+                            .start(&tracer);
                         let result = if self.capability_registry.is_empty() {
                             // Fallback: if no capabilities registered, try MCP directly.
                             self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
-                                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
+                                .unwrap_or_else(|e| {
+                                    // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
+                                    tool_span.set_attribute(KeyValue::new("error.type", e.to_string()));
+                                    serde_json::json!({"error": e.to_string()})
+                                })
                         } else {
                             self.capability_registry.invoke(&tc.name, tc.arguments.clone(), &ctx).await
-                                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
+                                .unwrap_or_else(|e| {
+                                    // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
+                                    tool_span.set_attribute(KeyValue::new("error.type", e.to_string()));
+                                    serde_json::json!({"error": e.to_string()})
+                                })
                         };
+                        tool_span.end();
 
                         let result_str = result.to_string();
                         let tool_msg = Message {
@@ -416,11 +460,46 @@ impl AgentLoop {
                     }
 
                     // Next LLM call in the loop
+                    // SEAM #4: span filho chat {model} por provider call
+                    let (model_name, provider_system) = {
+                        let p = self.provider.read().await;
+                        (p.model_name().to_owned(), p.name().to_owned())
+                    };
+                    let chat_span_name = format!("chat {}", model_name);
+                    let mut chat_span = tracer
+                        .span_builder(chat_span_name)
+                        .with_kind(SpanKind::Client)
+                        .with_attributes(vec![
+                            KeyValue::new("gen_ai.operation.name", "chat"),
+                            KeyValue::new("gen_ai.system", provider_system),
+                            KeyValue::new("gen_ai.request.model", model_name),
+                        ])
+                        .start(&tracer);
                     let next_response = {
                         let provider = self.provider.read().await;
                         let prov_ref: &dyn crate::provider::Provider = &**provider;
                         crate::provider::call_with_retry(|| prov_ref.complete(history, config), 3).await?
                     };
+                    // Record token usage and finish reason
+                    chat_span.set_attribute(KeyValue::new(
+                        "gen_ai.usage.input_tokens",
+                        next_response.usage.input_tokens as i64,
+                    ));
+                    chat_span.set_attribute(KeyValue::new(
+                        "gen_ai.usage.output_tokens",
+                        next_response.usage.output_tokens as i64,
+                    ));
+                    let finish_reason = if next_response.tool_calls.is_some() { "tool_calls" } else { "stop" };
+                    chat_span.set_attribute(KeyValue::new("gen_ai.response.finish_reasons", finish_reason));
+                    // SECURITY: NÃO emitir gen_ai.input/output.messages por padrão (PII — T-05-05-01)
+                    // Opt-in via BASTION_OTEL_CONTENT_EVENTS=true
+                    if std::env::var("BASTION_OTEL_CONTENT_EVENTS").as_deref() == Ok("true") {
+                        chat_span.set_attribute(KeyValue::new(
+                            "gen_ai.output.messages",
+                            next_response.text.clone(),
+                        ));
+                    }
+                    chat_span.end();
 
                     // Update budget with actual cost
                     let cost_usd = estimate_cost_usd(&provider_name, &next_response.usage);
