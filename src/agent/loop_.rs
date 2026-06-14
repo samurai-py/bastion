@@ -165,6 +165,7 @@ impl AgentLoop {
                     &table,
                     self.provider.clone(),
                     crate::cabinet::orchestrator::DEFAULT_ROUNDS,
+                    &self.capability_registry,
                 ).await?;
                 // CR-02: fail-closed egress on synthesis — the transcript may contain LocalOnly
                 // content. Gate synthesis on the table tier before touching the cloud provider.
@@ -176,31 +177,87 @@ impl AgentLoop {
                 render_verdict(&verdict)
             }
             _ => {
-                // Single / Parallel path via runner (egress is on the runner/cabinet path — plan 03/06)
+                // Single / Parallel path via runner.
+                // Build CallConfig with tools from capability_registry (BIG-1).
+                // SEAM #2 (plan 03) will inject persona-specific context blocks here.
+                let tools = self.capability_registry.list_tool_defs();
+                let config = CallConfig {
+                    system_prompt: DEFAULT_SYSTEM_PROMPT.to_owned(),
+                    max_tokens: 4096,
+                    tools,
+                };
+
                 let output = crate::persona::runner::run(
                     decision,
                     &self.registry,
                     self.provider.clone(),
-                    user_input,
+                    &history,
+                    &config,
                 ).await?;
-                render_runner_output(output)
+
+                // Process tool_calls if present via dispatch_tool_loop (BIG-1).
+                match output {
+                    crate::persona::runner::RunnerOutput::Single(_pid, response) => {
+                        // WR-04: resolve PrivacyTier for egress in dispatch_tool_loop.
+                        let resolved_tier: Option<crate::memory::PrivacyTier> = {
+                            if let Some(ref persona_name) = self.forced_persona {
+                                self.registry.get(persona_name).map(|p| p.tier)
+                            } else {
+                                None
+                            }
+                        };
+                        let text = self.dispatch_tool_loop(
+                            &mut history,
+                            &session_id,
+                            &config,
+                            response,
+                            owner,
+                            resolved_tier,
+                        ).await?;
+                        // Persist the assistant response (dispatch_tool_loop handles intermediate turns)
+                        self.session.append(
+                            &session_id,
+                            Message { role: Role::Assistant, content: crate::types::MessageContent::Text(text.clone()) },
+                            None,
+                        ).await?;
+                        text
+                    }
+                    crate::persona::runner::RunnerOutput::Parallel(results) => {
+                        // Parallel: run tool-loop for each persona result and collect texts.
+                        let resolved_tier: Option<crate::memory::PrivacyTier> = None;
+                        let mut texts: Vec<String> = Vec::new();
+                        for (_pid, response) in results {
+                            let text = self.dispatch_tool_loop(
+                                &mut history,
+                                &session_id,
+                                &config,
+                                response,
+                                owner,
+                                resolved_tier,
+                            ).await?;
+                            texts.push(text);
+                        }
+                        let combined = texts.join("\n\n");
+                        self.session.append(
+                            &session_id,
+                            Message { role: Role::Assistant, content: crate::types::MessageContent::Text(combined.clone()) },
+                            None,
+                        ).await?;
+                        combined
+                    }
+                    crate::persona::runner::RunnerOutput::ConveneCabinet(_) => String::new(),
+                }
             }
         };
 
-        // 6. Graceful degradation: if route_text is empty (no persona matched), fall back to
-        //    plain tool-loop provider. The capability_registry gates tool calls in the fallback
-        //    path — when non-empty, run_provider_fallback routes tool invocations through
-        //    capability_registry.invoke (D-13 single policy enforcement point).
-        //    Currently registry starts empty; WR-04 egress gate is already enforced in fallback.
+        // 6. Graceful degradation: if route_text is empty (no persona matched, or Cabinet
+        //    produced no output), fall back to plain tool-loop provider.
+        //    The Single/Parallel path now persists assistant response inline in step 5.
+        //    The Cabinet path also produces its own text.
+        //    Only the truly empty case (no persona matched) reaches run_provider_fallback.
         let final_text = if route_text.is_empty() {
             self.run_provider_fallback(&mut history, &session_id).await?
         } else {
-            // Persist the assistant response
-            self.session.append(
-                &session_id,
-                Message { role: Role::Assistant, content: MessageContent::Text(route_text.clone()) },
-                None,
-            ).await?;
             route_text
         };
 
@@ -217,6 +274,124 @@ impl AgentLoop {
         );
 
         Ok(final_text)
+    }
+
+    /// Dispatch tool-loop for a single LLM response (BIG-1).
+    ///
+    /// Processes `response.tool_calls` by routing each call through `capability_registry.invoke`
+    /// (D-13 single policy enforcement point). Loops until no more tool_calls or MAX_TOOL_ROUNDS.
+    ///
+    /// Returns the final text answer from the LLM (after all tool rounds complete).
+    ///
+    /// # Arguments
+    /// - `history`: mutable session history — updated with assistant+tool messages
+    /// - `session_id`: for persistence
+    /// - `config`: CallConfig with tools (reused for subsequent complete() calls)
+    /// - `response`: initial LlmResponse from the runner
+    /// - `owner`: resolved owner for InvokeCtx
+    /// - `resolved_tier`: privacy tier for egress gate in InvokeCtx
+    async fn dispatch_tool_loop(
+        &mut self,
+        history: &mut Vec<Message>,
+        session_id: &str,
+        config: &CallConfig,
+        initial_response: crate::types::LlmResponse,
+        owner: &str,
+        resolved_tier: Option<crate::memory::PrivacyTier>,
+    ) -> anyhow::Result<String> {
+        let mut response = initial_response;
+        let mut rounds = 0u32;
+
+        loop {
+            // Write assistant message to history BEFORE dispatching tools (Pitfall 1).
+            let assistant_content = if let Some(ref tc) = response.tool_calls {
+                MessageContent::Parts(
+                    std::iter::once(ContentPart::Text { text: response.text.clone() })
+                        .chain(tc.iter().map(|t| ContentPart::ToolUse {
+                            id: t.id.clone(),
+                            name: t.name.clone(),
+                            input: t.arguments.clone(),
+                        }))
+                        .collect()
+                )
+            } else {
+                MessageContent::Text(response.text.clone())
+            };
+            self.session.append(
+                session_id,
+                Message { role: Role::Assistant, content: assistant_content.clone() },
+                Some(response.usage.output_tokens),
+            ).await?;
+            history.push(Message { role: Role::Assistant, content: assistant_content });
+
+            match response.tool_calls {
+                None => break Ok(response.text),
+                Some(tool_calls) => {
+                    if rounds >= MAX_TOOL_ROUNDS {
+                        tracing::error!(
+                            event = "tool_loop_cap",
+                            rounds = rounds,
+                            session_id = %session_id
+                        );
+                        anyhow::bail!(BastionError::ToolLoopCap);
+                    }
+
+                    for tc in &tool_calls {
+                        tracing::debug!(event = "tool_dispatch", tool = %tc.name);
+                        // D-13: route ALL tool calls through capability_registry.invoke.
+                        // v1.0: approval gate disabled — Phase 3 implements the approval queue.
+                        let ctx = crate::capability::InvokeCtx {
+                            owner: owner.to_owned(),
+                            privacy_tier: Some(resolved_tier.unwrap_or(crate::memory::PrivacyTier::CloudOk)),
+                            needs_approval: false,  // v1.0: approval gate desabilitado — Phase 3 implementará o approval queue
+                        };
+                        let result = if self.capability_registry.is_empty() {
+                            // Fallback: if no capabilities registered, try MCP directly.
+                            self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
+                                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
+                        } else {
+                            self.capability_registry.invoke(&tc.name, tc.arguments.clone(), &ctx).await
+                                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
+                        };
+
+                        let result_str = result.to_string();
+                        let tool_msg = Message {
+                            role: Role::Tool,
+                            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                                tool_use_id: tc.id.clone(),
+                                content: result_str,
+                            }]),
+                        };
+                        self.session.append(session_id, tool_msg.clone(), None).await?;
+                        history.push(tool_msg);
+                    }
+                    rounds += 1;
+
+                    // Budget check BEFORE next cloud call (PROV-06)
+                    let provider_name = self.provider.read().await.name().to_owned();
+                    if provider_name != "ollama" {
+                        if !self.session.check_budget(self.daily_budget_usd).await? {
+                            anyhow::bail!(BastionError::BudgetExceeded);
+                        }
+                    }
+
+                    // Next LLM call in the loop
+                    let next_response = {
+                        let provider = self.provider.read().await;
+                        let prov_ref: &dyn crate::provider::Provider = &**provider;
+                        crate::provider::call_with_retry(|| prov_ref.complete(history, config), 3).await?
+                    };
+
+                    // Update budget with actual cost
+                    let cost_usd = estimate_cost_usd(&provider_name, &next_response.usage);
+                    if let Err(e) = self.session.update_budget(cost_usd).await {
+                        tracing::warn!(error = %e, "failed to update budget");
+                    }
+
+                    response = next_response;
+                }
+            }
+        }
     }
 
     /// Classic tool-loop provider call — used as fallback when registry is empty.
@@ -492,19 +667,6 @@ impl AgentLoop {
 // Render helpers
 // ---------------------------------------------------------------------------
 
-fn render_runner_output(output: crate::persona::runner::RunnerOutput) -> String {
-    use crate::persona::runner::RunnerOutput;
-    match output {
-        RunnerOutput::Single(_id, text) => text,
-        RunnerOutput::Parallel(results) => {
-            results.into_iter()
-                .map(|(id, text)| format!("[{id}]: {text}"))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        }
-        RunnerOutput::ConveneCabinet(_) => String::new(), // handled in caller
-    }
-}
 
 fn render_verdict(verdict: &crate::cabinet::synth::CabinetVerdict) -> String {
     let mut out = verdict.recommendation.clone();
