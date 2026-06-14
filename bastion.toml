@@ -6,7 +6,7 @@
 # Model is chosen by name: '/' -> OpenRouter, "claude*" -> Anthropic, "gemini*" -> Gemini,
 # "gpt*/o1/o3" -> OpenAI, else Ollama (see src/provider/registry.rs). This deployment uses
 # an OpenRouter free model. Override per-deployment via env BASTION__AGENT__DEFAULT_MODEL.
-default_model         = "nex-agi/nex-n2-pro:free"
+default_model         = "meta-llama/llama-3.3-70b-instruct:free"
 daily_budget_usd      = 5.0
 
 [session]

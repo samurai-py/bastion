@@ -75,6 +75,27 @@ impl CapabilityRegistry {
         self.inner.is_empty()
     }
 
+    /// Remove a capability by name. Idempotent — returns false if not present.
+    ///
+    /// SECURITY: remove does NOT check guardrails (cmd: namespace etc.) because
+    /// removal does not create an attack vector — only register() needs to check.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.inner.remove(name).is_some()
+    }
+
+    /// Return tool definitions in the JSON format expected by the provider
+    /// (name/description/input_schema). Compatible with `anthropic_tools_to_openai()`
+    /// in openrouter.rs.
+    pub fn list_tool_defs(&self) -> Vec<serde_json::Value> {
+        self.inner.values().map(|cap| {
+            serde_json::json!({
+                "name": cap.name(),
+                "description": cap.description(),
+                "input_schema": cap.input_schema()
+            })
+        }).collect()
+    }
+
     /// Single policy enforcement point (D-13 non-negotiable guardrail).
     ///
     /// Policy order:
@@ -117,4 +138,37 @@ impl CapabilityRegistry {
 
 impl Default for CapabilityRegistry {
     fn default() -> Self { Self::new() }
+}
+
+/// RAII guard for ephemeral capabilities scoped to a single turn (SEAM #3).
+///
+/// Registers capabilities on `new()` and removes them on `Drop` — guarantees cleanup
+/// even if the turn errors out. Capabilities that fail `register()` are not tracked
+/// and will not be removed on drop.
+pub struct TurnCapabilityScope<'a> {
+    registry: &'a mut CapabilityRegistry,
+    registered: Vec<String>,
+}
+
+impl<'a> TurnCapabilityScope<'a> {
+    /// Create the scope and register capabilities. Registration failures are silently
+    /// skipped — those capabilities are not added to `registered` and won't be removed.
+    pub fn new(registry: &'a mut CapabilityRegistry, caps: Vec<Arc<dyn Capability>>) -> Self {
+        let mut registered = Vec::new();
+        for cap in caps {
+            let name = cap.name().to_owned();
+            if registry.register(cap).is_ok() {
+                registered.push(name);
+            }
+        }
+        Self { registry, registered }
+    }
+}
+
+impl<'a> Drop for TurnCapabilityScope<'a> {
+    fn drop(&mut self) {
+        for name in &self.registered {
+            self.registry.remove(name);
+        }
+    }
 }
