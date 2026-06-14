@@ -128,13 +128,29 @@ async fn telegram_loop(
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        // CR-03: unknown sender or turn error — warn and skip, no reply.
-                        tracing::warn!(
-                            event = "telegram_handle_update_error",
+                        // CR-03: unknown sender — warn and skip silently (no reply to unknown chats).
+                        if e.to_string().contains("not in owner map") {
+                            tracing::warn!(
+                                event = "telegram_handle_update_error",
+                                chat_id = %chat_id,
+                                error = %e
+                            );
+                            continue;
+                        }
+                        // M3: log turn_error WITHOUT conversation content (Pitfall 4 — never include
+                        // user_input or response_text in the log event).
+                        tracing::error!(
+                            event = "turn_error",
                             chat_id = %chat_id,
-                            error = %e
                         );
-                        continue;
+                        // M3: map error to friendly message — NEVER include e.to_string() (no stack
+                        // trace or internal details to the user).
+                        match e.downcast_ref::<crate::types::BastionError>() {
+                            Some(crate::types::BastionError::PrivacyEgressBlocked) =>
+                                "Não posso responder com este provider (restrição de privacidade).".to_owned(),
+                            _ =>
+                                "Tive um problema neste turn. Use /logs para detalhes.".to_owned(),
+                        }
                     }
                 };
 
