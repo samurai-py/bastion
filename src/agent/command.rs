@@ -104,6 +104,26 @@ pub async fn handle_command(
             Ok(CommandResult::Handled)
         }
 
+        "/logs" => {
+            // M3: return only recent ERROR/WARN log entries — never conversation content.
+            // Source of log_path (explicit and verifiable):
+            //   1. RUST_LOG_PATH env var (user-set override)
+            //   2. BASTION__LOGGING__LOG_PATH env var (config-rs env override for cfg.logging.log_path)
+            //   3. fallback "bastion.log" (same default as bastion.toml)
+            let log_path = std::env::var("RUST_LOG_PATH")
+                .or_else(|_| std::env::var("BASTION__LOGGING__LOG_PATH"))
+                .unwrap_or_else(|_| "bastion.log".to_string());
+            let entries = read_recent_log_errors(&log_path, 10);
+            if entries.is_empty() {
+                println!("Nenhum erro recente nos logs.");
+            } else {
+                for entry in &entries {
+                    println!("{}", entry);
+                }
+            }
+            Ok(CommandResult::Handled)
+        }
+
         "/help" => {
             println!("Available commands:");
             println!("  /model <name>         Switch LLM provider+model (e.g. /model claude-opus-4-7)");
@@ -111,12 +131,63 @@ pub async fn handle_command(
             println!("  /as <persona>         Force persona for next turn (PERS-05)");
             println!("  /cabinet [personas..] Convene Cabinet with named personas (CAB-04)");
             println!("  /contest <id>         Revoke a belief by ID (D-14 explicit escape hatch)");
+            println!("  /logs                 Show recent ERROR/WARN log entries (M3)");
             println!("  /help                 Show this help");
             Ok(CommandResult::Handled)
         }
 
         _ => Ok(CommandResult::Unknown(trimmed.to_owned())),
     }
+}
+
+/// Read the most recent ERROR and WARN entries from the JSON-lines log file.
+///
+/// Safety contract (M3 / T-05-04-02):
+///   - Extracts ONLY: timestamp, level, message.
+///   - NEVER includes fields: user_input, assistant_response, text, content, or any
+///     conversation payload. The caller can grep this function to verify.
+///   - Returns at most `max` entries in chronological order.
+///   - If the file does not exist or cannot be read, returns an empty vec (silent fail).
+fn read_recent_log_errors(path: &str, max: usize) -> Vec<String> {
+    use std::io::{BufRead, BufReader};
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let reader = BufReader::new(file);
+    let lines: Vec<String> = reader.lines()
+        .filter_map(|l| l.ok())
+        .collect();
+
+    // Scan the last 200 lines for efficiency — O(200) constant cost (T-05-04-04).
+    let tail: Vec<&String> = lines.iter().rev().take(200).collect();
+
+    let mut entries: Vec<String> = tail.iter()
+        .filter_map(|line| {
+            // Minimal JSON-line parsing — no extra deps beyond serde_json (already in Cargo.toml).
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            let level = v.get("level").and_then(|l| l.as_str())?;
+            if level != "ERROR" && level != "WARN" {
+                return None;
+            }
+            // Extract ONLY timestamp + level + message — NEVER user_input/assistant_response/content.
+            let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("?");
+            let msg = v.get("fields")
+                .and_then(|f| f.get("message"))
+                .and_then(|m| m.as_str())
+                .or_else(|| v.get("message").and_then(|m| m.as_str()))
+                .unwrap_or("(sem mensagem)");
+            Some(format!("[{ts}] [{level}] {msg}"))
+        })
+        .collect();
+
+    // tail iterated in reverse order — restore chronological order.
+    entries.reverse();
+
+    // Return only the last `max` entries.
+    let skip = entries.len().saturating_sub(max);
+    entries.into_iter().skip(skip).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -238,5 +309,69 @@ mod tests {
         let result = handle_command("/as Aria", &provider, &registry, &mem, &mut forced).await.expect("cmd");
         assert!(matches!(result, CommandResult::Handled));
         assert_eq!(forced.as_deref(), Some("Aria"), "forced must be set to Aria");
+    }
+
+    // ── /logs unit tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn read_recent_log_errors_empty_when_file_missing() {
+        let entries = super::read_recent_log_errors("/tmp/bastion_nonexistent_log_12345.log", 10);
+        assert!(entries.is_empty(), "missing file must return empty vec");
+    }
+
+    #[test]
+    fn read_recent_log_errors_filters_only_error_warn() {
+        use std::io::Write;
+        let mut f = NamedTempFile::new().unwrap();
+        // Write three JSON-lines log entries: INFO (must be excluded), WARN (must be included), ERROR (must be included).
+        writeln!(f, r#"{{"timestamp":"2026-06-14T10:00:00Z","level":"INFO","fields":{{"message":"startup ok"}}}}"#).unwrap();
+        writeln!(f, r#"{{"timestamp":"2026-06-14T10:01:00Z","level":"WARN","fields":{{"message":"retry triggered"}}}}"#).unwrap();
+        writeln!(f, r#"{{"timestamp":"2026-06-14T10:02:00Z","level":"ERROR","fields":{{"message":"turn failed","user_input":"secret","assistant_response":"secret2"}}}}"#).unwrap();
+        f.flush().unwrap();
+
+        let entries = super::read_recent_log_errors(f.path().to_str().unwrap(), 10);
+
+        assert_eq!(entries.len(), 2, "must return exactly WARN + ERROR entries");
+        assert!(entries[0].contains("WARN"), "first entry must be WARN: {:?}", entries[0]);
+        assert!(entries[1].contains("ERROR"), "second entry must be ERROR: {:?}", entries[1]);
+
+        // CRITICAL: no conversation content must appear in formatted output.
+        for entry in &entries {
+            assert!(!entry.contains("secret"), "entry must NOT contain user_input/assistant_response content: {:?}", entry);
+        }
+
+        // Messages must be present.
+        assert!(entries[0].contains("retry triggered"), "WARN message must appear");
+        assert!(entries[1].contains("turn failed"), "ERROR message must appear");
+    }
+
+    #[test]
+    fn read_recent_log_errors_respects_max_limit() {
+        use std::io::Write;
+        let mut f = NamedTempFile::new().unwrap();
+        for i in 0..20_u32 {
+            writeln!(f, r#"{{"timestamp":"2026-06-14T10:{:02}:00Z","level":"ERROR","fields":{{"message":"err {i}"}}}}"#, i).unwrap();
+        }
+        f.flush().unwrap();
+
+        let entries = super::read_recent_log_errors(f.path().to_str().unwrap(), 5);
+        assert_eq!(entries.len(), 5, "must not exceed max limit");
+        // Must be the LAST 5 (most recent).
+        assert!(entries[4].contains("err 19"), "last entry must be most recent: {:?}", entries[4]);
+    }
+
+    #[tokio::test]
+    async fn logs_command_returns_handled() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mem = make_memory(&path).await;
+        let registry = make_registry(&["Aria"]);
+        let provider = make_provider();
+        let mut forced = None;
+
+        // Point RUST_LOG_PATH to a non-existent file — /logs should still return Handled.
+        std::env::set_var("RUST_LOG_PATH", "/tmp/bastion_no_log_for_test.log");
+        let result = handle_command("/logs", &provider, &registry, &mem, &mut forced).await.expect("cmd");
+        assert!(matches!(result, CommandResult::Handled));
     }
 }
