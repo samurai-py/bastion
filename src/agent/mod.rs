@@ -3,5 +3,6 @@ pub mod compactor;
 pub mod command;
 pub mod context;
 pub mod dream;
+pub mod identity;
 pub mod skills;
 pub mod handle;
