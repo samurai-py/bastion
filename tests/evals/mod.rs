@@ -410,7 +410,11 @@ async fn runner_egress_single_local_only_blocks_cloud_provider() {
         convene_reason: None,
     };
 
-    let result = run(decision, &registry, provider, "my health data").await;
+    let history = vec![bastion::types::Message {
+        role:    bastion::types::Role::User,
+        content: bastion::types::MessageContent::Text("my health data".to_owned()),
+    }];
+    let result = run(decision, &registry, provider, &history, &bastion::types::CallConfig::default()).await;
 
     // Must return PrivacyEgressBlocked error
     assert!(result.is_err(), "LocalOnly + cloud provider must return Err");
@@ -470,7 +474,11 @@ async fn runner_egress_parallel_local_only_blocks_all_cloud_calls() {
         convene_reason: None,
     };
 
-    let result = run(decision, &registry, provider, "sensitive message").await;
+    let history = vec![bastion::types::Message {
+        role:    bastion::types::Role::User,
+        content: bastion::types::MessageContent::Text("sensitive message".to_owned()),
+    }];
+    let result = run(decision, &registry, provider, &history, &bastion::types::CallConfig::default()).await;
 
     // All tasks blocked → Err (all parallel persona calls failed)
     assert!(result.is_err(), "All LocalOnly + cloud tasks must return Err collectively");
