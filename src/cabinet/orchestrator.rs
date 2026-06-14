@@ -18,6 +18,7 @@ use crate::cabinet::{CabinetTable, Turn, TurnKind};
 use crate::hooks::egress::check_egress;
 use crate::persona::runner::PersonaId;
 use crate::provider::SharedProvider;
+use crate::types::{CallConfig, Message, Role, MessageContent};
 
 pub const DEFAULT_ROUNDS: u8 = 2;
 pub const MAX_ROUNDS: u8 = 3;
@@ -31,13 +32,23 @@ pub const MAX_ROUNDS: u8 = 3;
 /// - `table`: The convened personas and their resolved tier.
 /// - `provider`: Shared provider (Arc<RwLock>) — cloned into each JoinSet task.
 /// - `rounds`: Requested round count; clamped to `[1, MAX_ROUNDS]`.
+/// - `capability_registry`: Used to snapshot tool definitions for each persona's CallConfig (BIG-1).
 pub async fn deliberate(
     table: &CabinetTable,
     provider: SharedProvider,
     rounds: u8,
+    capability_registry: &crate::capability::CapabilityRegistry,
 ) -> anyhow::Result<Vec<Turn>> {
     let rounds = rounds.clamp(1, MAX_ROUNDS);
     let mut transcript: Vec<Turn> = Vec::new();
+
+    // Snapshot tool definitions before the JoinSet spawns.
+    // tool_defs is Vec<Value> (not &CapabilityRegistry), safe to clone into each spawn.
+    // BIG-1 / Cabinet v1.0: persona receives tools in CallConfig but tool_calls are NOT
+    // executed inline in the Cabinet (JoinSet pattern does not support dispatch_tool_loop).
+    // The LLM has awareness of capabilities and can reference tools in its position text.
+    // Tool execution in Cabinet: Phase 3 roadmap.
+    let tool_defs = capability_registry.list_tool_defs();
 
     for round in 1..=rounds {
         let kind = if round == 1 {
@@ -59,6 +70,7 @@ pub async fn deliberate(
             let provider_clone = provider.clone();
             let snap = transcript_snapshot.clone();
             let round_kind = kind.clone();
+            let tools = tool_defs.clone();
 
             set.spawn(async move {
                 // Fail-closed egress backstop (CF-1): before every cabinet provider call.
@@ -73,10 +85,27 @@ pub async fn deliberate(
                 // Build the turn prompt.
                 let prompt = build_turn_prompt(&persona_id, &system_prompt, &snap, round_kind);
 
+                // Build CallConfig with persona's system prompt and tool definitions.
+                let config = CallConfig {
+                    system_prompt: system_prompt.clone(),
+                    max_tokens: 2048,
+                    tools,
+                };
+
+                // Build a single-message history from the constructed prompt.
+                let history = vec![Message {
+                    role: Role::User,
+                    content: MessageContent::Text(prompt),
+                }];
+
+                // BIG-1 / Cabinet v1.0: call provider.complete() with tools.
+                // tool_calls in response are NOT executed inline — Cabinet uses tools for
+                // awareness only (LLM can reference capabilities in its position text).
                 // Acquire read lock INSIDE the task (loop_.rs:118-125 pattern).
                 let result = {
                     let guard = provider_clone.read().await;
-                    guard.complete_simple(&prompt).await
+                    guard.complete(&history, &config).await
+                        .map(|r| r.text)
                 };
 
                 // Tag by RETURNED PersonaId — never by spawn order (CF-3 / Pitfall 4).
@@ -164,27 +193,42 @@ fn build_turn_prompt(
 mod tests {
     use super::*;
     use crate::cabinet::{CabinetTable, TurnKind};
+    use crate::capability::CapabilityRegistry;
     use crate::memory::PrivacyTier;
     use crate::persona::Persona;
     use crate::provider::{Provider, SharedProvider};
-    use crate::types::{CallConfig, LlmResponse, Message};
+    use crate::types::{CallConfig, LlmResponse, Message, TokenUsage};
     use async_trait::async_trait;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    /// MockProvider echoes back "<persona_name>:position" parsed from the prompt.
-    /// Prompt contains "You are <name>." — extract it.
+    /// MockProvider echoes back "<persona_name>:position" parsed from the config.system_prompt.
+    /// Config system_prompt contains "You are <name>." — extract it.
     struct EchoProvider;
 
     #[async_trait]
     impl Provider for EchoProvider {
-        async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
-            unimplemented!()
+        async fn complete(&self, _: &[Message], config: &CallConfig) -> anyhow::Result<LlmResponse> {
+            // Extract the persona name from "You are <Name>." in system_prompt.
+            // The system_prompt may have trailing content, so find the first token after "You are ".
+            let name = config.system_prompt
+                .lines()
+                .find(|l| l.starts_with("You are "))
+                .and_then(|l| l.strip_prefix("You are "))
+                .map(|s| {
+                    s.split(|c: char| c == '.' || c == ' ')
+                        .next()
+                        .unwrap_or("unknown")
+                })
+                .unwrap_or("unknown");
+            Ok(LlmResponse {
+                text: format!("response-from:{name}"),
+                tool_calls: None,
+                usage: TokenUsage { input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0 },
+            })
         }
         async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {
-            // Extract the persona name from "You are <Name>." lines.
-            // The line may have trailing content (e.g. " Provide your position..."),
-            // so we find the first token after "You are " up to the first '.' or ' '.
+            // Kept for backward compatibility — extract name from prompt lines.
             let name = prompt
                 .lines()
                 .find(|l| l.starts_with("You are "))
@@ -204,6 +248,10 @@ mod tests {
 
     fn make_provider() -> SharedProvider {
         Arc::new(RwLock::new(Box::new(EchoProvider) as Box<dyn Provider>))
+    }
+
+    fn make_registry() -> CapabilityRegistry {
+        CapabilityRegistry::new()
     }
 
     fn make_table(names: &[(&str, PrivacyTier)]) -> CabinetTable {
@@ -233,7 +281,7 @@ mod tests {
         let provider = make_provider();
 
         // Request 99 rounds — must be clamped to MAX_ROUNDS=3
-        let transcript = deliberate(&table, provider, 99).await.unwrap();
+        let transcript = deliberate(&table, provider, 99, &make_registry()).await.unwrap();
 
         // Each round produces 3 turns (one per persona), and rounds are clamped to 3
         let max_turns = usize::from(MAX_ROUNDS) * table.personas.len();
@@ -257,12 +305,12 @@ mod tests {
         let provider = make_provider();
 
         // 1 round = only position turns (easier to check attribution)
-        let transcript = deliberate(&table, provider, 1).await.unwrap();
+        let transcript = deliberate(&table, provider, 1, &make_registry()).await.unwrap();
 
         assert_eq!(transcript.len(), 3, "expected 3 position turns");
 
         for turn in &transcript {
-            // EchoProvider returns "response-from:<name>" (extracted from the prompt).
+            // EchoProvider returns "response-from:<name>" (extracted from the config.system_prompt).
             // The persona field (PersonaId) must match the name echoed in the text.
             // This proves attribution is by returned PersonaId — not spawn order (CF-3).
             assert!(
@@ -281,7 +329,7 @@ mod tests {
         ]);
         let provider = make_provider();
 
-        let transcript = deliberate(&table, provider, 1).await.unwrap();
+        let transcript = deliberate(&table, provider, 1, &make_registry()).await.unwrap();
         for turn in &transcript {
             assert_eq!(turn.kind, TurnKind::Position);
         }
@@ -295,7 +343,7 @@ mod tests {
         ]);
         let provider = make_provider();
 
-        let transcript = deliberate(&table, provider, 2).await.unwrap();
+        let transcript = deliberate(&table, provider, 2, &make_registry()).await.unwrap();
 
         // First 2 turns: Position; next 2: Reply
         let positions: Vec<_> = transcript.iter().filter(|t| t.kind == TurnKind::Position).collect();
@@ -316,7 +364,7 @@ mod tests {
         let provider = make_provider(); // name() == "mock"
 
         // All turns should be skipped (egress blocked) — empty transcript.
-        let transcript = deliberate(&table, provider, 1).await.unwrap();
+        let transcript = deliberate(&table, provider, 1, &make_registry()).await.unwrap();
         assert!(
             transcript.is_empty(),
             "expected empty transcript when egress blocks all calls, got {} turns",
