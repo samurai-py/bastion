@@ -260,6 +260,14 @@ impl AgentLoop {
         let agent_name = decision.personas.first().cloned().unwrap_or_else(|| "default".to_string());
         turn_span.set_attribute(KeyValue::new("gen_ai.agent.name", agent_name));
 
+        // WR-01 (review #2): capture the turn's privacy tier from the handling persona
+        // ONCE, before `decision` is moved into the dispatch match below. Threaded into
+        // run_provider_fallback so the fallback path no longer re-reads the already-taken
+        // `self.forced_persona` (collapsed to None — over-blocked a forced CloudOk persona
+        // and relied on accidental fail-closed for LocalOnly). None stays fail-closed.
+        let turn_tier: Option<crate::memory::PrivacyTier> = decision.personas.first()
+            .and_then(|name| self.registry.get(name).map(|p| p.tier));
+
         // 5. Dispatch on decision.mode → build response text.
         //    Empty registry → route_text will be empty → fall back to provider.
         let route_text = match decision.mode {
@@ -366,7 +374,7 @@ impl AgentLoop {
         //    The Cabinet path also produces its own text.
         //    Only the truly empty case (no persona matched) reaches run_provider_fallback.
         let final_text = if route_text.is_empty() {
-            self.run_provider_fallback(&mut history, &session_id, owner, user_input).await?
+            self.run_provider_fallback(&mut history, &session_id, owner, user_input, turn_tier).await?
         } else {
             route_text
         };
@@ -575,12 +583,22 @@ impl AgentLoop {
                             .start(&tracer);
                         let result = if self.capability_registry.is_empty() {
                             // Fallback: if no capabilities registered, try MCP directly.
-                            self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
-                                .unwrap_or_else(|e| {
-                                    // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
+                            // WR-02 (review #2): even this registry-bypass path must honor egress
+                            // (D-13). Mirror the policy registry.invoke applies to a non-local MCP
+                            // capability — gate the turn tier against "external" before dispatch,
+                            // so a hallucinated/injected tool call can't execute ungated.
+                            match crate::hooks::egress::check_egress(resolved_tier, "external") {
+                                Err(e) => {
                                     tool_span.set_attribute(KeyValue::new("error.type", e.to_string()));
                                     serde_json::json!({"error": e.to_string()})
-                                })
+                                }
+                                Ok(()) => self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
+                                    .unwrap_or_else(|e| {
+                                        // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
+                                        tool_span.set_attribute(KeyValue::new("error.type", e.to_string()));
+                                        serde_json::json!({"error": e.to_string()})
+                                    })
+                            }
                         } else {
                             self.capability_registry.invoke(&tc.name, tc.arguments.clone(), &ctx).await
                                 .unwrap_or_else(|e| {
@@ -687,6 +705,7 @@ impl AgentLoop {
         session_id: &str,
         owner: &str,
         user_input: &str,
+        turn_tier: Option<crate::memory::PrivacyTier>,
     ) -> anyhow::Result<String> {
         // Build tool definitions from ToolRegistry.
         let tools: Vec<serde_json::Value> = self.mcp.registry().list_tool_names()
@@ -713,18 +732,13 @@ impl AgentLoop {
             tools,
         };
 
-        // WR-04: resolve PrivacyTier for this turn before any provider call.
-        // Strategy: use the active persona's tier from registry; default to None (fail-closed).
-        // Tier is resolved from the PersonaRegistry (trusted), NOT from MCP tool results
-        // (untrusted) — T-04-02-03 mitigation.
-        let resolved_tier: Option<crate::memory::PrivacyTier> = {
-            if let Some(ref persona_name) = self.forced_persona {
-                self.registry.get(persona_name).map(|p| p.tier)
-            } else {
-                // No forced persona — None tier is always fail-closed per check_egress contract.
-                None
-            }
-        };
+        // WR-04 / WR-01 (review #2): the turn's PrivacyTier is resolved ONCE in run_turn_for
+        // (from the handling persona, before `decision` is consumed) and threaded in here.
+        // Previously this re-read the already-taken `self.forced_persona` (always None at this
+        // point), so a forced CloudOk persona was over-blocked and LocalOnly safety relied on
+        // an accidental None collapse. Tier comes from the trusted PersonaRegistry, never from
+        // MCP tool results (T-04-02-03). None stays fail-closed per check_egress contract.
+        let resolved_tier: Option<crate::memory::PrivacyTier> = turn_tier;
 
         // WR-04: fail-closed egress gate — mirrors cabinet path (loop_.rs line 159-161, CR-02).
         // CRITICAL: Do NOT log system/user payload on block (egress.rs invariant).
@@ -755,6 +769,12 @@ impl AgentLoop {
                     anyhow::bail!(BastionError::BudgetExceeded);
                 }
             }
+
+            // WR-01 (review #2): fail-closed egress gate on EVERY round, not just pre-loop.
+            // Subsequent rounds re-send `history` (which may carry LocalOnly tool results) to
+            // the provider; mirror the per-round gate in dispatch_tool_loop. (The pre-loop
+            // check above covers round 0; this covers all rounds uniformly.)
+            crate::hooks::egress::check_egress(resolved_tier, &provider_name)?;
 
             // LLM call — hold READ lock for full stream duration (Pitfall 5)
             let response = {
@@ -800,8 +820,17 @@ impl AgentLoop {
                 Some(tool_calls) => {
                     for tc in &tool_calls {
                         tracing::debug!(event = "tool_dispatch", tool = %tc.name);
-                        let result = self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
-                            .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+                        // WR-02 (review #2): the fallback dispatches MCP tools directly (registry
+                        // bypass), so it must apply the same egress policy registry.invoke applies
+                        // to a non-local (MCP) capability — gate the turn tier against "external"
+                        // before dispatch (D-13). On block, return an error result and keep the
+                        // loop going (parity with registry.invoke's caught-error behavior), rather
+                        // than executing the tool ungated.
+                        let result = match crate::hooks::egress::check_egress(resolved_tier, "external") {
+                            Err(e) => serde_json::json!({ "error": e.to_string() }),
+                            Ok(()) => self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
+                                .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
+                        };
 
                         // D-06: handle skill_reloaded signal from skill-writer container
                         // (shared helper — also used by dispatch_tool_loop, Gap 1 fix).
