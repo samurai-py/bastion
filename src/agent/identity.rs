@@ -96,11 +96,15 @@ impl TurnContextProvider for IdentityProvider {
 mod tests {
     use super::*;
     use crate::memory::sqlite::SqliteMemory;
+    use crate::session::SessionManager;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio::sync::RwLock;
 
     async fn make_memory(db_path: &str) -> SharedMemory {
+        // Init schema so beliefs table exists before any memory operations.
+        let session = SessionManager::new(db_path);
+        session.init_schema().await.expect("init_schema");
         Arc::new(RwLock::new(
             Box::new(SqliteMemory::new(db_path)) as Box<dyn crate::memory::Memory>
         ))

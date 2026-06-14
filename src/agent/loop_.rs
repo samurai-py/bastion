@@ -15,6 +15,7 @@ use crate::hooks::guardrails::InputGuardrail;
 use crate::hooks::output_validator::OutputValidator;
 use crate::hooks::egress::EgressHook;
 use crate::agent::context::TurnContextProvider;
+use crate::agent::identity::IdentityProvider;
 
 const MAX_TOOL_ROUNDS: u32 = 10;
 const DEFAULT_SYSTEM_PROMPT: &str = "You are Bastion, a proactive personal AI assistant.";
@@ -69,7 +70,7 @@ impl AgentLoop {
         goals:            GoalEngine,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
-        Self {
+        let mut agent = Self {
             provider,
             session,
             mcp,
@@ -87,7 +88,11 @@ impl AgentLoop {
             pending_tx,
             pending_rx: Some(pending_rx),
             forced_persona: None,
-        }
+        };
+        // M1: registrar IdentityProvider para injeção do bloco de identidade via SEAM #2.
+        // No primeiro uso retorna o ONBOARDING_PROMPT; nos subsequentes retorna o bloco gravado.
+        agent.context_providers.push(Box::new(IdentityProvider::new(agent.memory.clone())));
+        agent
     }
 
     /// SEAM #2 — Constrói o system prompt para o turn atual.
