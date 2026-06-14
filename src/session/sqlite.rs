@@ -1,6 +1,16 @@
 use crate::types::{Message, MessageContent, Role, BastionError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Open a SQLite connection with WAL mode and a 5-second busy timeout.
+/// All internal functions must use this helper so that concurrent writes
+/// from the daemon (Telegram double-tap, channel overlap) do not cause
+/// SQLITE_BUSY errors (CONC-1).
+fn open_conn(path: &str) -> rusqlite::Result<rusqlite::Connection> {
+    let conn = rusqlite::Connection::open(path)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+    Ok(conn)
+}
+
 pub struct SessionManager {
     db_path: String,
 }
@@ -13,9 +23,10 @@ impl SessionManager {
     pub async fn init_schema(&self) -> anyhow::Result<()> {
         let path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
+            let conn = open_conn(&path)?;
             conn.execute_batch("
                 PRAGMA journal_mode=WAL;
+                PRAGMA busy_timeout=5000;
 
                 CREATE TABLE IF NOT EXISTS sessions (
                     id         TEXT    PRIMARY KEY,
@@ -99,8 +110,7 @@ impl SessionManager {
         let path = self.db_path.clone();
         let owner_id = owner_id.to_owned();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let conn = open_conn(&path)?;
             let now: i64 = now_nanos();
             // Use nanosecond timestamp as session ID — unique enough per owner
             let session_id = now.to_string();
@@ -115,8 +125,7 @@ impl SessionManager {
     pub async fn load_most_recent_id(&self) -> anyhow::Result<Option<String>> {
         let path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1"
             )?;
@@ -136,8 +145,7 @@ impl SessionManager {
         let path = self.db_path.clone();
         let owner = owner_id.to_owned();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT id FROM sessions WHERE owner_id = ?1 ORDER BY updated_at DESC LIMIT 1"
             )?;
@@ -154,8 +162,7 @@ impl SessionManager {
         let path = self.db_path.clone();
         let sid = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
                 "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY created_at ASC"
             )?;
@@ -186,8 +193,7 @@ impl SessionManager {
         let path = self.db_path.clone();
         let sid = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let conn = open_conn(&path)?;
 
             // Enforce role sequence integrity: Tool message must follow Assistant
             if msg.role == Role::Tool {
@@ -234,8 +240,7 @@ impl SessionManager {
         let sid = session_id.to_owned();
         let recent = recent.to_vec();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let conn = open_conn(&path)?;
 
             // Delete all old messages for this session
             conn.execute(
@@ -277,8 +282,7 @@ impl SessionManager {
     pub async fn update_budget(&self, cost_usd: f64) -> anyhow::Result<()> {
         let path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let conn = open_conn(&path)?;
             let today = today_utc();
             conn.execute(
                 "INSERT INTO budget(date, total_usd) VALUES(?1, ?2) \
@@ -292,8 +296,7 @@ impl SessionManager {
     pub async fn check_budget(&self, daily_limit: f64) -> anyhow::Result<bool> {
         let path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let conn = open_conn(&path)?;
             let today = today_utc();
             let mut stmt = conn.prepare(
                 "SELECT total_usd FROM budget WHERE date = ?1"
