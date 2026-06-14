@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use opentelemetry::{global as otel_global, KeyValue};
@@ -24,7 +25,7 @@ pub const DEFAULT_OWNER: &str = "_local";
 pub struct AgentLoop {
     pub provider:          SharedProvider,
     pub session:           SessionManager,
-    pub mcp:               McpClient,
+    pub mcp:               Arc<McpClient>,
     pub compactor:         AutoCompact,
     pub session_id:        String,
     pub daily_budget_usd:  f64,
@@ -70,6 +71,9 @@ impl AgentLoop {
         goals:            GoalEngine,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
+        // BIG-1 (Gap 2): McpClient is shared by-Arc so each McpToolAdapter can hold a
+        // reference and route tool calls through capability_registry.invoke.
+        let mcp = Arc::new(mcp);
         let mut agent = Self {
             provider,
             session,
@@ -92,6 +96,43 @@ impl AgentLoop {
         // M1: registrar IdentityProvider para injeção do bloco de identidade via SEAM #2.
         // No primeiro uso retorna o ONBOARDING_PROMPT; nos subsequentes retorna o bloco gravado.
         agent.context_providers.push(Box::new(IdentityProvider::new(agent.memory.clone())));
+
+        // BIG-1 (Gap 2): populate the capability_registry from every connected MCP tool.
+        // Without this the registry stays empty, list_tool_defs() returns [] (so the normal
+        // persona path offers ZERO tools to the LLM), and the is_empty() fast-path in
+        // dispatch_tool_loop bypasses the egress/approval gate. Registering one McpToolAdapter
+        // per tool makes ALL tool calls flow through capability_registry.invoke (D-13).
+        // Snapshot tool metadata first (owned) so the agent.mcp borrow is released before we
+        // mutably borrow agent.capability_registry.
+        let mcp_tools: Vec<(String, String, serde_json::Value, String)> = agent.mcp.registry()
+            .list_tool_names()
+            .iter()
+            .map(|name| {
+                let server_label = agent.mcp.registry().server_for(name).unwrap_or("").to_string();
+                let schema = agent.mcp.registry().get_tool_schema(name)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+                let description = agent.mcp.registry().get_tool_description(name)
+                    .unwrap_or("")
+                    .to_string();
+                (name.to_string(), server_label, schema, description)
+            })
+            .collect();
+        for (tool_name, server_label, schema, description) in mcp_tools {
+            let adapter = crate::capability::McpToolAdapter {
+                tool_name: tool_name.clone(),
+                server_label,
+                description,
+                schema,
+                mcp: agent.mcp.clone(),
+            };
+            if let Err(e) = agent.capability_registry.register(Arc::new(adapter)) {
+                tracing::warn!(event = "mcp_capability_register_failed", tool = %tool_name, err = %e);
+            }
+        }
+        let registered = agent.capability_registry.list_tool_defs().len();
+        tracing::info!(event = "capability_registry_populated", mcp_tools = registered);
+
         agent
     }
 
@@ -348,6 +389,106 @@ impl AgentLoop {
         Ok(final_text)
     }
 
+    /// D-06: handle the `skill_reloaded` signal emitted by the skill-writer
+    /// container after a skill is created/updated by natural language.
+    ///
+    /// Gap 1 fix: this was previously inline in `run_provider_fallback` only,
+    /// which is unreachable on normal persona turns — so skill-writer-by-NL never
+    /// reloaded in normal conversation. Extracted into a shared helper called by
+    /// BOTH `run_provider_fallback` and `dispatch_tool_loop`, so the skill becomes
+    /// available on the very next turn regardless of which path produced it.
+    ///
+    /// Synchronous (no awaits): `SkillsLoader::rescan` and the path checks are sync.
+    fn handle_skill_reload(&self, result: &serde_json::Value) {
+        // CR-02 path-safety: rebase skill_path to core's own SKILLS_DIR —
+        // skill-writer returns /skills/<name>/SKILL.md (its container path).
+        if result.get("skill_reloaded").and_then(|v| v.as_bool()) == Some(true) {
+            if let Some(raw_path) = result.get("skill_path").and_then(|v| v.as_str()) {
+                let skills_dir = std::env::var("SKILLS_DIR")
+                    .unwrap_or_else(|_| "/skills".to_string());
+                // SEC: skill_path crosses the skill-writer→core container trust
+                // boundary. Keep ONLY Normal components — discarding RootDir,
+                // Prefix, CurDir and ParentDir ("..") — so a malicious segment
+                // cannot escape SKILLS_DIR.
+                let normals: Vec<std::path::PathBuf> =
+                    std::path::Path::new(raw_path)
+                        .components()
+                        .filter_map(|c| match c {
+                            std::path::Component::Normal(s) => {
+                                Some(std::path::PathBuf::from(s))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                let skills_base = std::path::Path::new(&skills_dir);
+                // Strip the shared skills-base prefix and keep the FULL relative
+                // remainder (e.g. "personas/<slug>/<name>/SKILL.md" for private
+                // skills). Taking only the last two components would drop the
+                // personas/<slug>/ segment and rescan the wrong slot (WR-01).
+                let base_norm_count = skills_base
+                    .components()
+                    .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                    .count();
+                let tail_components: Vec<std::path::PathBuf> =
+                    if normals.len() > base_norm_count {
+                        normals[base_norm_count..].to_vec()
+                    } else {
+                        normals.clone()
+                    };
+                // Require the reload target to be <name>/SKILL.md (at least two
+                // components, ending in SKILL.md) — guards the format coupling.
+                let last_is_skill_md = tail_components
+                    .last()
+                    .and_then(|p| p.to_str())
+                    == Some("SKILL.md");
+                if tail_components.len() < 2 || !last_is_skill_md {
+                    tracing::warn!(
+                        event = "skill_reload_rejected",
+                        raw_path = %raw_path,
+                        reason = "path does not resolve to <name>/SKILL.md under SKILLS_DIR"
+                    );
+                } else {
+                    let tail: std::path::PathBuf = tail_components.iter().collect();
+                    let local_path = skills_base.join(&tail);
+                    // Defense in depth: Normal-only components cannot escape
+                    // skills_base lexically, but a symlink planted inside
+                    // SKILLS_DIR could still redirect rescan outside it. Resolve
+                    // symlinks before the containment check. A not-yet-existing
+                    // path can't be canonicalized — fall back to the lexical
+                    // check; rescan then fails closed on the missing file.
+                    let canon_base = std::fs::canonicalize(skills_base)
+                        .unwrap_or_else(|_| skills_base.to_path_buf());
+                    let contained = match std::fs::canonicalize(&local_path) {
+                        Ok(canon) => canon.starts_with(&canon_base),
+                        Err(_) => local_path.starts_with(skills_base),
+                    };
+                    if !contained {
+                        tracing::warn!(
+                            event = "skill_reload_rejected",
+                            path = %local_path.to_string_lossy(),
+                            reason = "resolved path escapes SKILLS_DIR"
+                        );
+                    } else {
+                        let path_str = local_path.to_string_lossy();
+                        tracing::info!(event = "skill_reload_signal", path = %path_str);
+                        match crate::agent::skills::SkillsLoader::rescan(&path_str) {
+                            Ok(meta) => tracing::info!(
+                                event = "skill_loaded",
+                                name = %meta.name,
+                                path = %path_str
+                            ),
+                            Err(e) => tracing::warn!(
+                                event = "skill_reload_failed",
+                                path = %path_str,
+                                err = %e
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Dispatch tool-loop for a single LLM response (BIG-1).
     ///
     /// Processes `response.tool_calls` by routing each call through `capability_registry.invoke`
@@ -449,6 +590,11 @@ impl AgentLoop {
                                 })
                         };
                         tool_span.end();
+
+                        // Gap 1 (SC#2): skill-writer-by-NL must reload on the normal
+                        // persona path too, not only in run_provider_fallback. Shared
+                        // helper handles the skill_reloaded signal.
+                        self.handle_skill_reload(&result);
 
                         let result_str = result.to_string();
                         let tool_msg = Message {
@@ -657,96 +803,9 @@ impl AgentLoop {
                         let result = self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
                             .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
 
-                        // D-06: handle skill_reloaded signal from skill-writer container.
-                        // CR-02 fix: rebase skill_path to core's own SKILLS_DIR —
-                        // skill-writer returns /skills/<name>/SKILL.md (its container path).
-                        if result.get("skill_reloaded").and_then(|v| v.as_bool()) == Some(true) {
-                            if let Some(raw_path) = result.get("skill_path").and_then(|v| v.as_str()) {
-                                let skills_dir = std::env::var("SKILLS_DIR")
-                                    .unwrap_or_else(|_| "/skills".to_string());
-                                // SEC: skill_path crosses the skill-writer→core container trust
-                                // boundary. Keep ONLY Normal components — discarding RootDir,
-                                // Prefix, CurDir and ParentDir ("..") — so a malicious segment
-                                // cannot escape SKILLS_DIR. Then take the last two
-                                // (<skill_name>/SKILL.md) and resolve under SKILLS_DIR.
-                                let normals: Vec<std::path::PathBuf> =
-                                    std::path::Path::new(raw_path)
-                                        .components()
-                                        .filter_map(|c| match c {
-                                            std::path::Component::Normal(s) => {
-                                                Some(std::path::PathBuf::from(s))
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect();
-                                let skills_base = std::path::Path::new(&skills_dir);
-                                // Strip the shared skills-base prefix and keep the FULL relative
-                                // remainder (e.g. "personas/<slug>/<name>/SKILL.md" for private
-                                // skills). Taking only the last two components would drop the
-                                // personas/<slug>/ segment and rescan the wrong slot (WR-01).
-                                let base_norm_count = skills_base
-                                    .components()
-                                    .filter(|c| matches!(c, std::path::Component::Normal(_)))
-                                    .count();
-                                let tail_components: Vec<std::path::PathBuf> =
-                                    if normals.len() > base_norm_count {
-                                        normals[base_norm_count..].to_vec()
-                                    } else {
-                                        normals.clone()
-                                    };
-                                // Require the reload target to be <name>/SKILL.md (at least two
-                                // components, ending in SKILL.md) — guards the format coupling.
-                                let last_is_skill_md = tail_components
-                                    .last()
-                                    .and_then(|p| p.to_str())
-                                    == Some("SKILL.md");
-                                if tail_components.len() < 2 || !last_is_skill_md {
-                                    tracing::warn!(
-                                        event = "skill_reload_rejected",
-                                        raw_path = %raw_path,
-                                        reason = "path does not resolve to <name>/SKILL.md under SKILLS_DIR"
-                                    );
-                                } else {
-                                    let tail: std::path::PathBuf = tail_components.iter().collect();
-                                    let local_path = skills_base.join(&tail);
-                                    // Defense in depth: Normal-only components cannot escape
-                                    // skills_base lexically, but a symlink planted inside
-                                    // SKILLS_DIR could still redirect rescan outside it. Resolve
-                                    // symlinks before the containment check (mirrors the Python
-                                    // guard's resolve()). A not-yet-existing path can't be
-                                    // canonicalized — fall back to the lexical check; rescan then
-                                    // fails closed on the missing file.
-                                    let canon_base = std::fs::canonicalize(skills_base)
-                                        .unwrap_or_else(|_| skills_base.to_path_buf());
-                                    let contained = match std::fs::canonicalize(&local_path) {
-                                        Ok(canon) => canon.starts_with(&canon_base),
-                                        Err(_) => local_path.starts_with(skills_base),
-                                    };
-                                    if !contained {
-                                        tracing::warn!(
-                                            event = "skill_reload_rejected",
-                                            path = %local_path.to_string_lossy(),
-                                            reason = "resolved path escapes SKILLS_DIR"
-                                        );
-                                    } else {
-                                        let path_str = local_path.to_string_lossy();
-                                        tracing::info!(event = "skill_reload_signal", path = %path_str);
-                                        match crate::agent::skills::SkillsLoader::rescan(&path_str) {
-                                            Ok(meta) => tracing::info!(
-                                                event = "skill_loaded",
-                                                name = %meta.name,
-                                                path = %path_str
-                                            ),
-                                            Err(e) => tracing::warn!(
-                                                event = "skill_reload_failed",
-                                                path = %path_str,
-                                                err = %e
-                                            ),
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        // D-06: handle skill_reloaded signal from skill-writer container
+                        // (shared helper — also used by dispatch_tool_loop, Gap 1 fix).
+                        self.handle_skill_reload(&result);
 
                         let result_str = result.to_string();
                         let tool_msg = Message {

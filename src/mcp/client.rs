@@ -117,7 +117,11 @@ impl McpClient {
                             for tool in tools {
                                 // input_schema is Arc<JsonObject> (Map<String, Value>) — wrap as Value::Object
                                 let schema = Value::Object((*tool.input_schema).clone());
-                                registry.register_with_schema(label, tool.name.to_string(), schema);
+                                let description = tool.description
+                                    .as_ref()
+                                    .map(|d| d.to_string())
+                                    .unwrap_or_default();
+                                registry.register_with_schema(label, tool.name.to_string(), schema, description);
                             }
                             tracing::info!(server = %label, "MCP server connected and tools registered");
                             servers.push((label.clone(), service));

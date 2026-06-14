@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use serde_json::Value;
 
-/// A registry entry holds the server label and the full JSON Schema for the tool.
+/// A registry entry holds the server label, the full JSON Schema, and the
+/// tool description (fed to the LLM for tool selection via list_tool_defs).
 struct ToolEntry {
     server_label: String,
     input_schema: Value,
+    description:  String,
 }
 
 pub struct ToolRegistry {
@@ -16,11 +18,18 @@ impl ToolRegistry {
         Self { tool_index: HashMap::new() }
     }
 
-    /// Register tools with their full schemas (fetched at connect_all time — CORE-02).
-    pub fn register_with_schema(&mut self, server_label: &str, tool_name: String, input_schema: Value) {
+    /// Register tools with their full schemas + description (fetched at connect time — CORE-02).
+    pub fn register_with_schema(
+        &mut self,
+        server_label: &str,
+        tool_name: String,
+        input_schema: Value,
+        description: String,
+    ) {
         self.tool_index.insert(tool_name, ToolEntry {
             server_label: server_label.to_owned(),
             input_schema,
+            description,
         });
     }
 
@@ -30,6 +39,7 @@ impl ToolRegistry {
             self.tool_index.insert(name, ToolEntry {
                 server_label: server_label.to_owned(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                description: String::new(),
             });
         }
     }
@@ -45,6 +55,11 @@ impl ToolRegistry {
     /// Return the full input_schema for a tool (populated at connect_all time).
     pub fn get_tool_schema(&self, tool_name: &str) -> Option<&Value> {
         self.tool_index.get(tool_name).map(|e| &e.input_schema)
+    }
+
+    /// Return the tool description (empty string if none was provided).
+    pub fn get_tool_description(&self, tool_name: &str) -> Option<&str> {
+        self.tool_index.get(tool_name).map(|e| e.description.as_str())
     }
 }
 

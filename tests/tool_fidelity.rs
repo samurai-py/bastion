@@ -24,10 +24,12 @@ fn registry_multi_server() {
 fn registry_schema_stored_and_retrieved() {
     let mut reg = ToolRegistry::new();
     let schema = serde_json::json!({"type": "object", "properties": {"repo": {"type": "string"}}});
-    reg.register_with_schema("composio", "github_star".into(), schema.clone());
+    reg.register_with_schema("composio", "github_star".into(), schema.clone(), "Star a GitHub repo".into());
     let retrieved = reg.get_tool_schema("github_star").unwrap();
     assert_eq!(retrieved, &schema);
     assert!(reg.get_tool_schema("nonexistent").is_none());
+    assert_eq!(reg.get_tool_description("github_star"), Some("Star a GitHub repo"));
+    assert!(reg.get_tool_description("nonexistent").is_none());
 }
 
 #[tokio::test]
