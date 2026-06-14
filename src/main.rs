@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::fmt;
 
@@ -248,6 +249,14 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
         });
     }
 
+    // CONC-1: session mutex per owner — serializes turns from the same owner so a
+    // double-tap (two Telegram messages in quick succession) never starts a concurrent
+    // turn for that owner. Different owners are NOT blocked by each other.
+    // Arc<Mutex<()>> is cheap: lock body is just the run_turn_for call.
+    // HashMap grows per unique owner but never shrinks — acceptable for personal use
+    // with a small fixed set of owners (T-05-02-03 accepted risk).
+    let mut session_locks: HashMap<String, Arc<Mutex<()>>> = HashMap::new();
+
     let mut stdin   = BufReader::new(tokio::io::stdin()).lines();
     // In a detached container (`docker compose up -d`) stdin is closed and returns EOF
     // immediately. The daemon must keep running to serve channels (Telegram), so we track
@@ -303,6 +312,14 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
             // agent as stdin/proactive. The trusted owner was resolved by the channel layer.
             // Typed Result propagated back through the oneshot (WR-10).
             Some(req) = inbound_rx.recv() => {
+                // CONC-1: acquire per-owner lock before processing turn.
+                // Two turns from the same owner cannot run concurrently (double-tap protection).
+                // Different owners are independent — their locks do not contend.
+                let lock = session_locks
+                    .entry(req.owner.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone();
+                let _guard = lock.lock().await;
                 let res = agent.run_turn_for(&req.text, &req.owner).await;
                 if let Err(ref e) = res {
                     tracing::warn!(
