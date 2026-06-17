@@ -244,6 +244,10 @@ testsprite_tests/
 .clawhub/
 skills/sonoscli/
 
+# Flutter mobile app — unignore lib/ (overrides Python virtualenv lib/ rule)
+!mobile/lib/
+!mobile/lib/**
+
 # TypeScript / Node
 bastion/mobile-connect/node_modules/
 
