@@ -8,6 +8,21 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+/// Single [[mesh.peer]] entry from bastion.toml.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct MeshPeerConfig {
+    pub owner_id:   String,
+    pub peer_url:   String,
+    pub age_pubkey: String,
+}
+
+/// Config section for mesh settings.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MeshConfig {
+    #[serde(default)]
+    pub peer: Vec<MeshPeerConfig>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct BastionConfig {
     pub agent:    AgentConfig,
@@ -15,6 +30,8 @@ pub struct BastionConfig {
     pub logging:  LoggingConfig,
     pub mcp:      McpConfig,
     pub channels: ChannelsConfig,
+    #[serde(default)]
+    pub mesh:     MeshConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -58,6 +75,38 @@ pub struct ChannelsConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChannelConfig {
     pub enabled: bool,
+}
+
+/// Load [[mesh.peer]] entries from bastion.toml into a MeshPeerMap.
+/// Called once at daemon startup. Errors are logged but do not abort startup
+/// (daemon runs without mesh peers if none configured).
+pub fn load_mesh_peers(config: &BastionConfig) -> crate::mesh::MeshPeerMap {
+    let mut map = crate::mesh::MeshPeerMap::new();
+    for entry in &config.mesh.peer {
+        map.register(entry.owner_id.clone(), crate::mesh::MeshPeer {
+            peer_url:   entry.peer_url.clone(),
+            age_pubkey: entry.age_pubkey.clone(),
+        });
+        tracing::info!(
+            event    = "mesh_peer_loaded",
+            owner_id = %entry.owner_id,
+            peer_url = %entry.peer_url,
+        );
+    }
+    map
+}
+
+/// Append a new [[mesh.peer]] entry to bastion.toml.
+/// Called by /mesh/pair handler after successful pairing.
+pub async fn append_mesh_peer(owner_id: &str, peer_url: &str, age_pubkey: &str) -> anyhow::Result<()> {
+    let path = std::env::var("BASTION_CONFIG").unwrap_or_else(|_| "bastion.toml".to_string());
+    let current = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    let entry = format!(
+        "\n[[mesh.peer]]\nowner_id = \"{}\"\npeer_url = \"{}\"\nage_pubkey = \"{}\"\n",
+        owner_id, peer_url, age_pubkey
+    );
+    tokio::fs::write(&path, format!("{}{}", current, entry)).await?;
+    Ok(())
 }
 
 /// Load BastionConfig from a TOML file, with env var overrides.

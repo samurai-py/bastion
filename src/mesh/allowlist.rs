@@ -2,7 +2,7 @@
 //! filter_for_mesh runs BEFORE check_egress — LocalOnly beliefs are stripped here
 //! so the egress gate only ever sees CloudOk beliefs for mesh.
 
-use crate::memory::{Belief, PrivacyTier};
+use crate::memory::Belief;
 use crate::hooks::egress::check_egress;
 
 /// Declares which belief tags this owner permits to flow to a specific peer.

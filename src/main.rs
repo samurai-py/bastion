@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", response);
         }
         Command::Daemon => {
-            daemon_loop(&mut agent).await?;
+            daemon_loop(&mut agent, &cfg).await?;
         }
     }
 
@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
 /// REPL daemon loop: stdin line by line, slash commands, graceful shutdown (D-01).
 /// Five select arms: stdin, pending_rx (proactive), inbound_rx (channel), SIGTERM, Ctrl-C.
 /// All arms serialize through ONE `&mut agent` — single-turn invariant holds (CR-07).
-async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
+async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::signal::unix::{signal, SignalKind};
     use bastion::agent::command::CommandResult;
@@ -206,8 +206,14 @@ async fn daemon_loop(agent: &mut AgentLoop) -> anyhow::Result<()> {
     if let Ok(addr) = std::env::var("BASTION_WEBHOOK_ADDR") {
         let h = agent_handle.clone();
         let owner_map = webhook_owner_map;
+        // Phase 6: mesh connectivity — load peers from config, create broadcast channel for SSE.
+        let (events_tx, _) = tokio::sync::broadcast::channel::<String>(128);
+        let peer_map_initial = bastion::config::load_mesh_peers(&cfg);
+        let mesh_peer_map = Arc::new(RwLock::new(peer_map_initial));
+        let jwt_secret = std::env::var("APP_JWT_SECRET")
+            .unwrap_or_else(|_| "change-me-in-production".to_string());
         tokio::spawn(async move {
-            if let Err(e) = bastion::channel::webhook::serve(h, &addr, owner_map).await {
+            if let Err(e) = bastion::channel::webhook::serve(h, &addr, owner_map, events_tx, mesh_peer_map, jwt_secret).await {
                 tracing::error!(event = "webhook_error", error = %e, "webhook channel terminated");
             }
         });
