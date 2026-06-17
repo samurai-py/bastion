@@ -190,11 +190,21 @@ async fn sse_handler(
 async fn ingest_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(envelope): Json<crate::mesh::MeshEnvelope>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    // CR-03: enforce auth BEFORE body deserialization. Taking the raw body (not
+    // Json<...>) prevents Axum's Json extractor from rejecting an unauthenticated
+    // request with 415 before resolve_owner_or_401 ever runs (#mesh-ingest-401).
     let _owner = match resolve_owner_or_401(&headers, &state.owner_map, "mesh_ingest_unauthorized") {
         Ok(o) => o,
         Err(resp) => return resp,
+    };
+    let envelope: crate::mesh::MeshEnvelope = match serde_json::from_slice(&body) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(event = "mesh_ingest_bad_body", error = %e);
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("invalid envelope: {e}") }))).into_response();
+        }
     };
     let transport = match &state.mesh_transport {
         Some(t) => t.clone(),
