@@ -93,6 +93,11 @@ struct AppState {
     otc_store: Arc<RwLock<std::collections::HashMap<String, (String, std::time::Instant)>>>,
     /// JWT signing secret for /auth/exchange (HS256).
     jwt_secret: String,
+    /// Pluggable mesh transport (P2PTransport or relay). None if mesh not configured.
+    mesh_transport: Option<crate::mesh::SharedMeshTransport>,
+    /// In-memory store of received mesh slices, keyed by from_owner.
+    /// Updated by ingest_handler; read by MeshSliceProvider (SEAM #2).
+    mesh_slice_store: Option<crate::mesh::context_provider::MeshSliceStore>,
 }
 
 /// Categorize an anyhow error for safe HTTP status mapping.
@@ -178,26 +183,41 @@ async fn sse_handler(
 
 /// POST /mesh/ingest — receive encrypted MeshEnvelope from a peer daemon.
 ///
-/// SECURITY: Returns 501 Not Implemented until Plan 02 wires transport.receive().
-/// Returning 202 here would open a spoofing window (T-06-01-01): an authenticated
-/// caller could inject unverified envelopes with arbitrary from_owner values.
-/// The 501 makes the security gap explicit and non-functional.
-/// CR-03: auth via x-bastion-token still enforced — unauthenticated callers get 401.
+/// Decrypts the envelope via transport.receive() (age E2E decrypt + from_owner verification).
+/// On success, stores the slice in mesh_slice_store so MeshSliceProvider can inject it
+/// into the system prompt on the next agent turn (SEAM #2).
+/// CR-03: auth via x-bastion-token enforced — unauthenticated callers get 401.
 async fn ingest_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    _body: axum::body::Body,
+    Json(envelope): Json<crate::mesh::MeshEnvelope>,
 ) -> impl IntoResponse {
     let _owner = match resolve_owner_or_401(&headers, &state.owner_map, "mesh_ingest_unauthorized") {
         Ok(o) => o,
         Err(resp) => return resp,
     };
-    // 501: transport.receive() + from_owner verification not yet wired (Plan 02).
-    // Never accept mesh envelopes before from_owner can be verified against registered peer keys.
-    tracing::warn!(event = "mesh_ingest_not_implemented", "Plan 02 not yet executed — returning 501");
-    (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({
-        "error": "mesh ingest not yet active — execute Plan 02 first"
-    }))).into_response()
+    let transport = match &state.mesh_transport {
+        Some(t) => t.clone(),
+        None => {
+            tracing::warn!(event = "mesh_ingest_no_transport", "mesh transport not configured");
+            return (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({ "error": "mesh not configured" }))).into_response();
+        }
+    };
+    match transport.receive(envelope).await {
+        Ok(slice) => {
+            tracing::info!(event = "mesh_ingest_ok", from_owner = %slice.from_owner, count = slice.beliefs.len());
+            // Update MeshSliceStore so MeshSliceProvider picks it up on next turn (SEAM #2)
+            if let Some(store) = &state.mesh_slice_store {
+                let mut s = store.write().await;
+                s.insert(slice.from_owner.clone(), slice.beliefs.clone());
+            }
+            (StatusCode::OK, Json(serde_json::json!({ "status": "accepted", "beliefs": slice.beliefs.len() }))).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(event = "mesh_ingest_error", error = %e);
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
 }
 
 /// POST /auth/exchange { otc: "BAST-XXXX" } → { jwt, device_name }
@@ -328,6 +348,21 @@ pub async fn serve(
     mesh_peer_map: Arc<RwLock<MeshPeerMap>>,
     jwt_secret: String,
 ) -> anyhow::Result<()> {
+    serve_with_mesh(agent, addr, owner_map, events_tx, mesh_peer_map, jwt_secret, None, None).await
+}
+
+/// Extended serve function that accepts optional mesh transport and slice store.
+/// Called by daemon startup when MESH_IDENTITY_KEY is configured.
+pub async fn serve_with_mesh(
+    agent: AgentHandle,
+    addr: &str,
+    owner_map: OwnerMap,
+    events_tx: broadcast::Sender<String>,
+    mesh_peer_map: Arc<RwLock<MeshPeerMap>>,
+    jwt_secret: String,
+    mesh_transport: Option<crate::mesh::SharedMeshTransport>,
+    mesh_slice_store: Option<crate::mesh::context_provider::MeshSliceStore>,
+) -> anyhow::Result<()> {
     let otc_store = Arc::new(RwLock::new(std::collections::HashMap::new()));
     let state = AppState {
         agent,
@@ -336,6 +371,8 @@ pub async fn serve(
         mesh_peer_map,
         otc_store,
         jwt_secret,
+        mesh_transport,
+        mesh_slice_store,
     };
     let app = Router::new()
         .route("/webhook", post(handle))
@@ -382,6 +419,8 @@ mod tests {
             mesh_peer_map,
             otc_store,
             jwt_secret: "test-secret".to_string(),
+            mesh_transport: None,
+            mesh_slice_store: None,
         };
         Router::new()
             .route("/webhook", post(handle))
@@ -505,15 +544,23 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// POST /mesh/ingest with valid token returns 501.
+    /// POST /mesh/ingest with valid token and valid envelope returns 501 (no transport configured).
     #[tokio::test]
-    async fn post_mesh_ingest_returns_501() {
+    async fn post_mesh_ingest_returns_501_when_no_transport() {
         let app = build_router();
+        // Send a valid MeshEnvelope body — transport check happens after JSON parse
+        let envelope = serde_json::json!({
+            "from_owner": "peer-owner",
+            "to_owner": "mario",
+            "ciphertext": [],
+            "recipient_hint": "age1test"
+        });
         let req = Request::builder()
             .method("POST")
             .uri("/mesh/ingest")
+            .header("content-type", "application/json")
             .header("x-bastion-token", "token-mario")
-            .body(Body::empty())
+            .body(Body::from(envelope.to_string()))
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);

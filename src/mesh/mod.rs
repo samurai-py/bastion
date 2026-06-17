@@ -59,7 +59,14 @@ impl MeshPeerMap {
     pub fn resolve(&self, owner_id: &str) -> Option<&MeshPeer> {
         self.peers.get(owner_id)
     }
+
+    /// Return all registered peer owner_ids (for iteration in scheduler).
+    pub fn all_peer_owner_ids(&self) -> Vec<String> {
+        self.peers.keys().cloned().collect()
+    }
 }
+
+pub mod p2p;
 
 /// Pluggable transport abstraction.
 /// - P2P (OSS): posts ciphertext to peer /mesh/ingest endpoint via reqwest.
