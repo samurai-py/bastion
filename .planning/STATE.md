@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Cognitive Completion + Fabric-Ready Seams
 status: ready_to_plan
-last_updated: "2026-06-17T22:31:59.527Z"
+last_updated: "2026-06-17T22:51:25.719Z"
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 10
-  completed_plans: 7
-  percent: 70
+  completed_plans: 8
+  percent: 80
 ---
 
 # State: Bastion v3
@@ -19,7 +19,7 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-05-10)
 
 **Core value:** Bastion ajuda Mario a fazer suas metas anuais avançarem — proativo, customizável por linguagem natural, seguro e instalável em minutos.
-**Current focus:** Phase 06 — ecosystem-mobile-opcional-p-s-v1-0 (Plan 01 complete — mesh Wave 1 foundation)
+**Current focus:** Phase 06 — ecosystem-mobile-opcional-p-s-v1-0 (Plan 02 complete — mesh Wave 2: P2PTransport + SEAM #2 + periodic sync)
 
 ## Current Phase
 
@@ -63,6 +63,9 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | 2026-06-17 | D-03: filter_for_mesh calls check_egress sequentially — reuses WR-04, no new privacy primitive invented | 06-01 |
 | 2026-06-17 | D-05: no SafeGuard in OSS — privacy mediation is egress gate (WR-04) + OwnerAllowlist tag filter | 06-01 |
 | 2026-06-17 | D-07: daemon exposes /events SSE + /auth/exchange + /mesh/pair for Flutter app + mesh peer connectivity | 06-01 |
+| 2026-06-17 | D-04 (LOCKED): MESH-03 = write_cabinet_synthesis() neutral mechanism; no auto-trigger from Cabinet; rich inter-owner governance stays closed/Fabric | 06-02 |
+| 2026-06-17 | MeshPeer.allowed_tags drives OwnerAllowlist per peer — filter_for_mesh API takes OwnerAllowlist not peer_owner string (plan pseudocode was incorrect) | 06-02 |
+| 2026-06-17 | spawn_mesh_sync_job skips first tick at startup to avoid syncing before daemon fully initialized | 06-02 |
 
 ## Files
 
@@ -77,4 +80,4 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | Codebase map | `.planning/codebase/` |
 
 ---
-*Last updated: 2026-06-17 — 06-01 mesh Wave 1 foundation complete (142 tests passing). MeshTransport trait, filter_for_mesh, SSE+pairing routes live.*
+*Last updated: 2026-06-17 — 06-02 mesh Wave 2 complete. P2PTransport (age E2E), MeshSliceProvider SEAM #2, write_cabinet_synthesis MESH-03, spawn_mesh_sync_job (15m default), DeepEval scenario. 5 mesh tests passing.*

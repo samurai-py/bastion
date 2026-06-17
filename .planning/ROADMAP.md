@@ -233,7 +233,7 @@ Plans:
 - [x] 06-01-PLAN.md — MeshTransport trait + allowlist + SSE /events + /mesh/ingest routes (Wave 1)
 
 **Wave 2** *(parallel — depends on Wave 1)*
-- [ ] 06-02-PLAN.md — P2P impl (age E2E encrypt) + MeshSliceProvider + OTel mesh_sync + MESH-03 (Wave 2)
+- [x] 06-02-PLAN.md — P2P impl (age E2E encrypt) + MeshSliceProvider + OTel mesh_sync + MESH-03 (Wave 2)
 - [ ] 06-03-PLAN.md — Flutter companion app: chat + cockpit + SSE + pairing (Wave 2)
 - [ ] 06-04-PLAN.md — ECO skills (agentskills publish/install) + ClawHub doc + Bastion Cloud doc + channel scaffold (Wave 2)
 
