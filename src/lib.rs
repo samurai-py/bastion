@@ -13,3 +13,4 @@ pub mod channel;
 pub mod proactive;
 pub mod api;
 pub mod capability;
+pub mod mesh;

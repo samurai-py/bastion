@@ -32,6 +32,10 @@ serde_norway = "0.9.42"
 schemars = "0.8"
 frankenstein = { version = "0.50.0", features = ["client-reqwest"] }
 axum = "0.8.9"
+# Phase 6 — mesh connectivity layer (plan 06-01)
+age              = "0.11"
+jsonwebtoken     = "9"
+tokio-stream     = { version = "0.1", features = ["sync"] }
 # SEAM #4 — OTel GenAI observability (plan 05-05)
 opentelemetry        = { version = "0.32", features = ["trace"] }
 opentelemetry_sdk    = { version = "0.32", features = ["rt-tokio"] }

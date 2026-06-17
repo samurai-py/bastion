@@ -86,6 +86,7 @@ impl Memory for SqliteMemory {
                         content: row.get(3)?,
                         weight: row.get(4)?,
                         is_core: row.get::<_, i32>(5)? != 0,
+                        tier: None, // no privacy_tier column yet — defaults to None (deny-on-ambiguity)
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -135,6 +136,7 @@ impl Memory for SqliteMemory {
                         content: row.get(3)?,
                         weight: row.get(4)?,
                         is_core: row.get::<_, i32>(5)? != 0,
+                        tier: None, // no privacy_tier column yet — defaults to None (deny-on-ambiguity)
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

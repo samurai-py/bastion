@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 /// Privacy tier consumed by persona/soul.rs (plan 03) and hooks/egress.rs (plan 04).
 /// Defined here once; exported at crate root via `pub mod memory`.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PrivacyTier {
     LocalOnly,
@@ -17,7 +17,7 @@ pub enum PrivacyTier {
 }
 
 /// A retrieved belief (read-only view of the beliefs table row).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Belief {
     pub id: i64,
     pub owner_id: String,
@@ -25,6 +25,8 @@ pub struct Belief {
     pub content: String,
     pub weight: f64,
     pub is_core: bool,
+    /// Privacy tier — None if column absent or unset in DB (treated as LocalOnly by egress gate).
+    pub tier: Option<PrivacyTier>,
 }
 
 /// Core memory abstraction. Every subsystem reads/writes beliefs through this trait.
