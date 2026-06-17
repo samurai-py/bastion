@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Cognitive Completion + Fabric-Ready Seams
 status: ready_to_plan
-last_updated: "2026-06-17T22:51:25.719Z"
+last_updated: "2026-06-17T22:59:15.100Z"
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 10
-  completed_plans: 8
-  percent: 80
+  completed_plans: 10
+  percent: 100
 ---
 
 # State: Bastion v3
@@ -19,7 +19,7 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-05-10)
 
 **Core value:** Bastion ajuda Mario a fazer suas metas anuais avançarem — proativo, customizável por linguagem natural, seguro e instalável em minutos.
-**Current focus:** Phase 06 — ecosystem-mobile-opcional-p-s-v1-0 (Plan 02 complete — mesh Wave 2: P2PTransport + SEAM #2 + periodic sync)
+**Current focus:** Phase 06 — ecosystem-mobile-opcional-p-s-v1-0 (Plan 04 complete — ECO skills + ClawHub doc + Bastion Cloud arch doc)
 
 ## Current Phase
 
@@ -66,6 +66,10 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | 2026-06-17 | D-04 (LOCKED): MESH-03 = write_cabinet_synthesis() neutral mechanism; no auto-trigger from Cabinet; rich inter-owner governance stays closed/Fabric | 06-02 |
 | 2026-06-17 | MeshPeer.allowed_tags drives OwnerAllowlist per peer — filter_for_mesh API takes OwnerAllowlist not peer_owner string (plan pseudocode was incorrect) | 06-02 |
 | 2026-06-17 | spawn_mesh_sync_job skips first tick at startup to avoid syncing before daemon fully initialized | 06-02 |
+| 2026-06-17 | D-08: agentskills.io bidirectional — agentskills-publish (Bastion→hub) + agentskills-install (install-by-conversation) | 06-04 |
+| 2026-06-17 | D-09: ClawHub migration = frontmatter rename + skills-ref validate + worked reminder example | 06-04 |
+| 2026-06-17 | D-10: Bastion Cloud = closed relay impl of MeshTransport trait; Phase 6 OSS ships only trait boundary + arch doc | 06-04 |
+| 2026-06-17 | D-11: only /add-<channel> scaffold skill ships; specific channels (WhatsApp/Discord/Email) are community/future | 06-04 |
 
 ## Files
 
@@ -80,4 +84,4 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | Codebase map | `.planning/codebase/` |
 
 ---
-*Last updated: 2026-06-17 — 06-02 mesh Wave 2 complete. P2PTransport (age E2E), MeshSliceProvider SEAM #2, write_cabinet_synthesis MESH-03, spawn_mesh_sync_job (15m default), DeepEval scenario. 5 mesh tests passing.*
+*Last updated: 2026-06-17 — 06-04 ECO skills + docs complete. agentskills-publish (Pitfall 4 strip), agentskills-install (path traversal guard), mesh-connect (7-step /connect-peer), channel-scaffold (Channel trait + CR-03), docs/clawhub-migration.md (D-09), docs/bastion-cloud-architecture.md (D-10). Wave 2 plans 02+04 both done; 06-03 (Flutter) remains.*

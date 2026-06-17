@@ -16,7 +16,7 @@
 | 3 | Python MCP Skill Servers | memupalace, skill-writer (+ **loop fechado**), self-improving isolados em containers | MCP-03, MUPL-01..07, SKWR-01..06, SELF-01..02 (16 reqs) | ✅ done |
 | 4 | Deploy & Packaging | FROM scratch Docker, installer one-line, cutover v2 → v3 | PKG-01..09 (9 reqs) | ✅ cutover-live (boot ok; camada cognitiva pendente → Phase 5) |
 | 5 | **v1.0 Cognitive Completion + Fabric-Ready Seams** | 5/6 | In Progress|  |
-| 6 | Ecosystem & Mobile *(opcional, pós-v1.0)* | 1/4 | In Progress|  |
+| 6 | Ecosystem & Mobile *(opcional, pós-v1.0)* | 3/4 | In Progress|  |
 
 **Cobertura v1:** 89/89 requisitos mapeados ✓ (69 originais + 18 de diferenciação vs Hermes + 2 providers OpenRouter/Gemini, 2026-05-30)
 
@@ -226,7 +226,7 @@ Plans:
 **Anti-goals:**
 - Phase 5 só inicia se Phases 1-4 estabilizarem em produção pessoal por ≥ 30 dias
 
-**Plans:** 1/4 plans executed
+**Plans:** 3/4 plans executed
 
 Plans:
 **Wave 1** *(foundation — unified connectivity layer)*
@@ -235,7 +235,7 @@ Plans:
 **Wave 2** *(parallel — depends on Wave 1)*
 - [x] 06-02-PLAN.md — P2P impl (age E2E encrypt) + MeshSliceProvider + OTel mesh_sync + MESH-03 (Wave 2)
 - [ ] 06-03-PLAN.md — Flutter companion app: chat + cockpit + SSE + pairing (Wave 2)
-- [ ] 06-04-PLAN.md — ECO skills (agentskills publish/install) + ClawHub doc + Bastion Cloud doc + channel scaffold (Wave 2)
+- [x] 06-04-PLAN.md — ECO skills (agentskills publish/install) + ClawHub doc + Bastion Cloud doc + channel scaffold (Wave 2)
 
 ---
 
