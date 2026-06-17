@@ -136,6 +136,20 @@ impl AgentLoop {
         agent
     }
 
+    /// Register MeshSliceProvider (SEAM #2 for mesh slices from remote owners).
+    ///
+    /// Called after AgentLoop::new() when mesh is configured (MESH_IDENTITY_KEY set).
+    /// The slice_store is shared with the ingest_handler via AppState so that received
+    /// slices become visible in the system prompt on the very next agent turn.
+    pub fn add_mesh_slice_provider(&mut self, store: crate::mesh::context_provider::MeshSliceStore) {
+        let mesh_provider = crate::mesh::context_provider::MeshSliceProvider::from_store(
+            self.session_id.clone(), // use session_id as local_owner proxy at this point
+            store,
+        );
+        self.context_providers.push(Box::new(mesh_provider));
+        tracing::info!(event = "mesh_slice_provider_registered", "MeshSliceProvider registered in context_providers (SEAM #2)");
+    }
+
     /// SEAM #2 — Constrói o system prompt para o turn atual.
     ///
     /// Começa com DEFAULT_SYSTEM_PROMPT como base.
