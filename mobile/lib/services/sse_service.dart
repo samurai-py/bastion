@@ -4,7 +4,9 @@
 
 import 'dart:async';
 import 'dart:math';
-import 'package:flutter_http_sse/flutter_http_sse.dart';
+import 'package:flutter_http_sse/client/sse_client.dart';
+import 'package:flutter_http_sse/model/sse_request.dart';
+import 'package:flutter_http_sse/model/sse_response.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 typedef OnEvent = void Function(String event);
@@ -12,11 +14,14 @@ typedef OnAuthExpired = void Function();
 
 class SseService {
   static const _jwtKey = 'bastion_jwt';
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  static const _connectionId = 'bastion_events';
 
-  StreamSubscription? _subscription;
+  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  final SSEClient _sseClient = SSEClient();
+
   int _retryCount = 0;
   bool _disposed = false;
+  Timer? _retryTimer;
 
   /// Start listening to /events SSE.
   /// [onEvent] receives raw JSON event strings from SEAM #4 OTel broadcast.
@@ -39,27 +44,34 @@ class SseService {
     }
 
     try {
-      final sseClient = SseClient.connect(
-        Uri.parse('$daemonUrl/events'),
+      final request = SSERequest(
+        url: '$daemonUrl/events',
         headers: {
           'x-bastion-token': jwt,
           'Accept': 'text/event-stream',
         },
-      );
-
-      _subscription = sseClient.stream.listen(
-        (event) {
+        onData: (SSEResponse response) {
           _retryCount = 0; // reset backoff on successful event
-          onEvent(event.data ?? '');
+          final data = response.data;
+          if (data != null) {
+            onEvent(data is String ? data : data.toString());
+          }
         },
-        onError: (error) {
+        onError: (String error) {
+          // 401 check: if error message contains 401, trigger re-pair
+          if (error.contains('401')) {
+            onAuthExpired();
+            return;
+          }
           _scheduleReconnect(daemonUrl, onEvent, onAuthExpired);
         },
         onDone: () {
           _scheduleReconnect(daemonUrl, onEvent, onAuthExpired);
         },
-        cancelOnError: false,
+        retry: false, // we manage retry ourselves for 401 handling
       );
+
+      _sseClient.connect(_connectionId, request);
     } catch (e) {
       // 401 check: if error message contains 401, trigger re-pair
       if (e.toString().contains('401')) {
@@ -75,11 +87,12 @@ class SseService {
     // Exponential backoff: 1s, 2s, 4s, 8s, max 60s
     final delay = Duration(seconds: min(1 << _retryCount, 60));
     _retryCount++;
-    Future.delayed(delay, () => _connect(daemonUrl, onEvent, onAuthExpired));
+    _retryTimer = Timer(delay, () => _connect(daemonUrl, onEvent, onAuthExpired));
   }
 
   void dispose() {
     _disposed = true;
-    _subscription?.cancel();
+    _retryTimer?.cancel();
+    _sseClient.close(connectionId: _connectionId);
   }
 }
