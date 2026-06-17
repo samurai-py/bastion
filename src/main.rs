@@ -212,8 +212,46 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
         let mesh_peer_map = Arc::new(RwLock::new(peer_map_initial));
         let jwt_secret = std::env::var("APP_JWT_SECRET")
             .unwrap_or_else(|_| "change-me-in-production".to_string());
+
+        // Phase 6 Wave 2: P2PTransport + MeshSliceProvider when MESH_IDENTITY_KEY is set.
+        let (mesh_transport, mesh_slice_store) =
+            if let Ok(identity_key) = std::env::var("MESH_IDENTITY_KEY") {
+                let local_owner = std::env::var("BASTION_OWNER_ID")
+                    .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+                let transport = bastion::mesh::p2p::P2PTransport::new(
+                    local_owner.clone(),
+                    identity_key,
+                    mesh_peer_map.clone(),
+                    events_tx.clone(),
+                );
+                let shared: bastion::mesh::SharedMeshTransport = Arc::new(transport);
+
+                // MeshSliceProvider::new returns (provider, store); add_mesh_slice_provider
+                // constructs from the store — so we use from_store path via add_mesh_slice_provider.
+                let (_, store) = bastion::mesh::context_provider::MeshSliceProvider::new(local_owner.clone());
+                agent.add_mesh_slice_provider(store.clone());
+
+                // Periodic mesh sync (mesh.sync_interval minutes, default 15; 0 = disable)
+                let sync_interval = cfg.mesh.sync_interval;
+                let _mesh_sync_handle = bastion::scheduler::cron::spawn_mesh_sync_job(
+                    shared.clone(),
+                    mesh_peer_map.clone(),
+                    agent.memory.clone(),
+                    local_owner,
+                    sync_interval,
+                );
+                tracing::info!(event = "mesh_transport_enabled", sync_interval_minutes = sync_interval);
+
+                (Some(shared), Some(store))
+            } else {
+                tracing::info!(event = "mesh_transport_disabled", "MESH_IDENTITY_KEY not set — mesh disabled");
+                (None, None)
+            };
+
         tokio::spawn(async move {
-            if let Err(e) = bastion::channel::webhook::serve(h, &addr, owner_map, events_tx, mesh_peer_map, jwt_secret).await {
+            if let Err(e) = bastion::channel::webhook::serve_with_mesh(
+                h, &addr, owner_map, events_tx, mesh_peer_map, jwt_secret, mesh_transport, mesh_slice_store,
+            ).await {
                 tracing::error!(event = "webhook_error", error = %e, "webhook channel terminated");
             }
         });

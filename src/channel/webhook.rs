@@ -317,8 +317,9 @@ async fn mesh_pair_handler(
 
             // Register peer in MeshPeerMap
             let peer = MeshPeer {
-                peer_url: body.peer_url.clone(),
-                age_pubkey: body.age_pubkey.clone(),
+                peer_url:     body.peer_url.clone(),
+                age_pubkey:   body.age_pubkey.clone(),
+                allowed_tags: vec![], // set after pairing via config update
             };
             state.mesh_peer_map.write().await.register(peer_owner_id.clone(), peer);
 

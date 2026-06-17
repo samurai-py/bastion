@@ -14,6 +14,10 @@ pub struct MeshPeerConfig {
     pub owner_id:   String,
     pub peer_url:   String,
     pub age_pubkey: String,
+    /// Tags this peer is allowed to receive (filter_for_mesh allowlist).
+    /// Default: empty (no beliefs shared). Example: ["mercado", "calendario"].
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
 }
 
 /// Config section for mesh settings.
@@ -21,6 +25,14 @@ pub struct MeshPeerConfig {
 pub struct MeshConfig {
     #[serde(default)]
     pub peer: Vec<MeshPeerConfig>,
+    /// Interval in minutes between automatic mesh syncs (0 = disable periodic sync, manual /mesh-sync only).
+    /// Default: 15.
+    #[serde(default = "default_sync_interval")]
+    pub sync_interval: u64,
+}
+
+fn default_sync_interval() -> u64 {
+    15
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -84,8 +96,9 @@ pub fn load_mesh_peers(config: &BastionConfig) -> crate::mesh::MeshPeerMap {
     let mut map = crate::mesh::MeshPeerMap::new();
     for entry in &config.mesh.peer {
         map.register(entry.owner_id.clone(), crate::mesh::MeshPeer {
-            peer_url:   entry.peer_url.clone(),
-            age_pubkey: entry.age_pubkey.clone(),
+            peer_url:     entry.peer_url.clone(),
+            age_pubkey:   entry.age_pubkey.clone(),
+            allowed_tags: entry.allowed_tags.clone(),
         });
         tracing::info!(
             event    = "mesh_peer_loaded",

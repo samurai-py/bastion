@@ -14,3 +14,4 @@ pub mod proactive;
 pub mod api;
 pub mod capability;
 pub mod mesh;
+pub mod scheduler;

@@ -44,6 +44,10 @@ pub struct MeshPeer {
     pub peer_url: String,
     /// age public key (bech32 string) for E2E encryption to this peer.
     pub age_pubkey: String,
+    /// Tags this peer is allowed to receive (drives filter_for_mesh OwnerAllowlist).
+    /// Populated from [[mesh.peer]] allowed_tags in bastion.toml.
+    #[serde(default)]
+    pub allowed_tags: Vec<String>,
 }
 
 impl MeshPeerMap {
