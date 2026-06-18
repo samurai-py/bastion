@@ -226,7 +226,7 @@ Plans:
 **Anti-goals:**
 - Phase 5 só inicia se Phases 1-4 estabilizarem em produção pessoal por ≥ 30 dias
 
-**Plans:** 5/7 plans executed
+**Plans:** 6/7 plans executed
 
 Plans:
 **Wave 1** *(foundation — unified connectivity layer)*
@@ -239,7 +239,7 @@ Plans:
 
 **Gap-closure Wave 1** *(parallel — CR-01/CR-02/CR-05 auth + schema fix; no shared files)*
 - [x] 06-05-PLAN.md — JWT decode in resolve_owner_or_401 + OtcStore expose + Flutter sendMessage contract fix + fail-closed JWT secret (CR-01, CR-02, CR-05, WR-01)
-- [ ] 06-06-PLAN.md — privacy_tier column migration + store_belief/retrieve_tagged tier wire + write_cabinet_synthesis CloudOk + integration test (CR-03, CR-04)
+- [x] 06-06-PLAN.md — privacy_tier column migration + store_belief/retrieve_tagged tier wire + write_cabinet_synthesis CloudOk + integration test (CR-03, CR-04)
 
 **Gap-closure Wave 2** *(depends on 06-05 — shares webhook.rs + config.rs)*
 - [ ] 06-07-PLAN.md — to_owner boundary check in P2PTransport + ingest_handler + append_mesh_peer rewrite with toml_edit + SSRF validation (CR-06, SEC-01, SEC-02, WR-02)

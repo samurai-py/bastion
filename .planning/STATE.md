@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Cognitive Completion + Fabric-Ready Seams
 status: ready_to_plan
-last_updated: "2026-06-18T00:30:36.752Z"
+last_updated: "2026-06-18T12:37:51.958Z"
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 13
-  completed_plans: 11
-  percent: 85
+  completed_plans: 12
+  percent: 92
 ---
 
 # State: Bastion v3
@@ -77,6 +77,8 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | 2026-06-18 | CR-02 fixed: OtcStore pub type alias + new_otc_store() factory; serve_with_mesh accepts OtcStore; main.rs wired | 06-05 |
 | 2026-06-18 | CR-05 fixed: Flutter sendMessage uses {'text': message} / resp.data['reply'] aligned to Rust In/Out structs | 06-05 |
 | 2026-06-18 | WR-03 fixed: unified 401 body for expired vs unknown OTC prevents enumeration oracle | 06-05 |
+| 2026-06-18 | CR-03 closed: privacy_tier TEXT column in beliefs via idempotent ALTER TABLE; NULL = deny-on-ambiguity; retrieve_tagged/load_core return real tiers | 06-06 |
+| 2026-06-18 | CR-04 closed: write_cabinet_synthesis passes Some(CloudOk) explicitly — Cabinet synthesis now crosses filter_for_mesh; no implicit tier promotion | 06-06 |
 
 ## Files
 
@@ -91,4 +93,4 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | Codebase map | `.planning/codebase/` |
 
 ---
-*Last updated: 2026-06-18 — 06-05 mobile auth chain fixed: JWT decode (CR-01), fail-closed secret (WR-01), OtcStore write path (CR-02), unified 401 body (WR-03), sendMessage contract (CR-05). 211 tests pass.*
+*Last updated: 2026-06-18 — 06-06 privacy_tier schema + mesh egress unblocked: CR-03 (column + read path), CR-04 (write_cabinet_synthesis CloudOk). 150 lib tests pass.*
