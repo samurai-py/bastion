@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Cognitive Completion + Fabric-Ready Seams
 status: ready_to_plan
-last_updated: "2026-06-18T12:37:51.958Z"
+last_updated: "2026-06-18T12:47:13.012Z"
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 13
-  completed_plans: 12
-  percent: 92
+  completed_plans: 13
+  percent: 100
 ---
 
 # State: Bastion v3
@@ -79,6 +79,11 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | 2026-06-18 | WR-03 fixed: unified 401 body for expired vs unknown OTC prevents enumeration oracle | 06-05 |
 | 2026-06-18 | CR-03 closed: privacy_tier TEXT column in beliefs via idempotent ALTER TABLE; NULL = deny-on-ambiguity; retrieve_tagged/load_core return real tiers | 06-06 |
 | 2026-06-18 | CR-04 closed: write_cabinet_synthesis passes Some(CloudOk) explicitly — Cabinet synthesis now crosses filter_for_mesh; no implicit tier promotion | 06-06 |
+| 2026-06-18 | CR-06 closed: envelope.to_owner == local_owner enforced in P2PTransport::receive() + ingest_handler (env var) — cross-owner injection prevented | 06-07 |
+| 2026-06-18 | SEC-01 closed: append_mesh_peer uses toml_edit + age_pubkey regex ^age1[0-9a-z]+$; bail on read error; atomic .tmp+rename write | 06-07 |
+| 2026-06-18 | SEC-02 closed: mesh_pair_handler validates https peer_url, DNS-resolve + RFC1918/loopback block; redirect::Policy::none() on reqwest client | 06-07 |
+| 2026-06-18 | WR-02 closed: append_mesh_peer preserves existing config entries (allowed_tags) via toml_edit parse; no more unwrap_or_default() silent overwrite | 06-07 |
+| 2026-06-18 | WR-06 closed: add_mesh_slice_provider reads BASTION_OWNER_ID env var (not session_id) as local_owner for MeshSliceProvider | 06-07 |
 
 ## Files
 
@@ -93,4 +98,4 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | Codebase map | `.planning/codebase/` |
 
 ---
-*Last updated: 2026-06-18 — 06-06 privacy_tier schema + mesh egress unblocked: CR-03 (column + read path), CR-04 (write_cabinet_synthesis CloudOk). 150 lib tests pass.*
+*Last updated: 2026-06-18 — 06-07 mesh security hardening complete: CR-06 (owner boundary), SEC-01 (toml_edit), SEC-02 (SSRF), WR-02 (atomic write), WR-06 (session_id proxy removed). 155 lib tests pass. Phase 06 all plans done.*
