@@ -57,6 +57,10 @@ pub struct AgentLoop {
     pub pending_rx:        Option<mpsc::Receiver<String>>,
     /// Forced persona for the next turn (set by /as command).
     pub forced_persona:    Option<String>,
+    /// CR-02: shared OTC store handle, injected by main.rs when the webhook channel
+    /// starts. `/connect-app` writes one-time codes here for the mobile pairing flow
+    /// (`/auth/exchange`). `None` when the webhook channel is not running.
+    pub otc_store:         Option<crate::channel::webhook::OtcStore>,
 }
 
 impl AgentLoop {
@@ -92,6 +96,7 @@ impl AgentLoop {
             pending_tx,
             pending_rx: Some(pending_rx),
             forced_persona: None,
+            otc_store: None,
         };
         // M1: registrar IdentityProvider para injeção do bloco de identidade via SEAM #2.
         // No primeiro uso retorna o ONBOARDING_PROMPT; nos subsequentes retorna o bloco gravado.
@@ -878,6 +883,13 @@ impl AgentLoop {
         Ok(final_text)
     }
 
+    /// CR-02: inject the shared OTC store handle so `/connect-app` can mint pairing
+    /// codes that `/auth/exchange` (in the webhook server) consumes. Called by main.rs
+    /// after `new_otc_store()`; the same Arc is also moved into `serve_with_mesh`.
+    pub fn set_otc_store(&mut self, store: crate::channel::webhook::OtcStore) {
+        self.otc_store = Some(store);
+    }
+
     pub async fn handle_command(&mut self, input: &str) -> anyhow::Result<CommandResult> {
         handle_command(
             input,
@@ -885,6 +897,7 @@ impl AgentLoop {
             &self.registry,
             &self.memory,
             &mut self.forced_persona,
+            self.otc_store.as_ref(),
         ).await
     }
 

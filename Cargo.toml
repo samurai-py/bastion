@@ -40,6 +40,8 @@ tokio-stream     = { version = "0.1", features = ["sync"] }
 toml_edit        = "0.22"
 url              = "2"
 regex            = "1"
+# 06-08: CSPRNG for /connect-app one-time codes (CR-02 OTC generation)
+rand             = "0.8"
 # SEAM #4 — OTel GenAI observability (plan 05-05)
 opentelemetry        = { version = "0.32", features = ["trace"] }
 opentelemetry_sdk    = { version = "0.32", features = ["rt-tokio"] }

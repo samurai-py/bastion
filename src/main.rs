@@ -252,7 +252,10 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
 
         // CR-02: create an OtcStore and pass it to serve_with_mesh so skill commands
         // can insert BAST-XXXX codes for /auth/exchange and /mesh/pair.
+        // The same Arc is injected into the agent so the /connect-app REPL command
+        // writes codes the webhook server reads (06-08 OTC-writer wiring).
         let otc_store = bastion::channel::webhook::new_otc_store();
+        agent.set_otc_store(otc_store.clone());
         tokio::spawn(async move {
             if let Err(e) = bastion::channel::webhook::serve_with_mesh(
                 h, &addr, owner_map, events_tx, mesh_peer_map, jwt_secret, mesh_transport, mesh_slice_store, otc_store,

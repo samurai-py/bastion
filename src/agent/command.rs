@@ -9,21 +9,62 @@ pub enum CommandResult {
     Unknown(String),
 }
 
+/// CR-02: generate an unguessable one-time pairing code, e.g. `BAST-7K2M-9QXR`.
+/// Uses the OS CSPRNG (rand::thread_rng) — the code grants a 90-day JWT on exchange,
+/// so it must not be predictable. Charset excludes ambiguous chars (0/O/1/I).
+fn generate_otc() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    let pick = |rng: &mut rand::rngs::ThreadRng| -> char {
+        CHARSET[rng.gen_range(0..CHARSET.len())] as char
+    };
+    let g1: String = (0..4).map(|_| pick(&mut rng)).collect();
+    let g2: String = (0..4).map(|_| pick(&mut rng)).collect();
+    format!("BAST-{}-{}", g1, g2)
+}
+
 /// Route slash commands from stdin.
 /// Acquires write lock on provider for /model (safe — called only between turns).
 ///
 /// Widened signature (plan 08): also accepts registry + memory for /as, /cabinet, /contest.
+/// CR-02 (plan 06-08): also accepts the shared OTC store for /connect-app.
 pub async fn handle_command(
     input: &str,
     provider: &SharedProvider,
     registry: &PersonaRegistry,
     memory: &SharedMemory,
     forced_persona: &mut Option<String>,
+    otc_store: Option<&crate::channel::webhook::OtcStore>,
 ) -> anyhow::Result<CommandResult> {
     let trimmed = input.trim();
     let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
 
     match parts[0] {
+        "/connect-app" => {
+            // CR-02: mint a one-time pairing code for the mobile companion app.
+            // The code is consumed by POST /auth/exchange (webhook server) within 5 min.
+            let device = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or("mobile");
+            match otc_store {
+                Some(store) => {
+                    let code = generate_otc();
+                    store.write().await.insert(
+                        code.clone(),
+                        (device.to_string(), std::time::Instant::now()),
+                    );
+                    println!("One-time pairing code for '{}': {}", device, code);
+                    println!("Enter it in the app within 5 minutes (POST /auth/exchange).");
+                    tracing::info!(event = "connect_app_otc_issued", device = %device);
+                    Ok(CommandResult::Handled)
+                }
+                None => {
+                    println!("/connect-app unavailable — the webhook channel is not running.");
+                    println!("Start the daemon with BASTION_WEBHOOK_ADDR set, then retry.");
+                    Ok(CommandResult::Handled)
+                }
+            }
+        }
+
         "/model" => {
             let model = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("/model requires a model name (e.g. /model claude-sonnet-4-5)"))?;
@@ -271,6 +312,7 @@ mod tests {
             &registry,
             &mem,
             &mut forced,
+            None,
         ).await.expect("handle_command");
 
         assert!(matches!(result, CommandResult::Handled));
@@ -292,7 +334,7 @@ mod tests {
         let provider = make_provider();
         let mut forced = None;
 
-        let _ = handle_command("/as UnknownPersona", &provider, &registry, &mem, &mut forced).await.expect("cmd");
+        let _ = handle_command("/as UnknownPersona", &provider, &registry, &mem, &mut forced, None).await.expect("cmd");
         // forced_persona must remain None — unknown persona rejected
         assert!(forced.is_none(), "forced must not be set for unknown persona");
     }
@@ -306,7 +348,7 @@ mod tests {
         let provider = make_provider();
         let mut forced = None;
 
-        let result = handle_command("/as Aria", &provider, &registry, &mem, &mut forced).await.expect("cmd");
+        let result = handle_command("/as Aria", &provider, &registry, &mem, &mut forced, None).await.expect("cmd");
         assert!(matches!(result, CommandResult::Handled));
         assert_eq!(forced.as_deref(), Some("Aria"), "forced must be set to Aria");
     }
@@ -371,7 +413,59 @@ mod tests {
 
         // Point RUST_LOG_PATH to a non-existent file — /logs should still return Handled.
         std::env::set_var("RUST_LOG_PATH", "/tmp/bastion_no_log_for_test.log");
-        let result = handle_command("/logs", &provider, &registry, &mem, &mut forced).await.expect("cmd");
+        let result = handle_command("/logs", &provider, &registry, &mem, &mut forced, None).await.expect("cmd");
+        assert!(matches!(result, CommandResult::Handled));
+    }
+
+    #[test]
+    fn generate_otc_is_well_formed_and_unique() {
+        let a = super::generate_otc();
+        let b = super::generate_otc();
+        // Format: BAST-XXXX-XXXX with the no-ambiguous charset.
+        assert!(a.starts_with("BAST-"), "must be prefixed BAST-: {a}");
+        assert_eq!(a.len(), 14, "BAST- + 4 + - + 4 = 14 chars: {a}");
+        assert!(!a.contains('0') && !a.contains('O') && !a.contains('1') && !a.contains('I'),
+            "must exclude ambiguous chars: {a}");
+        assert_ne!(a, b, "two codes must not collide");
+    }
+
+    #[tokio::test]
+    async fn connect_app_inserts_live_otc_into_store() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mem = make_memory(&path).await;
+        let registry = make_registry(&["Aria"]);
+        let provider = make_provider();
+        let mut forced = None;
+        let store = crate::channel::webhook::new_otc_store();
+
+        let result = handle_command(
+            "/connect-app my-phone", &provider, &registry, &mem, &mut forced, Some(&store),
+        ).await.expect("cmd");
+        assert!(matches!(result, CommandResult::Handled));
+
+        // Exactly one code, mapped to the supplied device name, freshly issued.
+        let guard = store.read().await;
+        assert_eq!(guard.len(), 1, "one OTC must be inserted");
+        let (code, (device, issued_at)) = guard.iter().next().unwrap();
+        assert!(code.starts_with("BAST-"), "stored key is the BAST- code: {code}");
+        assert_eq!(device, "my-phone", "device name must be the /connect-app arg");
+        assert!(issued_at.elapsed().as_secs() < 5, "issued just now (well within 5-min TTL)");
+    }
+
+    #[tokio::test]
+    async fn connect_app_without_store_is_graceful() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mem = make_memory(&path).await;
+        let registry = make_registry(&["Aria"]);
+        let provider = make_provider();
+        let mut forced = None;
+
+        // No webhook channel running → otc_store is None → command still Handled, no panic.
+        let result = handle_command(
+            "/connect-app", &provider, &registry, &mem, &mut forced, None,
+        ).await.expect("cmd");
         assert!(matches!(result, CommandResult::Handled));
     }
 }

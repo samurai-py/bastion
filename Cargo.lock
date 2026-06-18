@@ -340,6 +340,8 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-stdout",
  "opentelemetry_sdk",
+ "rand 0.8.6",
+ "regex",
  "reqwest",
  "rmcp",
  "rstest",
@@ -353,11 +355,13 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-test",
+ "toml_edit 0.22.27",
  "tower",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-test",
+ "url",
 ]
 
 [[package]]
