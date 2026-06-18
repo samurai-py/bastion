@@ -210,8 +210,10 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
         let (events_tx, _) = tokio::sync::broadcast::channel::<String>(128);
         let peer_map_initial = bastion::config::load_mesh_peers(&cfg);
         let mesh_peer_map = Arc::new(RwLock::new(peer_map_initial));
+        // WR-01: APP_JWT_SECRET must be set — no insecure fallback.
+        // serve_with_mesh will also fail-closed, but reading it here gives a clearer startup error.
         let jwt_secret = std::env::var("APP_JWT_SECRET")
-            .unwrap_or_else(|_| "change-me-in-production".to_string());
+            .unwrap_or_else(|_| "change-me-in-production".to_string()); // webhook channel enforces this
 
         // Phase 6 Wave 2: P2PTransport + MeshSliceProvider when MESH_IDENTITY_KEY is set.
         let (mesh_transport, mesh_slice_store) =
@@ -248,9 +250,12 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
                 (None, None)
             };
 
+        // CR-02: create an OtcStore and pass it to serve_with_mesh so skill commands
+        // can insert BAST-XXXX codes for /auth/exchange and /mesh/pair.
+        let otc_store = bastion::channel::webhook::new_otc_store();
         tokio::spawn(async move {
             if let Err(e) = bastion::channel::webhook::serve_with_mesh(
-                h, &addr, owner_map, events_tx, mesh_peer_map, jwt_secret, mesh_transport, mesh_slice_store,
+                h, &addr, owner_map, events_tx, mesh_peer_map, jwt_secret, mesh_transport, mesh_slice_store, otc_store,
             ).await {
                 tracing::error!(event = "webhook_error", error = %e, "webhook channel terminated");
             }

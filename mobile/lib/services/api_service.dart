@@ -43,13 +43,14 @@ class ApiService {
   }
 
   /// Send a user message to the daemon.
+  /// Contract: POST /webhook body = {'text': message}; daemon Out = {'reply': String}. (CR-05)
   Future<String> sendMessage(String message) async {
     final url = await getDaemonUrl();
     final resp = await _dio.post(
       '$url/webhook',
-      data: {'message': message},
+      data: {'text': message},
     );
-    return resp.data['response'] as String? ?? '';
+    return resp.data['reply'] as String? ?? '';
   }
 
   /// Check if JWT is present (app is paired).

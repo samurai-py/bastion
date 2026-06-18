@@ -76,6 +76,21 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio_stream::wrappers::BroadcastStream;
 
+/// Public type alias for the OTC store shared between the webhook server and skill commands.
+///
+/// Skill commands insert a code like this:
+///   otc_store.write().await.insert(
+///       "BAST-XXXX".to_string(),
+///       ("device-name".to_string(), std::time::Instant::now()),
+///   );
+/// The code is consumed by /auth/exchange or /mesh/pair within 5 minutes (CR-02).
+pub type OtcStore = Arc<RwLock<std::collections::HashMap<String, (String, std::time::Instant)>>>;
+
+/// Create a new empty OtcStore. Pass to serve_with_mesh so skills can insert codes.
+pub fn new_otc_store() -> OtcStore {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
 /// JWT claims — sub is the device_name / owner identifier issued at /auth/exchange.
 /// Used both for signing (auth_exchange_handler) and verification (resolve_owner_or_401).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -310,10 +325,11 @@ async fn auth_exchange_handler(
             }
         }
         Some(_) => {
-            // OTC expired — consume it anyway to prevent retry
+            // OTC expired — consume it anyway to prevent retry.
+            // WR-03: return same body as unknown-OTC to prevent enumeration oracle.
             state.otc_store.write().await.remove(&otc);
             tracing::warn!(event = "auth_exchange_expired_otc");
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "OTC expired" }))).into_response()
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid OTC" }))).into_response()
         }
         None => {
             tracing::warn!(event = "auth_exchange_invalid_otc");
@@ -374,8 +390,10 @@ async fn mesh_pair_handler(
             (StatusCode::OK, Json(serde_json::json!({ "status": "paired", "peer_owner": peer_owner_id }))).into_response()
         }
         Some(_) => {
+            // WR-03: return same body as unknown-token to prevent enumeration oracle.
             state.otc_store.write().await.remove(&body.token);
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "pairing token expired" }))).into_response()
+            tracing::warn!(event = "mesh_pair_expired_token");
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid pairing token" }))).into_response()
         }
         None => {
             (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid pairing token" }))).into_response()
@@ -391,11 +409,14 @@ pub async fn serve(
     mesh_peer_map: Arc<RwLock<MeshPeerMap>>,
     jwt_secret: String,
 ) -> anyhow::Result<()> {
-    serve_with_mesh(agent, addr, owner_map, events_tx, mesh_peer_map, jwt_secret, None, None).await
+    serve_with_mesh(agent, addr, owner_map, events_tx, mesh_peer_map, jwt_secret, None, None, new_otc_store()).await
 }
 
 /// Extended serve function that accepts optional mesh transport and slice store.
 /// Called by daemon startup when MESH_IDENTITY_KEY is configured.
+///
+/// `otc_store`: shared OTC store — pass a handle to skill commands so they can insert
+/// BAST-XXXX codes for /auth/exchange and /mesh/pair. Use `new_otc_store()` to create one.
 pub async fn serve_with_mesh(
     agent: AgentHandle,
     addr: &str,
@@ -405,8 +426,8 @@ pub async fn serve_with_mesh(
     jwt_secret: String,
     mesh_transport: Option<crate::mesh::SharedMeshTransport>,
     mesh_slice_store: Option<crate::mesh::context_provider::MeshSliceStore>,
+    otc_store: OtcStore,
 ) -> anyhow::Result<()> {
-    let otc_store = Arc::new(RwLock::new(std::collections::HashMap::new()));
     let state = AppState {
         agent,
         owner_map: Arc::new(owner_map),
@@ -668,6 +689,68 @@ mod tests {
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── CR-02 OtcStore tests ─────────────────────────────────────────────────
+
+    /// CR-02: build_router_with_otc helper — inserts a live OTC into the shared store.
+    fn build_router_with_otc(otc: &str, device_name: &str) -> Router {
+        let (h, rx) = handle::channel();
+        stub_consumer(rx);
+        let (events_tx, _) = broadcast::channel::<String>(128);
+        let mesh_peer_map = Arc::new(RwLock::new(MeshPeerMap::new()));
+        let store = new_otc_store();
+        // Pre-insert the OTC so /auth/exchange can consume it
+        store.try_write().unwrap().insert(
+            otc.to_string(),
+            (device_name.to_string(), std::time::Instant::now()),
+        );
+        let state = AppState {
+            agent: h,
+            owner_map: Arc::new(OwnerMap::default()),
+            events_tx,
+            mesh_peer_map,
+            otc_store: store,
+            jwt_secret: "test-secret".to_string(),
+            mesh_transport: None,
+            mesh_slice_store: None,
+        };
+        Router::new()
+            .route("/webhook", post(handle))
+            .route("/events", axum::routing::get(sse_handler))
+            .route("/auth/exchange", post(auth_exchange_handler))
+            .route("/mesh/pair", post(mesh_pair_handler))
+            .with_state(state)
+    }
+
+    /// CR-02: /auth/exchange with a freshly inserted OTC returns 200 + {jwt, device_name}.
+    #[tokio::test]
+    async fn post_auth_exchange_valid_otc_returns_jwt() {
+        let app = build_router_with_otc("BAST-TEST-1234", "mario-phone");
+        let body = serde_json::json!({ "otc": "BAST-TEST-1234" }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/exchange")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(val.get("jwt").and_then(|v| v.as_str()).is_some(), "jwt field missing: {val}");
+        assert_eq!(val["device_name"], "mario-phone");
+    }
+
+    /// CR-02: new_otc_store() is callable and returns a usable Arc<RwLock<HashMap>>.
+    #[test]
+    fn new_otc_store_is_accessible() {
+        let store = new_otc_store();
+        store.try_write().unwrap().insert(
+            "BAST-XY".to_string(),
+            ("dev".to_string(), std::time::Instant::now()),
+        );
+        assert!(store.try_read().unwrap().contains_key("BAST-XY"));
     }
 
     // ── CR-01 / WR-01 JWT tests ──────────────────────────────────────────────
