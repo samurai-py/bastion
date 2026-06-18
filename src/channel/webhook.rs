@@ -45,8 +45,15 @@ impl Channel for WebhookChannel {
     async fn run(self: Box<Self>, agent: AgentHandle) -> anyhow::Result<()> {
         let (events_tx, _) = broadcast::channel::<String>(128);
         let mesh_peer_map = Arc::new(RwLock::new(MeshPeerMap::new()));
-        let jwt_secret = std::env::var("APP_JWT_SECRET")
-            .unwrap_or_else(|_| "change-me-in-production".to_string());
+        // WR-01: fail-closed — refuse to start if APP_JWT_SECRET is not set.
+        // Falling back to a hardcoded default is a silent auth bypass once CR-01 is fixed.
+        let jwt_secret = std::env::var("APP_JWT_SECRET").map_err(|_| {
+            tracing::error!(
+                event = "webhook_no_jwt_secret",
+                "APP_JWT_SECRET is not set — refusing to start webhook channel (WR-01: silent default is an auth bypass)"
+            );
+            anyhow::anyhow!("APP_JWT_SECRET must be set; refusing to start with hardcoded default")
+        })?;
         serve(agent, &self.addr, self.owner_map, events_tx, mesh_peer_map, jwt_secret).await
     }
 
@@ -68,6 +75,15 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio_stream::wrappers::BroadcastStream;
+
+/// JWT claims — sub is the device_name / owner identifier issued at /auth/exchange.
+/// Used both for signing (auth_exchange_handler) and verification (resolve_owner_or_401).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Claims {
+    sub: String,
+    device: String,
+    exp: u64,
+}
 
 /// Webhook request body. Owner is NOT accepted here — use the auth-token header (CR-03).
 #[derive(Deserialize)]
@@ -119,15 +135,33 @@ pub fn error_status(e: &anyhow::Error) -> StatusCode {
 
 /// Resolve owner from x-bastion-token header. Returns None + 401 response on miss.
 /// Pattern from CR-03. All protected routes MUST use this.
+///
+/// Resolution order:
+///   1. Try JWT decode (HS256, signed with jwt_secret) → use sub claim as owner_id (CR-01).
+///   2. Fall back to static owner_map lookup (pre-existing CLI/API tokens, backward compat).
+///   3. Reject with 401 if both fail.
 fn resolve_owner_or_401(
     headers: &HeaderMap,
     owner_map: &OwnerMap,
+    jwt_secret: &str,
     event_name: &'static str,
 ) -> Result<String, axum::response::Response> {
     let token = headers
         .get("x-bastion-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+
+    // First try JWT decode (mobile app tokens issued by /auth/exchange). CR-01.
+    let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    if let Ok(data) = jsonwebtoken::decode::<Claims>(
+        token,
+        &jsonwebtoken::DecodingKey::from_secret(jwt_secret.as_bytes()),
+        &validation,
+    ) {
+        return Ok(data.claims.sub);
+    }
+
+    // Fallback: static owner_map (pre-existing non-JWT tokens — CLI / API keys).
     match owner_map.resolve(token) {
         Some(o) => Ok(o.to_owned()),
         None => {
@@ -144,7 +178,7 @@ async fn handle(
     Json(p): Json<In>,
 ) -> impl IntoResponse {
     // CR-03: owner comes from a trusted header map, never from the request body.
-    let owner = match resolve_owner_or_401(&headers, &state.owner_map, "webhook_unauthorized") {
+    let owner = match resolve_owner_or_401(&headers, &state.owner_map, &state.jwt_secret, "webhook_unauthorized") {
         Ok(o) => o,
         Err(resp) => return resp,
     };
@@ -168,7 +202,7 @@ async fn sse_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, "sse_unauthorized") {
+    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, &state.jwt_secret, "sse_unauthorized") {
         Ok(o) => o,
         Err(resp) => return resp,
     };
@@ -195,7 +229,7 @@ async fn ingest_handler(
     // CR-03: enforce auth BEFORE body deserialization. Taking the raw body (not
     // Json<...>) prevents Axum's Json extractor from rejecting an unauthenticated
     // request with 415 before resolve_owner_or_401 ever runs (#mesh-ingest-401).
-    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, "mesh_ingest_unauthorized") {
+    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, &state.jwt_secret, "mesh_ingest_unauthorized") {
         Ok(o) => o,
         Err(resp) => return resp,
     };
@@ -262,8 +296,6 @@ async fn auth_exchange_handler(
             // JWT encodes device name in "sub" claim.
             // The issued JWT IS the x-bastion-token used on subsequent requests.
             use jsonwebtoken::{encode, Header, EncodingKey};
-            #[derive(serde::Serialize)]
-            struct Claims { sub: String, device: String, exp: u64 }
             let exp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -307,7 +339,7 @@ async fn mesh_pair_handler(
     headers: HeaderMap,
     Json(body): Json<MeshPairBody>,
 ) -> impl IntoResponse {
-    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, "mesh_pair_unauthorized") {
+    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, &state.jwt_secret, "mesh_pair_unauthorized") {
         Ok(o) => o,
         Err(resp) => return resp,
     };
@@ -636,5 +668,108 @@ mod tests {
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── CR-01 / WR-01 JWT tests ──────────────────────────────────────────────
+
+    /// Helper: mint a valid HS256 JWT signed with the test secret.
+    fn mint_jwt(secret: &str, sub: &str, exp_offset_secs: i64) -> String {
+        use jsonwebtoken::{encode, Header, EncodingKey};
+        #[derive(serde::Serialize)]
+        struct C { sub: String, device: String, exp: u64 }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exp = if exp_offset_secs >= 0 {
+            now + exp_offset_secs as u64
+        } else {
+            now.saturating_sub((-exp_offset_secs) as u64)
+        };
+        let claims = C { sub: sub.to_string(), device: sub.to_string(), exp };
+        encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).unwrap()
+    }
+
+    /// CR-01: valid JWT (signed with test-secret, sub="mario-phone") → 200 on /webhook.
+    #[tokio::test]
+    async fn post_webhook_valid_jwt_returns_200() {
+        let app = build_router();
+        let jwt = mint_jwt("test-secret", "mario-phone", 3600);
+        let body = serde_json::json!({ "text": "hello" }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-bastion-token", jwt)
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// CR-01: JWT signed with a different key → 401.
+    #[tokio::test]
+    async fn post_webhook_jwt_wrong_key_returns_401() {
+        let app = build_router();
+        let jwt = mint_jwt("wrong-secret", "mario-phone", 3600);
+        let body = serde_json::json!({ "text": "hello" }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-bastion-token", jwt)
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// CR-01: expired JWT → 401.
+    #[tokio::test]
+    async fn post_webhook_expired_jwt_returns_401() {
+        let app = build_router();
+        let jwt = mint_jwt("test-secret", "mario-phone", -3600);
+        let body = serde_json::json!({ "text": "hello" }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-bastion-token", jwt)
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// CR-01: raw non-JWT string → 401 (backward compat — no match in owner_map either).
+    #[tokio::test]
+    async fn post_webhook_raw_non_jwt_returns_401() {
+        let app = build_router();
+        let body = serde_json::json!({ "text": "hello" }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-bastion-token", "not-a-jwt-token-and-not-in-owner-map")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Backward compat: static owner_map token still works after JWT decode addition.
+    #[tokio::test]
+    async fn post_webhook_static_owner_map_token_still_works() {
+        let app = build_router(); // "token-mario" → "mario" in owner map
+        let body = serde_json::json!({ "text": "hello" }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-bastion-token", "token-mario")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
