@@ -92,6 +92,10 @@ impl SessionManager {
                 "ALTER TABLE sessions ADD COLUMN owner_id TEXT NOT NULL DEFAULT '_local'",
                 [],
             );
+            // Additive migration: add privacy_tier column to beliefs.
+            // NULL = deny-on-ambiguity (safe default — existing rows treated as LocalOnly by egress gate).
+            // Ignores "duplicate column name" error on DBs that already have this column (safe re-run).
+            let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN privacy_tier TEXT", []);
             Ok::<_, anyhow::Error>(())
         }).await?
     }

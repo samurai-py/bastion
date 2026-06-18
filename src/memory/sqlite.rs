@@ -1,4 +1,4 @@
-use crate::memory::{Belief, Memory};
+use crate::memory::{Belief, Memory, PrivacyTier};
 use async_trait::async_trait;
 use rusqlite::Connection;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,6 +31,7 @@ impl Memory for SqliteMemory {
         session_id: &str,
         source: &str,
         is_core: bool,
+        tier: Option<PrivacyTier>,
     ) -> anyhow::Result<i64> {
         let path = self.db_path.clone();
         let owner_id = owner_id.to_owned();
@@ -38,6 +39,10 @@ impl Memory for SqliteMemory {
         let content = content.to_owned();
         let session_id = session_id.to_owned();
         let source = source.to_owned();
+        let tier_str: Option<String> = tier.map(|t| match t {
+            PrivacyTier::CloudOk => "cloud-ok".to_string(),
+            PrivacyTier::LocalOnly => "local-only".to_string(),
+        });
         task::spawn_blocking(move || {
             let mut conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -46,9 +51,9 @@ impl Memory for SqliteMemory {
             // (audit-trail integrity — no orphan belief without provenance).
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO beliefs (owner_id, persona_tag, content, weight, revoked, is_core, created_at) \
-                 VALUES (?1, ?2, ?3, 1.0, 0, ?4, ?5)",
-                rusqlite::params![owner_id, persona_tag, content, is_core as i32, now],
+                "INSERT INTO beliefs (owner_id, persona_tag, content, weight, revoked, is_core, created_at, privacy_tier) \
+                 VALUES (?1, ?2, ?3, 1.0, 0, ?4, ?5, ?6)",
+                rusqlite::params![owner_id, persona_tag, content, is_core as i32, now, tier_str],
             )?;
             let belief_id = tx.last_insert_rowid();
             tx.execute(
@@ -73,12 +78,18 @@ impl Memory for SqliteMemory {
             let conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             let mut stmt = conn.prepare(
-                "SELECT id, owner_id, persona_tag, content, weight, is_core \
+                "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier \
                  FROM beliefs \
                  WHERE owner_id = ?1 AND (persona_tag = ?2 OR persona_tag IS NULL) AND revoked = 0 AND weight > 0",
             )?;
             let beliefs = stmt
                 .query_map(rusqlite::params![owner_id, persona_tag], |row| {
+                    let tier_str: Option<String> = row.get(6)?;
+                    let tier = tier_str.as_deref().and_then(|s| match s {
+                        "cloud-ok" => Some(PrivacyTier::CloudOk),
+                        "local-only" => Some(PrivacyTier::LocalOnly),
+                        _ => None,
+                    });
                     Ok(Belief {
                         id: row.get(0)?,
                         owner_id: row.get(1)?,
@@ -86,7 +97,7 @@ impl Memory for SqliteMemory {
                         content: row.get(3)?,
                         weight: row.get(4)?,
                         is_core: row.get::<_, i32>(5)? != 0,
-                        tier: None, // no privacy_tier column yet — defaults to None (deny-on-ambiguity)
+                        tier,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -123,12 +134,18 @@ impl Memory for SqliteMemory {
             let conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             let mut stmt = conn.prepare(
-                "SELECT id, owner_id, persona_tag, content, weight, is_core \
+                "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier \
                  FROM beliefs \
                  WHERE owner_id = ?1 AND is_core = 1 AND revoked = 0",
             )?;
             let beliefs = stmt
                 .query_map(rusqlite::params![owner_id], |row| {
+                    let tier_str: Option<String> = row.get(6)?;
+                    let tier = tier_str.as_deref().and_then(|s| match s {
+                        "cloud-ok" => Some(PrivacyTier::CloudOk),
+                        "local-only" => Some(PrivacyTier::LocalOnly),
+                        _ => None,
+                    });
                     Ok(Belief {
                         id: row.get(0)?,
                         owner_id: row.get(1)?,
@@ -136,7 +153,7 @@ impl Memory for SqliteMemory {
                         content: row.get(3)?,
                         weight: row.get(4)?,
                         is_core: row.get::<_, i32>(5)? != 0,
-                        tier: None, // no privacy_tier column yet — defaults to None (deny-on-ambiguity)
+                        tier,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -193,7 +210,7 @@ mod tests {
     async fn test_store_and_retrieve() {
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", Some("health"), "Mario exercises daily", "sess1", "user", false)
+            .store_belief("owner1", Some("health"), "Mario exercises daily", "sess1", "user", false, None)
             .await
             .expect("store");
         assert!(id > 0);
@@ -211,7 +228,7 @@ mod tests {
     async fn test_revoke_excludes_from_retrieve_but_row_preserved() {
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", Some("finance"), "Has savings", "sess1", "user", false)
+            .store_belief("owner1", Some("finance"), "Has savings", "sess1", "user", false, None)
             .await
             .expect("store");
 
@@ -251,7 +268,7 @@ mod tests {
         // This test verifies the row count stays the same after revoke
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", None, "Global belief", "sess1", "dream", false)
+            .store_belief("owner1", None, "Global belief", "sess1", "dream", false, None)
             .await
             .expect("store");
 
@@ -286,10 +303,10 @@ mod tests {
     async fn test_global_belief_visible_to_any_persona_tag() {
         // persona_tag IS NULL beliefs appear for any tagged retrieve (MEM-03/04)
         let (_f, mem) = make_db().await;
-        mem.store_belief("owner1", None, "Global fact", "sess1", "user", false)
+        mem.store_belief("owner1", None, "Global fact", "sess1", "user", false, None)
             .await
             .expect("store global");
-        mem.store_belief("owner1", Some("health"), "Health-tagged", "sess1", "user", false)
+        mem.store_belief("owner1", Some("health"), "Health-tagged", "sess1", "user", false, None)
             .await
             .expect("store tagged");
 
@@ -304,10 +321,10 @@ mod tests {
     #[tokio::test]
     async fn test_load_core() {
         let (_f, mem) = make_db().await;
-        mem.store_belief("owner1", None, "Core belief", "sess1", "system", true)
+        mem.store_belief("owner1", None, "Core belief", "sess1", "system", true, None)
             .await
             .expect("store core");
-        mem.store_belief("owner1", None, "Normal belief", "sess1", "user", false)
+        mem.store_belief("owner1", None, "Normal belief", "sess1", "user", false, None)
             .await
             .expect("store normal");
 
@@ -321,7 +338,7 @@ mod tests {
     async fn test_provenance_stored() {
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", None, "Some fact", "sess-abc", "tool", false)
+            .store_belief("owner1", None, "Some fact", "sess-abc", "tool", false, None)
             .await
             .expect("store");
 
@@ -336,7 +353,7 @@ mod tests {
         // IDOR guard: owner2 cannot revoke or read provenance of owner1's belief.
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", None, "Owner1 secret", "sess1", "user", false)
+            .store_belief("owner1", None, "Owner1 secret", "sess1", "user", false, None)
             .await
             .expect("store");
 
@@ -365,5 +382,51 @@ mod tests {
         assert_eq!(t, PrivacyTier::LocalOnly);
         let t2: PrivacyTier = serde_json::from_str("\"cloud-ok\"").expect("cloud-ok");
         assert_eq!(t2, PrivacyTier::CloudOk);
+    }
+
+    #[tokio::test]
+    async fn test_tier_persists_and_survives_filter_for_mesh() {
+        use crate::memory::PrivacyTier;
+        use crate::mesh::allowlist::{filter_for_mesh, OwnerAllowlist};
+
+        let (_f, mem) = make_db().await;
+
+        // Store a CloudOk belief with a tag in the allowlist
+        mem.store_belief(
+            "owner1",
+            Some("mercado"),
+            "Alice spends 2k/month on groceries",
+            "sess1",
+            "user",
+            false,
+            Some(PrivacyTier::CloudOk),
+        ).await.expect("store cloud-ok belief");
+
+        // Store a LocalOnly belief — should be stripped
+        mem.store_belief(
+            "owner1",
+            Some("mercado"),
+            "Alice's bank password",
+            "sess2",
+            "user",
+            false,
+            Some(PrivacyTier::LocalOnly),
+        ).await.expect("store local-only belief");
+
+        // Retrieve from real DB (not hand-built Beliefs)
+        let beliefs = mem.retrieve_tagged("owner1", Some("mercado")).await.expect("retrieve");
+        assert_eq!(beliefs.len(), 2, "both beliefs should be retrieved");
+
+        // filter_for_mesh with allowlist that includes 'mercado'
+        let allowlist = OwnerAllowlist {
+            owner_id: "owner1".to_string(),
+            allowed_tags: vec!["mercado".to_string()],
+        };
+        let passed = filter_for_mesh(beliefs, &allowlist);
+
+        // Only CloudOk belief survives
+        assert_eq!(passed.len(), 1, "only CloudOk belief must survive filter_for_mesh");
+        assert_eq!(passed[0].content, "Alice spends 2k/month on groceries");
+        assert_eq!(passed[0].tier, Some(PrivacyTier::CloudOk));
     }
 }

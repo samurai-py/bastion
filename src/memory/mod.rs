@@ -41,6 +41,7 @@ pub trait Memory: Send + Sync {
         session_id: &str,
         source: &str,
         is_core: bool,
+        tier: Option<PrivacyTier>,
     ) -> anyhow::Result<i64>;
 
     /// Retrieve non-revoked beliefs for (owner, persona_tag).
