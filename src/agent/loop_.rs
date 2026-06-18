@@ -141,9 +141,18 @@ impl AgentLoop {
     /// Called after AgentLoop::new() when mesh is configured (MESH_IDENTITY_KEY set).
     /// The slice_store is shared with the ingest_handler via AppState so that received
     /// slices become visible in the system prompt on the very next agent turn.
+    ///
+    /// WR-06: uses the real owner_id (BASTION_OWNER_ID env var) rather than session_id
+    /// as the local_owner passed to MeshSliceProvider. session_id is a per-session UUID
+    /// that changes across restarts — it is NOT a stable owner identifier.
     pub fn add_mesh_slice_provider(&mut self, store: crate::mesh::context_provider::MeshSliceStore) {
+        // WR-06: read real owner_id from env; fall back to DEFAULT_OWNER (not session_id).
+        // BASTION_OWNER_ID is the stable identity used by P2PTransport and the mesh config.
+        let local_owner = std::env::var("BASTION_OWNER_ID")
+            .or_else(|_| std::env::var("MESH_OWNER_ID"))
+            .unwrap_or_else(|_| DEFAULT_OWNER.to_string());
         let mesh_provider = crate::mesh::context_provider::MeshSliceProvider::from_store(
-            self.session_id.clone(), // use session_id as local_owner proxy at this point
+            local_owner,
             store,
         );
         self.context_providers.push(Box::new(mesh_provider));

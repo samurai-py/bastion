@@ -2,6 +2,10 @@
 //! Sends encrypted MeshEnvelopes to peer daemons via HTTP POST to /mesh/ingest.
 //! Uses `age` (X25519 + ChaCha20-Poly1305) for E2E encryption.
 //! Relay impl (Bastion Cloud, closed) is a separate repo — same MeshTransport trait.
+//!
+//! Security properties enforced here:
+//! - CR-06: receive() asserts envelope.to_owner == self.local_owner (cross-owner injection prevention).
+//! - SEC-02: reqwest client built with redirect::Policy::none() (open-redirect SSRF prevention).
 
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -35,7 +39,12 @@ impl P2PTransport {
             local_identity_key,
             peers,
             events_tx,
-            http: reqwest::Client::new(),
+            // SEC-02: disable redirects on the outbound mesh client — prevents open-redirect
+            // SSRF where a peer serves a 3xx that pivots to a private address.
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("failed to build reqwest client"),
         }
     }
 }
@@ -148,6 +157,16 @@ impl MeshTransport for P2PTransport {
             );
         }
 
+        // CR-06: verify the envelope is addressed to THIS node's owner.
+        // A registered peer must not be able to inject slices meant for a different owner
+        // into this node's mesh_slice_store (cross-owner injection prevention).
+        if envelope.to_owner != self.local_owner {
+            anyhow::bail!(
+                "envelope to_owner '{}' does not match local_owner '{}' — rejecting cross-owner injection",
+                envelope.to_owner, self.local_owner
+            );
+        }
+
         // Verify sender is a registered peer (Pitfall 2 — unregistered peer rejection)
         let peers = self.peers.read().await;
         if peers.resolve(&slice.from_owner).is_none() {
@@ -161,5 +180,60 @@ impl MeshTransport for P2PTransport {
         );
 
         Ok(slice)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::MeshPeerMap;
+    use std::sync::Arc;
+    use tokio::sync::{broadcast, RwLock};
+
+    /// CR-06: receive() must reject envelopes where to_owner != local_owner.
+    /// This prevents a registered peer from injecting slices addressed to a different owner.
+    #[tokio::test]
+    async fn test_receive_rejects_wrong_to_owner() {
+        use age::secrecy::ExposeSecret as _;
+        // Generate a real age identity/key pair
+        let identity = age::x25519::Identity::generate();
+        // age::x25519::Identity::to_string() returns a SecretString; expose to get &str
+        let identity_str = identity.to_string().expose_secret().to_owned();
+
+        let (tx, _) = broadcast::channel(1);
+        let peers = Arc::new(RwLock::new(MeshPeerMap::new()));
+        let transport = P2PTransport::new(
+            "local-owner".to_string(),
+            identity_str,
+            peers,
+            tx,
+        );
+
+        // Build a plaintext SelectiveSlice from "remote-owner"
+        let plaintext = serde_json::to_vec(&crate::mesh::SelectiveSlice {
+            from_owner: "remote-owner".to_string(),
+            beliefs: vec![],
+        }).unwrap();
+
+        // Encrypt with local node's public key so decrypt succeeds (tests the to_owner check, not decrypt)
+        let recipient = identity.to_public();
+        let ciphertext = age::encrypt(&recipient, &plaintext)
+            .expect("age encrypt must succeed in test");
+
+        // Construct envelope addressed to a DIFFERENT owner — NOT "local-owner"
+        let envelope = MeshEnvelope {
+            from_owner: "remote-owner".to_string(),
+            to_owner: "other-owner".to_string(), // mismatch — should be rejected
+            ciphertext,
+            recipient_hint: identity.to_public().to_string(),
+        };
+
+        let result = transport.receive(envelope).await;
+        assert!(result.is_err(), "receive() must reject envelope addressed to wrong owner");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("to_owner") || err_msg.contains("wrong owner"),
+            "error must describe the to_owner rejection: {err_msg}",
+        );
     }
 }

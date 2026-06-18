@@ -255,6 +255,24 @@ async fn ingest_handler(
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("invalid envelope: {e}") }))).into_response();
         }
     };
+
+    // CR-06: reject envelopes not addressed to this node's owner.
+    // local_owner is the value MESH_OWNER_ID (or BASTION_OWNER_ID) was set to at startup.
+    // This check is belt-and-suspenders: P2PTransport::receive() also asserts to_owner,
+    // but we guard here to return 403 before spending CPU on decryption.
+    if let Ok(local_owner) = std::env::var("MESH_OWNER_ID")
+        .or_else(|_| std::env::var("BASTION_OWNER_ID"))
+    {
+        if envelope.to_owner != local_owner {
+            tracing::warn!(
+                event = "mesh_ingest_wrong_owner",
+                to_owner = %envelope.to_owner,
+                local_owner = %local_owner,
+            );
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "envelope addressed to wrong owner" }))).into_response();
+        }
+    }
+
     let transport = match &state.mesh_transport {
         Some(t) => t.clone(),
         None => {

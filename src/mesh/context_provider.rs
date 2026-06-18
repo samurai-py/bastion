@@ -38,7 +38,7 @@ pub struct MeshSliceProvider {
     /// Receives slices from ingest_handler via this store.
     slice_store: MeshSliceStore,
     /// The local owner_id (to scope context correctly).
-    #[allow(dead_code)]
+    /// WR-06: this must be set from the real BASTION_OWNER_ID, not session_id.
     local_owner: String,
 }
 
