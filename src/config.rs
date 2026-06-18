@@ -109,16 +109,85 @@ pub fn load_mesh_peers(config: &BastionConfig) -> crate::mesh::MeshPeerMap {
     map
 }
 
-/// Append a new [[mesh.peer]] entry to bastion.toml.
-/// Called by /mesh/pair handler after successful pairing.
-pub async fn append_mesh_peer(owner_id: &str, peer_url: &str, age_pubkey: &str) -> anyhow::Result<()> {
+/// Validate age public key format. Must match ^age1[0-9a-z]+$ (bech32 age key).
+///
+/// SEC-01: called before any config write to prevent injection via malformed key strings.
+fn validate_age_pubkey(key: &str) -> anyhow::Result<()> {
+    // Static regex — compile once. age keys are lowercase bech32: age1 + [0-9a-z]+
+    let re = regex::Regex::new(r"^age1[0-9a-z]+$").expect("static regex must compile");
+    if !re.is_match(key) {
+        anyhow::bail!("invalid age_pubkey format — must match ^age1[0-9a-z]+$ (SEC-01)");
+    }
+    Ok(())
+}
+
+/// Append a new [[mesh.peer]] entry to bastion.toml using toml_edit.
+///
+/// SEC-01: uses toml_edit (programmatic table construction, no string interpolation).
+///         age_pubkey validated against ^age1[0-9a-z]+$ before touching the file.
+/// WR-02: bails on read error instead of overwriting config with empty + new entry.
+///        Existing entries (including allowed_tags) are preserved via toml_edit parse/append.
+///        Atomic write via temp-file + rename prevents partial write corruption.
+pub async fn append_mesh_peer(
+    owner_id: &str,
+    peer_url: &str,
+    age_pubkey: &str,
+    allowed_tags: &[String],
+) -> anyhow::Result<()> {
+    use toml_edit::{DocumentMut, value};
+
+    // SEC-01: validate age_pubkey format before touching the file
+    validate_age_pubkey(age_pubkey)?;
+
     let path = std::env::var("BASTION_CONFIG").unwrap_or_else(|_| "bastion.toml".to_string());
-    let current = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-    let entry = format!(
-        "\n[[mesh.peer]]\nowner_id = \"{}\"\npeer_url = \"{}\"\nage_pubkey = \"{}\"\n",
-        owner_id, peer_url, age_pubkey
-    );
-    tokio::fs::write(&path, format!("{}{}", current, entry)).await?;
+
+    // WR-02: bail on read error — do NOT fall back to empty string.
+    // Falling back to "" would overwrite the entire config with just the new peer entry.
+    let current = tokio::fs::read_to_string(&path).await
+        .map_err(|e| anyhow::anyhow!("failed to read '{}' before appending peer: {}", path, e))?;
+
+    // Parse as mutable TOML document (toml_edit preserves comments and formatting)
+    let mut doc: DocumentMut = current.parse()
+        .map_err(|e| anyhow::anyhow!("failed to parse '{}' as TOML: {}", path, e))?;
+
+    // Build the new [[mesh.peer]] entry as a toml_edit Table
+    let mut peer_entry = toml_edit::Table::new();
+    peer_entry["owner_id"]   = value(owner_id);
+    peer_entry["peer_url"]   = value(peer_url);
+    peer_entry["age_pubkey"] = value(age_pubkey);
+    if !allowed_tags.is_empty() {
+        let mut tags_array = toml_edit::Array::new();
+        for t in allowed_tags {
+            tags_array.push(t.as_str());
+        }
+        peer_entry["allowed_tags"] = toml_edit::Item::Value(toml_edit::Value::Array(tags_array));
+    }
+
+    // Ensure doc["mesh"] exists as a table
+    if !doc.contains_key("mesh") {
+        doc["mesh"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+
+    // Append to [[mesh.peer]] array-of-tables
+    match doc["mesh"]["peer"].as_array_of_tables_mut() {
+        Some(arr) => {
+            arr.push(peer_entry);
+        }
+        None => {
+            // [[mesh.peer]] key doesn't exist yet — create it
+            let mut aot = toml_edit::ArrayOfTables::new();
+            aot.push(peer_entry);
+            doc["mesh"]["peer"] = toml_edit::Item::ArrayOfTables(aot);
+        }
+    }
+
+    // Atomic write: write to .tmp then rename to prevent partial write corruption
+    let tmp_path = format!("{}.tmp", path);
+    tokio::fs::write(&tmp_path, doc.to_string()).await
+        .map_err(|e| anyhow::anyhow!("failed to write tmp config '{}': {}", tmp_path, e))?;
+    tokio::fs::rename(&tmp_path, &path).await
+        .map_err(|e| anyhow::anyhow!("failed to rename '{}' → '{}': {}", tmp_path, path, e))?;
+
     Ok(())
 }
 
@@ -151,5 +220,53 @@ mod tests {
         assert!(cfg.agent.daily_budget_usd > 0.0);
         assert!(cfg.mcp.servers.contains_key("memupalace"));
         assert_eq!(cfg.mcp.servers["memupalace"].url, "http://memupalace:8001/mcp");
+    }
+
+    // ── SEC-01 age_pubkey validation tests ───────────────────────────────────
+
+    /// SEC-01: append_mesh_peer must reject age_pubkey not matching ^age1[0-9a-z]+$
+    #[tokio::test]
+    async fn test_append_mesh_peer_rejects_invalid_age_pubkey() {
+        let result = append_mesh_peer(
+            "owner1",
+            "https://peer.example.com",
+            "not-an-age-key", // does not match ^age1[0-9a-z]+$
+            &[],
+        ).await;
+        assert!(result.is_err(), "must reject invalid age_pubkey");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("age_pubkey") || msg.contains("SEC-01"),
+            "error must reference age_pubkey: {msg}",
+        );
+    }
+
+    /// SEC-01: TOML-breaking characters in age_pubkey must be caught by regex before touching file.
+    #[tokio::test]
+    async fn test_append_mesh_peer_rejects_toml_injection_in_age_pubkey() {
+        // injection attempt via TOML-breaking characters (quotes, newlines)
+        let result = append_mesh_peer(
+            "owner1",
+            "https://peer.example.com",
+            "age1abcdef\"\nmalicious_key = true\nage1", // injection payload
+            &[],
+        ).await;
+        assert!(result.is_err(), "must reject age_pubkey with TOML-breaking characters");
+    }
+
+    /// SEC-01: valid age_pubkey passes regex (does not write to file — bails on missing config).
+    /// This confirms the regex itself is not overly restrictive.
+    #[tokio::test]
+    async fn test_validate_age_pubkey_accepts_valid_key() {
+        // validate_age_pubkey only — no filesystem I/O
+        let result = validate_age_pubkey("age1ql3z7hjy54pw3yywmz2fxnftqqhrlrr2e9xsmrwckkl2u5dc3kzqsrcq7t");
+        assert!(result.is_ok(), "valid age pubkey must pass validation");
+    }
+
+    /// SEC-01: age_pubkey with uppercase must be rejected (bech32 is lowercase only).
+    #[tokio::test]
+    async fn test_validate_age_pubkey_rejects_uppercase() {
+        let result = validate_age_pubkey("AGE1UPPERCASE");
+        assert!(result.is_err(), "uppercase age_pubkey must be rejected");
     }
 }

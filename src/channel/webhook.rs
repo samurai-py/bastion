@@ -356,6 +356,26 @@ async fn auth_exchange_handler(
     }
 }
 
+/// SEC-02: returns true for IP addresses that must not be reachable via mesh peer_url.
+/// Blocks loopback (127.x, ::1), unspecified (0.0.0.0), RFC1918 private ranges,
+/// and IPv6 ULA (fc00::/7).
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()    // 127.0.0.0/8
+            || v4.is_private()  // 10.x, 172.16-31.x, 192.168.x
+            || v4.is_link_local() // 169.254.x
+            || v4.is_unspecified() // 0.0.0.0
+            || v4.is_broadcast()   // 255.255.255.255
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()   // ::1
+            || v6.is_unspecified() // ::
+            || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 ULA
+        }
+    }
+}
+
 /// POST /mesh/pair body.
 #[derive(Deserialize)]
 struct MeshPairBody {
@@ -391,6 +411,51 @@ async fn mesh_pair_handler(
             // Token valid — consume it
             state.otc_store.write().await.remove(&body.token);
 
+            // SEC-01: validate age_pubkey format before registering or persisting
+            {
+                let re = regex::Regex::new(r"^age1[0-9a-z]+$").expect("static regex");
+                if !re.is_match(&body.age_pubkey) {
+                    tracing::warn!(event = "mesh_pair_invalid_age_pubkey", age_pubkey = %body.age_pubkey);
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "invalid age_pubkey format — must match ^age1[0-9a-z]+$" }))).into_response();
+                }
+            }
+
+            // SEC-02: validate peer_url before registering — prevent SSRF to loopback/RFC1918/link-local.
+            {
+                use url::Url;
+                let parsed = Url::parse(&body.peer_url).ok()
+                    .and_then(|u| if u.scheme() == "https" { Some(u) } else { None });
+                let parsed = match parsed {
+                    Some(u) => u,
+                    None => {
+                        tracing::warn!(event = "mesh_pair_invalid_url", url = %body.peer_url);
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer_url must be a valid https:// URL" }))).into_response();
+                    }
+                };
+                // DNS-resolve and reject private/loopback/link-local addresses
+                let host = parsed.host_str().unwrap_or("").to_string();
+                match tokio::net::lookup_host(format!("{}:443", host)).await {
+                    Ok(addrs) => {
+                        for addr in addrs {
+                            let ip = addr.ip();
+                            if is_private_ip(ip) {
+                                tracing::warn!(
+                                    event = "mesh_pair_ssrf_blocked",
+                                    url = %body.peer_url,
+                                    ip = %ip,
+                                );
+                                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer_url resolves to a private/loopback address" }))).into_response();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // DNS failure — reject (fail-closed; attacker might be testing internal names)
+                        tracing::warn!(event = "mesh_pair_dns_failed", url = %body.peer_url, error = %e);
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer_url DNS resolution failed" }))).into_response();
+                    }
+                }
+            }
+
             // Register peer in MeshPeerMap
             let peer = MeshPeer {
                 peer_url:     body.peer_url.clone(),
@@ -400,7 +465,8 @@ async fn mesh_pair_handler(
             state.mesh_peer_map.write().await.register(peer_owner_id.clone(), peer);
 
             // Persist to bastion.toml [[mesh.peer]] (best-effort; full persistence in config.rs)
-            if let Err(e) = crate::config::append_mesh_peer(&peer_owner_id, &body.peer_url, &body.age_pubkey).await {
+            // allowed_tags starts empty — set post-pairing via config update
+            if let Err(e) = crate::config::append_mesh_peer(&peer_owner_id, &body.peer_url, &body.age_pubkey, &[]).await {
                 tracing::warn!(event = "mesh_pair_persist_failed", error = %e, "peer registered in memory but toml persist failed");
             }
 

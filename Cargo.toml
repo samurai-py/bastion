@@ -36,6 +36,10 @@ axum = "0.8.9"
 age              = "0.11"
 jsonwebtoken     = "9"
 tokio-stream     = { version = "0.1", features = ["sync"] }
+# 06-07: SEC-01 TOML injection hardening (toml_edit) + SEC-02 SSRF validation (url)
+toml_edit        = "0.22"
+url              = "2"
+regex            = "1"
 # SEAM #4 — OTel GenAI observability (plan 05-05)
 opentelemetry        = { version = "0.32", features = ["trace"] }
 opentelemetry_sdk    = { version = "0.32", features = ["rt-tokio"] }
