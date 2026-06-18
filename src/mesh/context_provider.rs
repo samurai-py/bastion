@@ -96,10 +96,9 @@ impl TurnContextProvider for MeshSliceProvider {
 
 /// MESH-03: Write Cabinet synthesis result as a belief tagged "mesh_cabinet_synthesis".
 ///
-/// Callers invoke this EXPLICITLY after local Cabinet deliberation completes —
-/// this function does NOT auto-trigger from within Cabinet logic.
-/// The belief is stored with CloudOk tier so filter_for_mesh can include it
-/// when a peer's allowlist contains "mesh_cabinet_synthesis".
+/// Stores with `PrivacyTier::CloudOk` so `filter_for_mesh` includes it when a peer's
+/// `allowed_tags` contains `"mesh_cabinet_synthesis"`. Callers invoke this EXPLICITLY
+/// after local Cabinet deliberation completes — not called automatically.
 ///
 /// This is the ONLY code path that creates mesh_cabinet_synthesis beliefs —
 /// it reuses the existing SharedMemory write path (no new storage mechanism).
@@ -116,11 +115,12 @@ pub async fn write_cabinet_synthesis(
         "cabinet_synthesis",  // session_id placeholder
         "cabinet_synthesis",  // source
         false,                // not a core belief
+        Some(crate::memory::PrivacyTier::CloudOk),  // CR-04: synthesis must cross the mesh
     ).await?;
     tracing::info!(
         event = "mesh_cabinet_synthesis_written",
         owner_id = %owner_id,
-        "Cabinet synthesis stored as mesh_cabinet_synthesis belief (CloudOk, shareable via mesh)"
+        "Cabinet synthesis stored with CloudOk tier — filter_for_mesh will include it when peer allowlist contains 'mesh_cabinet_synthesis'"
     );
     Ok(())
 }

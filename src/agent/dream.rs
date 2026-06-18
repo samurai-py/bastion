@@ -87,7 +87,7 @@ pub async fn memory_flush(messages: &[Message], memory: &SharedMemory, owner: &s
     let mem = memory.read().await;
     for fact in &facts {
         if let Err(e) = mem
-            .store_belief(owner, None, fact, "dream_flush", "dream", false)
+            .store_belief(owner, None, fact, "dream_flush", "dream", false, None)
             .await
         {
             tracing::warn!(event = "memory_flush_store_error", error = %e);

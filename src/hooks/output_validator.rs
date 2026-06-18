@@ -188,7 +188,7 @@ mod tests {
         // Store a belief about exercising
         let _id = {
             let m = mem.read().await;
-            m.store_belief(owner, None, "Mario exercises every morning", "sess1", "user", false)
+            m.store_belief(owner, None, "Mario exercises every morning", "sess1", "user", false, None)
                 .await
                 .expect("store_belief")
         };
@@ -240,7 +240,7 @@ mod tests {
 
         {
             let m = mem.read().await;
-            m.store_belief(owner, None, "Mario likes coffee", "sess1", "user", false)
+            m.store_belief(owner, None, "Mario likes coffee", "sess1", "user", false, None)
                 .await
                 .expect("store");
         }

@@ -259,7 +259,7 @@ mod tests {
         // Store a belief
         let id = {
             let m = mem.read().await;
-            m.store_belief("_local", None, "Mario drinks coffee", "sess1", "user", false)
+            m.store_belief("_local", None, "Mario drinks coffee", "sess1", "user", false, None)
                 .await.expect("store")
         };
 

@@ -1098,7 +1098,7 @@ mod tests {
         // Pre-store a belief
         {
             let mem = agent.memory.read().await;
-            mem.store_belief(DEFAULT_OWNER, None, "Mario exercises every morning", "sess1", "user", false)
+            mem.store_belief(DEFAULT_OWNER, None, "Mario exercises every morning", "sess1", "user", false, None)
                 .await
                 .expect("store_belief");
         }

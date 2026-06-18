@@ -117,7 +117,7 @@ impl CronService {
         let mem = memory.read().await;
         let mut stored = 0usize;
         for fact in &facts {
-            match mem.store_belief(owner, None, fact, "idle_dream", "dream", false).await {
+            match mem.store_belief(owner, None, fact, "idle_dream", "dream", false, None).await {
                 Ok(_) => stored += 1,
                 Err(e) => tracing::warn!(event = "idle_tick_store_error", error = %e),
             }

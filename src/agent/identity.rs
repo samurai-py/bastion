@@ -143,6 +143,7 @@ mod tests {
                 "sess1",
                 "agent",
                 true, // is_core=true
+                None,
             )
             .await
             .expect("store_belief");
