@@ -3,14 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Cognitive Completion + Fabric-Ready Seams
 status: ready_to_plan
-last_updated: "2026-06-17T23:08:49.824Z"
-last_plan_completed: "06-03"
+last_updated: "2026-06-18T00:30:36.752Z"
 progress:
   total_phases: 2
-  completed_phases: 2
-  total_plans: 10
-  completed_plans: 10
-  percent: 100
+  completed_phases: 1
+  total_plans: 13
+  completed_plans: 11
+  percent: 85
 ---
 
 # State: Bastion v3
@@ -20,7 +19,7 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-05-10)
 
 **Core value:** Bastion ajuda Mario a fazer suas metas anuais avançarem — proativo, customizável por linguagem natural, seguro e instalável em minutos.
-**Current focus:** Phase 06 — ecosystem-mobile-opcional-p-s-v1-0 (ALL 4 plans complete — Plan 03 Flutter companion app delivered 2026-06-17)
+**Current focus:** Phase 06 — ecosystem-mobile-opcional-p-s-v1-0
 
 ## Current Phase
 
@@ -73,6 +72,11 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | 2026-06-17 | D-11: only /add-<channel> scaffold skill ships; specific channels (WhatsApp/Discord/Email) are community/future | 06-04 |
 | 2026-06-17 | D-06 LOCKED delivered: Flutter cockpit with goals (/goals), DriftIndicator (/drift), ContestableMemoryView (/memories + /contest <id>), mesh static placeholder | 06-03 |
 | 2026-06-17 | D-07 delivered: Flutter app connects via /auth/exchange OTC pairing, POST /webhook chat, GET /events SSE with x-bastion-token | 06-03 |
+| 2026-06-18 | CR-01 fixed: resolve_owner_or_401 decodes HS256 JWT; sub claim → owner_id; falls back to static owner_map | 06-05 |
+| 2026-06-18 | WR-01 fixed: APP_JWT_SECRET unset → fail-closed anyhow::bail!, never start with hardcoded default | 06-05 |
+| 2026-06-18 | CR-02 fixed: OtcStore pub type alias + new_otc_store() factory; serve_with_mesh accepts OtcStore; main.rs wired | 06-05 |
+| 2026-06-18 | CR-05 fixed: Flutter sendMessage uses {'text': message} / resp.data['reply'] aligned to Rust In/Out structs | 06-05 |
+| 2026-06-18 | WR-03 fixed: unified 401 body for expired vs unknown OTC prevents enumeration oracle | 06-05 |
 
 ## Files
 
@@ -87,4 +91,4 @@ Next step: `/gsd-discuss-phase 2` (Cabinet, Privacy Tiers, Contestable Memory, G
 | Codebase map | `.planning/codebase/` |
 
 ---
-*Last updated: 2026-06-17 — 06-03 Flutter companion app complete. bastion_companion: ApiService (Dio+JWT), SseService (SSE+backoff+401 reauth), PairingScreen, ChatScreen, CockpitScreen (D-06 LOCKED: goals+drift+contestable memory+mesh static). flutter analyze: 0 issues. Phase 06 all 4 plans done.*
+*Last updated: 2026-06-18 — 06-05 mobile auth chain fixed: JWT decode (CR-01), fail-closed secret (WR-01), OtcStore write path (CR-02), unified 401 body (WR-03), sendMessage contract (CR-05). 211 tests pass.*
