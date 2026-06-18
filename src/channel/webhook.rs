@@ -369,9 +369,17 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
             || v4.is_broadcast()   // 255.255.255.255
         }
         std::net::IpAddr::V6(v6) => {
+            // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible addresses must be
+            // re-checked as V4 or an attacker bypasses the allowlist with e.g.
+            // [::ffff:127.0.0.1] / [::ffff:169.254.169.254].
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(std::net::IpAddr::V4(v4));
+            }
             v6.is_loopback()   // ::1
             || v6.is_unspecified() // ::
             || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 ULA
+            || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+            || (v6.segments()[0] & 0xffc0) == 0xfec0 // deprecated site-local fec0::/10
         }
     }
 }
