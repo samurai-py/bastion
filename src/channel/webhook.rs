@@ -186,6 +186,35 @@ fn resolve_owner_or_401(
     }
 }
 
+/// Mock cockpit data for mobile validation. Opt-in via BASTION_MOCK_COCKPIT=1.
+/// Lets the app's cockpit (drift/goals/memories) and chat HUD populate with
+/// deterministic data without a fully wired goal/memory backend yet.
+fn mock_cockpit_reply(text: &str) -> Option<String> {
+    if std::env::var("BASTION_MOCK_COCKPIT").is_err() {
+        return None;
+    }
+    let t = text.trim();
+    match t {
+        "/drift" => Some(
+            "drift estável (75%) — sem sinais de deriva.\n2 metas ativas, nenhuma em risco."
+                .to_string(),
+        ),
+        "/goals" => Some(
+            "2/5 metas ativas\n- Lançar v1.0 no GitHub (80%)\n- Revisar orçamento mensal (30%)"
+                .to_string(),
+        ),
+        "/memories" => Some(
+            "1: Mario prefere café sem açúcar\n2: Trabalha com IA e agentes\n3: Acorda cedo pra treinar"
+                .to_string(),
+        ),
+        _ if t.starts_with("/contest ") => Some(format!(
+            "Memória '{}' contestada e revogada.",
+            t.trim_start_matches("/contest ").trim()
+        )),
+        _ => None,
+    }
+}
+
 /// POST /webhook — resolve owner from trusted token header, forward to AgentHandle.
 async fn handle(
     State(state): State<AppState>,
@@ -197,6 +226,12 @@ async fn handle(
         Ok(o) => o,
         Err(resp) => return resp,
     };
+
+    // Cockpit mock interceptor (opt-in) — return deterministic data for the
+    // /drift, /goals, /memories, /contest commands the mobile cockpit sends.
+    if let Some(reply) = mock_cockpit_reply(&p.text) {
+        return Json(Out { reply }).into_response();
+    }
 
     // CR-05: map errors to correct HTTP status; never return 200 on denial.
     match state.agent.ask(p.text, owner).await {

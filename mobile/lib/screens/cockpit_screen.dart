@@ -1,92 +1,29 @@
-// CockpitScreen: D-06 (LOCKED) full cockpit panel.
-//
-// Four sections (all required per D-06):
-// 1. Goals — conversational "/goals" via POST /webhook
-// 2. DriftIndicator — reads drift state via "/drift" command; shows current drift status
-// 3. ContestableMemoryView — lists beliefs via "/memories"; [contestar] per item calls "/contest <id>"
-//    — reuses the EXISTING contest command path; no new daemon endpoint invented
-// 4. Mesh Status — static placeholder (no /cockpit/status endpoint in this phase)
-
+// CockpitScreen: body widget inside HomeShell. Preserves the conversational
+// data flow (D-06): /goals, /drift, /memories, /contest <id> over POST /webhook.
+// Presentation is the Shadow Monarch HUD; drift shows a StatBar when the daemon
+// response contains a percentage, else the raw text.
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
+import '../theme/tokens.dart';
+import '../widgets/system_surface.dart';
+import '../widgets/stat_bar.dart';
+import '../widgets/hud_header.dart';
 
-// ── DriftIndicator ────────────────────────────────────────────────────────────
-
-class DriftIndicator extends StatefulWidget {
-  final ApiService api;
-  const DriftIndicator({super.key, required this.api});
-
-  @override
-  State<DriftIndicator> createState() => _DriftIndicatorState();
-}
-
-class _DriftIndicatorState extends State<DriftIndicator> {
-  String _driftText = 'Loading...';
-  bool _loading = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadDrift();
-  }
-
-  Future<void> _loadDrift() async {
-    setState(() => _loading = true);
-    try {
-      // Uses existing GOAL engine drift reporting via conversational /drift path
-      final result = await widget.api.sendMessage('/drift');
-      setState(() => _driftText = result.isNotEmpty ? result : 'No drift detected.');
-    } catch (e) {
-      setState(() => _driftText = 'Could not load drift: $e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            const Text('Drift', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: const Icon(Icons.refresh, size: 18),
-              onPressed: _loading ? null : _loadDrift,
-              tooltip: 'Refresh drift',
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        _loading
-            ? const SizedBox(height: 24, child: Center(child: CircularProgressIndicator(strokeWidth: 2)))
-            : Text(_driftText, style: const TextStyle(color: Colors.black87)),
-      ],
-    );
-  }
-}
-
-// ── ContestableMemoryView ─────────────────────────────────────────────────────
-
-/// A single belief entry parsed from the "/memories" response.
-/// Expected format: lines like "42: I prefer coffee in the morning"
 class BeliefEntry {
   final String id;
   final String content;
   BeliefEntry({required this.id, required this.content});
 
-  static List<BeliefEntry> parseFromResponse(String response) {
+  static List<BeliefEntry> parse(String response) {
     return response
         .split('\n')
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .map((line) {
-          final colonIdx = line.indexOf(':');
-          if (colonIdx < 1) return null;
-          final id = line.substring(0, colonIdx).trim();
-          final content = line.substring(colonIdx + 1).trim();
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .map((l) {
+          final i = l.indexOf(':');
+          if (i < 1) return null;
+          final id = l.substring(0, i).trim();
+          final content = l.substring(i + 1).trim();
           if (id.isEmpty || content.isEmpty) return null;
           return BeliefEntry(id: id, content: content);
         })
@@ -95,55 +32,81 @@ class BeliefEntry {
   }
 }
 
-class ContestableMemoryView extends StatefulWidget {
+const bool _kDemoSeed =
+    bool.fromEnvironment('DEMO_SEED', defaultValue: false); // QA-only mock cockpit data
+
+class CockpitScreen extends StatefulWidget {
   final ApiService api;
-  const ContestableMemoryView({super.key, required this.api});
+  const CockpitScreen({super.key, required this.api});
 
   @override
-  State<ContestableMemoryView> createState() => _ContestableMemoryViewState();
+  State<CockpitScreen> createState() => _CockpitScreenState();
 }
 
-class _ContestableMemoryViewState extends State<ContestableMemoryView> {
+class _CockpitScreenState extends State<CockpitScreen> {
+  String _drift = '…';
+  String _goals = '…';
   List<BeliefEntry> _beliefs = [];
   bool _loading = false;
-  String? _error;
   String? _contestingId;
 
   @override
   void initState() {
     super.initState();
-    _loadMemories();
+    if (_kDemoSeed) {
+      _drift = 'drift estável (75%) — sem sinais de deriva.';
+      _goals =
+          '2/5 metas ativas\n- Lançar v1.0 no GitHub (80%)\n- Revisar orçamento mensal (30%)';
+      _beliefs = BeliefEntry.parse(
+          '1: Mario prefere café sem açúcar\n2: Trabalha com IA e agentes\n3: Acorda cedo pra treinar');
+      return;
+    }
+    _refresh();
   }
 
-  Future<void> _loadMemories() async {
-    setState(() { _loading = true; _error = null; });
+  Future<void> _refresh() async {
+    setState(() => _loading = true);
     try {
-      final result = await widget.api.sendMessage('/memories');
-      setState(() => _beliefs = BeliefEntry.parseFromResponse(result));
+      final results = await Future.wait([
+        widget.api.sendMessage('/drift'),
+        widget.api.sendMessage('/goals'),
+        widget.api.sendMessage('/memories'),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _drift = results[0].isNotEmpty ? results[0] : 'sem deriva detectada.';
+        _goals = results[1].isNotEmpty ? results[1] : 'nenhuma meta ativa.';
+        _beliefs = BeliefEntry.parse(results[2]);
+      });
     } catch (e) {
-      setState(() => _error = 'Could not load memories: $e');
+      if (mounted) setState(() => _drift = 'erro ao carregar: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  /// Contest a belief by ID using the existing contest command path.
-  /// Calls "/contest <id>" — reuses the daemon's existing contest skill.
-  Future<void> _contest(String beliefId) async {
-    setState(() => _contestingId = beliefId);
+  double? _driftPercent(String text) {
+    final m = RegExp(r'(\d{1,3})\s*%').firstMatch(text);
+    if (m == null) return null;
+    final n = int.tryParse(m.group(1)!);
+    if (n == null) return null;
+    return (n.clamp(0, 100)) / 100.0;
+  }
+
+  Future<void> _contest(String id) async {
+    setState(() => _contestingId = id);
     try {
-      final result = await widget.api.sendMessage('/contest $beliefId');
+      final r = await widget.api.sendMessage('/contest $id');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(result.isNotEmpty ? result : 'Contestado.')),
+          SnackBar(content: Text(r.isNotEmpty ? r : 'Contestado.')),
         );
-        await _loadMemories(); // refresh after contest
+        await _refresh();
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erro ao contestar: $e')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erro ao contestar: $e')));
       }
     } finally {
       if (mounted) setState(() => _contestingId = null);
@@ -152,133 +115,147 @@ class _ContestableMemoryViewState extends State<ContestableMemoryView> {
 
   @override
   Widget build(BuildContext context) {
+    final pct = _driftPercent(_drift);
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Text('Memoria Contestavel', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: const Icon(Icons.refresh, size: 18),
-              onPressed: _loading ? null : _loadMemories,
-              tooltip: 'Atualizar',
-            ),
-          ],
+        HudHeader(
+          tag: 'STATUS',
+          trailing: GestureDetector(
+            onTap: _loading ? null : _refresh,
+            child: Text('⟳', style: BType.pixel(size: 14, color: BColors.system)),
+          ),
         ),
-        const SizedBox(height: 4),
-        if (_error != null) Text(_error!, style: const TextStyle(color: Colors.red)),
-        if (_loading && _beliefs.isEmpty)
-          const SizedBox(height: 32, child: Center(child: CircularProgressIndicator(strokeWidth: 2)))
-        else if (_beliefs.isEmpty && !_loading)
-          const Text('Nenhuma memoria disponivel.', style: TextStyle(color: Colors.grey))
-        else
-          ..._beliefs.map((belief) => Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text('${belief.id}: ${belief.content}',
-                      style: const TextStyle(fontSize: 13)),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
+            children: [
+              // DRIFT
+              _Panel(
+                accent: BColors.system,
+                title: 'DRIFT',
+                value: pct != null ? 'ESTÁVEL' : null,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (pct != null) ...[
+                      Text('${(pct * 100).round()}%',
+                          style: BType.pixel(size: 20, color: BColors.text)),
+                      const SizedBox(height: 8),
+                      StatBar(value: pct),
+                      const SizedBox(height: 8),
+                    ],
+                    Text(_drift, style: BType.mono(size: 12, color: BColors.muted)),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                TextButton(
-                  onPressed: _contestingId == belief.id ? null : () => _contest(belief.id),
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    foregroundColor: Colors.deepPurple,
-                  ),
-                  child: _contestingId == belief.id
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('[contestar]', style: TextStyle(fontSize: 12)),
+              ),
+              const SizedBox(height: 16),
+              // METAS
+              _Panel(
+                accent: BColors.monarch,
+                title: 'METAS ATIVAS',
+                child: Text(_goals, style: BType.mono(size: 13)),
+              ),
+              const SizedBox(height: 16),
+              // MEMÓRIAS CONTESTÁVEIS
+              _Panel(
+                accent: BColors.arise,
+                title: 'MEMÓRIAS CONTESTÁVEIS',
+                value: '${_beliefs.length}',
+                child: _beliefs.isEmpty
+                    ? Text('nenhuma memória disponível.',
+                        style: BType.mono(size: 12, color: BColors.muted))
+                    : Column(
+                        children: _beliefs
+                            .map((b) => _MemoryRow(
+                                  belief: b,
+                                  busy: _contestingId == b.id,
+                                  onContest: () => _contest(b.id),
+                                ))
+                            .toList(),
+                      ),
+              ),
+              const SizedBox(height: 16),
+              // MESH
+              _Panel(
+                accent: BColors.system,
+                title: 'MESH',
+                child: Text(
+                  'Para conectar peers: digite /connect-peer no chat do Bastion.\n'
+                  'Peers ativos e status de sync aparecem aqui quando conectados.',
+                  style: BType.mono(size: 12, color: BColors.muted),
                 ),
-              ],
-            ),
-          )),
+              ),
+            ],
+          ),
+        ),
       ],
     );
   }
 }
 
-// ── CockpitScreen ─────────────────────────────────────────────────────────────
-
-class CockpitScreen extends StatefulWidget {
-  final ApiService api;
-  final VoidCallback onBack;
-  const CockpitScreen({super.key, required this.api, required this.onBack});
-
-  @override
-  State<CockpitScreen> createState() => _CockpitScreenState();
-}
-
-class _CockpitScreenState extends State<CockpitScreen> {
-  // Goals loaded conversationally via POST /webhook with message="/goals".
-  String _goalsText = 'Loading...';
-  bool _loadingGoals = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadGoals();
-  }
-
-  Future<void> _loadGoals() async {
-    setState(() => _loadingGoals = true);
-    try {
-      final goals = await widget.api.sendMessage('/goals');
-      setState(() => _goalsText = goals.isNotEmpty ? goals : 'No active goals.');
-    } catch (e) {
-      setState(() => _goalsText = 'Could not load goals: $e');
-    } finally {
-      if (mounted) setState(() => _loadingGoals = false);
-    }
-  }
+class _Panel extends StatelessWidget {
+  final Color accent;
+  final String title;
+  final String? value;
+  final Widget child;
+  const _Panel(
+      {required this.accent, required this.title, this.value, required this.child});
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Cockpit'),
-        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadingGoals ? null : _loadGoals,
-            tooltip: 'Refresh goals',
+    return SystemSurface(
+      accent: accent,
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(title, style: BType.pixel(size: 9, color: accent, spacing: 1.5)),
+              if (value != null)
+                Text(value!, style: BType.pixel(size: 9, color: BColors.monarch)),
+            ],
           ),
+          const SizedBox(height: 10),
+          child,
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: _loadGoals,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            // 1. Goals (D-06)
-            const Text('Goals', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-            const SizedBox(height: 8),
-            _loadingGoals
-                ? const Center(child: CircularProgressIndicator())
-                : Text(_goalsText),
-            const Divider(height: 32),
+    );
+  }
+}
 
-            // 2. Drift (D-06) — reads drift state from GOAL engine via /drift command
-            DriftIndicator(api: widget.api),
-            const Divider(height: 32),
+class _MemoryRow extends StatelessWidget {
+  final BeliefEntry belief;
+  final bool busy;
+  final VoidCallback onContest;
+  const _MemoryRow(
+      {required this.belief, required this.busy, required this.onContest});
 
-            // 3. Contestable Memory (D-06) — lists beliefs; [contestar] calls /contest <id>
-            ContestableMemoryView(api: widget.api),
-            const Divider(height: 32),
-
-            // 4. Mesh Status (D-06) — static placeholder MVP (no /cockpit/status endpoint in this phase)
-            const Text('Mesh Status', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-            const SizedBox(height: 8),
-            const Text(
-              'To connect mesh peers: type /connect-peer in Bastion chat.\n'
-              'Active peers and sync status will appear here once connected.',
-              style: TextStyle(color: Colors.grey),
-            ),
-          ],
-        ),
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('⟢ ', style: BType.mono(size: 12, color: BColors.monarch)),
+          Expanded(child: Text(belief.content, style: BType.mono(size: 12))),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: busy ? null : onContest,
+            child: busy
+                ? const SizedBox(
+                    width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                : SystemSurface(
+                    accent: BColors.ok,
+                    cut: 5,
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+                    child: Text('CONTESTAR',
+                        style: BType.pixel(size: 7, color: BColors.ok, spacing: 1)),
+                  ),
+          ),
+        ],
       ),
     );
   }
