@@ -9,7 +9,6 @@ pub struct AnthropicProvider {
     client:     reqwest::Client,
     api_key:    String,
     model:      String,
-    max_tokens: u32,
 }
 
 impl AnthropicProvider {
@@ -26,7 +25,6 @@ impl AnthropicProvider {
             client,
             api_key,
             model: model.to_owned(),
-            max_tokens: 8192,
         }
     }
 

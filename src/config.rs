@@ -62,7 +62,6 @@ pub struct SessionConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct LoggingConfig {
     pub log_path: String,
-    pub level:    String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

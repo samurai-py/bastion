@@ -16,7 +16,6 @@ keep_last_n           = 20
 
 [logging]
 log_path              = "/bastion-data/bastion.log"
-level                 = "info"
 
 [mcp]
 tool_call_timeout_secs = 30

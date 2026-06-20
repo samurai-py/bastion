@@ -43,12 +43,6 @@ pub trait Hook: Send + Sync {
     }
 }
 
-/// No-op hook — passes all calls through unchanged. Used as the default in AgentLoop.
-pub struct NoHook;
-
-#[async_trait::async_trait]
-impl Hook for NoHook {}
-
 /// Passively records provider events for audit/life-log purposes (HOOK-04/05).
 ///
 /// Unlike `Hook`, `Observer` is fire-and-forget — errors are silently dropped
