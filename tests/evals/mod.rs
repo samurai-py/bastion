@@ -173,6 +173,7 @@ async fn memory_revocation_clean() {
             "session-eval-1",
             "user",
             false,
+            None,
         )
         .await
         .expect("store_belief");
