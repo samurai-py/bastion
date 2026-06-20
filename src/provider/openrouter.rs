@@ -1,7 +1,10 @@
 use async_openai::{
     Client,
     config::OpenAIConfig,
-    types::chat::{ChatCompletionMessageToolCalls, CreateChatCompletionRequestArgs},
+    types::chat::{
+        ChatCompletionMessageToolCalls, CreateChatCompletionRequestArgs,
+        ResponseFormat, ResponseFormatJsonSchema,
+    },
 };
 
 use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role, ToolCall, TokenUsage, strip_think};
@@ -99,6 +102,50 @@ impl Provider for OpenRouterProvider {
         };
         let resp = self.complete(&messages, &config).await?;
         Ok(resp.text)
+    }
+
+    /// Structured completion via OpenAI-compatible `response_format: json_schema`.
+    /// OpenRouter passes this through to the upstream model — honored only by models
+    /// that support Structured Outputs; others may ignore it (returning best-effort
+    /// JSON) or error. The caller still serde-parse-retries per the trait contract,
+    /// so this raises reliability without assuming schema-valid bytes. Mirrors `openai.rs`.
+    async fn complete_structured(
+        &self,
+        system: &str,
+        user: &str,
+        response_schema: serde_json::Value,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> anyhow::Result<String> {
+        let user_msg = vec![Message {
+            role:    Role::User,
+            content: MessageContent::Text(user.to_owned()),
+        }];
+        let oai_messages = super::build_openai_messages(system, &user_msg);
+
+        let mut args = CreateChatCompletionRequestArgs::default();
+        args.model(&self.model)
+            .max_completion_tokens(max_tokens)
+            .temperature(temperature)
+            .response_format(ResponseFormat::JsonSchema {
+                json_schema: ResponseFormatJsonSchema {
+                    name:        "structured".into(),
+                    description: None,
+                    schema:      Some(response_schema),
+                    strict:      Some(true),
+                },
+            })
+            .messages(oai_messages);
+        let request = args.build()?;
+
+        let response = self.client.chat().create(request).await
+            .map_err(|e| super::clarify_openai_error(self.name(), e))?;
+
+        let choice = response.choices.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("OpenRouter returned no choices"))?;
+
+        choice.message.content
+            .ok_or_else(|| anyhow::anyhow!("OpenRouter structured response had no content"))
     }
 
     fn context_limit(&self) -> usize { 128_000 }
