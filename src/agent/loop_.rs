@@ -205,11 +205,89 @@ impl AgentLoop {
     /// Execute a turn for a specific owner (multi-owner / channel path).
     ///
     /// Flow: input_guard (HOOK-02) → router → runner/cabinet → output_validator (HOOK-03) → text
+    /// Cockpit commands (used by the mobile cockpit via /webhook): return real
+    /// data from memory + the goal engine. Returns `None` for normal turns.
+    async fn cockpit_command(
+        &self,
+        input: &str,
+        owner: &str,
+    ) -> Option<anyhow::Result<String>> {
+        let t = input.trim();
+        if t == "/memories" {
+            let mem = self.memory.read().await;
+            return Some(mem.retrieve_tagged(owner, None).await.map(|bs| {
+                if bs.is_empty() {
+                    "Nenhuma memória registrada.".to_string()
+                } else {
+                    bs.iter()
+                        .map(|b| format!("{}: {}", b.id, b.content))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }));
+        }
+        if let Some(id_str) = t.strip_prefix("/contest ") {
+            let id: i64 = match id_str.trim().parse() {
+                Ok(v) => v,
+                Err(_) => return Some(Ok("Uso: /contest <id>".to_string())),
+            };
+            let mem = self.memory.read().await;
+            return Some(
+                mem.revoke_belief(owner, id)
+                    .await
+                    .map(|_| format!("Memória {} contestada e revogada.", id)),
+            );
+        }
+        if t == "/goals" {
+            return Some(self.goals.list_goals(owner).await.map(|gs| {
+                if gs.is_empty() {
+                    "Nenhuma meta ativa.".to_string()
+                } else {
+                    let lines: Vec<String> = gs
+                        .iter()
+                        .map(|g| match &g.metric {
+                            Some(m) => format!("- {} ({})", g.description, m),
+                            None => format!("- {}", g.description),
+                        })
+                        .collect();
+                    format!("{} metas ativas\n{}", gs.len(), lines.join("\n"))
+                }
+            }));
+        }
+        if t == "/drift" {
+            return Some(self.goals.list_goals(owner).await.map(|gs| {
+                if gs.is_empty() {
+                    return "Nenhuma meta ativa — sem drift a monitorar.".to_string();
+                }
+                let n = gs.len();
+                let healthy = gs.iter().filter(|g| g.last_confirmed.is_some()).count();
+                let pct = healthy * 100 / n;
+                let status = if pct >= 60 {
+                    "estável"
+                } else if pct >= 30 {
+                    "atenção"
+                } else {
+                    "em risco"
+                };
+                format!(
+                    "drift {} ({}%) — {}/{} metas com progresso confirmado.",
+                    status, pct, healthy, n
+                )
+            }));
+        }
+        None
+    }
+
     pub async fn run_turn_for(&mut self, user_input: &str, owner: &str) -> anyhow::Result<String> {
         let t_start = Instant::now();
 
         // HOOK-02: input guardrail before routing (screens empty/oversized/spam input)
         self.input_guard.screen(user_input)?;
+
+        // Cockpit commands resolve to real memory/goal data, bypassing the LLM turn.
+        if let Some(result) = self.cockpit_command(user_input, owner).await {
+            return result;
+        }
 
         // SEAM #4: span raiz invoke_agent por turn.
         // DESIGN: nome genérico "invoke_agent" — span names são imutáveis após start().
