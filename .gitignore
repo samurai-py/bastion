@@ -227,6 +227,13 @@ tmp/
 models/
 db/
 
+# Bastion runtime DB + logs (local state — muda a cada run, pode ter dados privados)
+.bastion/sessions.db
+.bastion/*.log
+
+# Playwright MCP artifacts (snapshots/console/screenshots de QA)
+.playwright-mcp/
+
 # IDE / AI tools
 .vscode/
 .idea/
