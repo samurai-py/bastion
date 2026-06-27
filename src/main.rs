@@ -18,7 +18,7 @@ use axum;
 
 /// Inicializa o OTel TracerProvider.
 ///
-/// Por padrão usa stdout exporter (sem config necessária).
+/// stdout exporter é opt-in via `BASTION_OTEL_STDOUT=true` (off por padrão — não polui o REPL).
 /// Se `OTEL_EXPORTER_OTLP_ENDPOINT` estiver setado, adiciona OTLP/gRPC exporter.
 ///
 /// SECURITY: não emite conteúdo de conversa por padrão —
@@ -29,10 +29,14 @@ use axum;
 fn init_otel_provider() -> anyhow::Result<opentelemetry_sdk::trace::SdkTracerProvider> {
     use opentelemetry_sdk::trace::SdkTracerProvider;
 
-    let stdout_exporter = opentelemetry_stdout::SpanExporter::default();
+    let mut provider_builder = SdkTracerProvider::builder();
 
-    let provider_builder = SdkTracerProvider::builder()
-        .with_batch_exporter(stdout_exporter);
+    // stdout exporter opt-in — off por padrão p/ não afogar o REPL do daemon.
+    // ponytail: era sempre-ligado; agora atrás de BASTION_OTEL_STDOUT=true.
+    if std::env::var("BASTION_OTEL_STDOUT").as_deref() == Ok("true") {
+        provider_builder = provider_builder
+            .with_batch_exporter(opentelemetry_stdout::SpanExporter::default());
+    }
 
     // OTLP exporter opcional — só se endpoint configurado
     let provider = if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {

@@ -4,6 +4,7 @@ pub mod ollama;
 pub mod openrouter;
 pub mod gemini;
 pub mod registry;
+pub mod terminal_agent;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

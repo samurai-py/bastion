@@ -1,7 +1,12 @@
-use super::{Provider, anthropic::AnthropicProvider, openai::OpenAIProvider, gemini::GeminiProvider, openrouter::OpenRouterProvider, ollama::OllamaProvider};
+use super::{Provider, anthropic::AnthropicProvider, openai::OpenAIProvider, gemini::GeminiProvider, openrouter::OpenRouterProvider, ollama::OllamaProvider, terminal_agent::TerminalAgentProvider};
 
 pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
-    if model_name.starts_with("claude") {
+    // Exact match BEFORE the `claude` prefix check — "claude_code" must not hit Anthropic.
+    if model_name == "claude_code" {
+        Ok(Box::new(TerminalAgentProvider::new("claude", "claude_code")))
+    } else if model_name == "opencode" {
+        Ok(Box::new(TerminalAgentProvider::new("opencode", "opencode")))
+    } else if model_name.starts_with("claude") {
         Ok(Box::new(AnthropicProvider::new(model_name)))
     } else if model_name.starts_with("gpt")
            || model_name.starts_with("o1")
@@ -21,7 +26,9 @@ pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
 /// without constructing the provider (which reads env vars).
 #[doc(hidden)]
 pub fn resolve_provider_kind(model_name: &str) -> &'static str {
-    if model_name.starts_with("claude") {
+    if model_name == "claude_code" || model_name == "opencode" {
+        "terminal_agent"
+    } else if model_name.starts_with("claude") {
         "anthropic"
     } else if model_name.starts_with("gpt")
            || model_name.starts_with("o1")
@@ -63,6 +70,12 @@ mod tests {
     fn resolve_provider_kind_gemini() {
         assert_eq!(resolve_provider_kind("gemini-2.0-flash"),     "gemini");
         assert_eq!(resolve_provider_kind("gemini-3-pro-preview"), "gemini");
+    }
+
+    #[test]
+    fn resolve_provider_kind_terminal_agent() {
+        assert_eq!(resolve_provider_kind("claude_code"), "terminal_agent"); // not "anthropic"
+        assert_eq!(resolve_provider_kind("opencode"),    "terminal_agent");
     }
 
     #[test]
