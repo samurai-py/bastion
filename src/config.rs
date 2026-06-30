@@ -11,8 +11,8 @@ use std::collections::HashMap;
 /// Single [[mesh.peer]] entry from bastion.toml.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct MeshPeerConfig {
-    pub owner_id:   String,
-    pub peer_url:   String,
+    pub owner_id: String,
+    pub peer_url: String,
     pub age_pubkey: String,
     /// Tags this peer is allowed to receive (filter_for_mesh allowlist).
     /// Default: empty (no beliefs shared). Example: ["mercado", "calendario"].
@@ -37,26 +37,26 @@ fn default_sync_interval() -> u64 {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct BastionConfig {
-    pub agent:    AgentConfig,
-    pub session:  SessionConfig,
-    pub logging:  LoggingConfig,
-    pub mcp:      McpConfig,
+    pub agent: AgentConfig,
+    pub session: SessionConfig,
+    pub logging: LoggingConfig,
+    pub mcp: McpConfig,
     pub channels: ChannelsConfig,
     #[serde(default)]
-    pub mesh:     MeshConfig,
+    pub mesh: MeshConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentConfig {
-    pub default_model:    String,
+    pub default_model: String,
     pub daily_budget_usd: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SessionConfig {
-    pub db_path:               String,
+    pub db_path: String,
     pub autocompact_threshold: f64,
-    pub keep_last_n:           u32,
+    pub keep_last_n: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -73,14 +73,14 @@ pub struct McpConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct McpServerEntry {
-    pub url:   String,
+    pub url: String,
     pub label: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChannelsConfig {
     pub telegram: ChannelConfig,
-    pub webhook:  ChannelConfig,
+    pub webhook: ChannelConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -94,11 +94,14 @@ pub struct ChannelConfig {
 pub fn load_mesh_peers(config: &BastionConfig) -> crate::mesh::MeshPeerMap {
     let mut map = crate::mesh::MeshPeerMap::new();
     for entry in &config.mesh.peer {
-        map.register(entry.owner_id.clone(), crate::mesh::MeshPeer {
-            peer_url:     entry.peer_url.clone(),
-            age_pubkey:   entry.age_pubkey.clone(),
-            allowed_tags: entry.allowed_tags.clone(),
-        });
+        map.register(
+            entry.owner_id.clone(),
+            crate::mesh::MeshPeer {
+                peer_url: entry.peer_url.clone(),
+                age_pubkey: entry.age_pubkey.clone(),
+                allowed_tags: entry.allowed_tags.clone(),
+            },
+        );
         tracing::info!(
             event    = "mesh_peer_loaded",
             owner_id = %entry.owner_id,
@@ -133,7 +136,7 @@ pub async fn append_mesh_peer(
     age_pubkey: &str,
     allowed_tags: &[String],
 ) -> anyhow::Result<()> {
-    use toml_edit::{DocumentMut, value};
+    use toml_edit::{value, DocumentMut};
 
     // SEC-01: validate age_pubkey format before touching the file
     validate_age_pubkey(age_pubkey)?;
@@ -142,17 +145,19 @@ pub async fn append_mesh_peer(
 
     // WR-02: bail on read error — do NOT fall back to empty string.
     // Falling back to "" would overwrite the entire config with just the new peer entry.
-    let current = tokio::fs::read_to_string(&path).await
+    let current = tokio::fs::read_to_string(&path)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to read '{}' before appending peer: {}", path, e))?;
 
     // Parse as mutable TOML document (toml_edit preserves comments and formatting)
-    let mut doc: DocumentMut = current.parse()
+    let mut doc: DocumentMut = current
+        .parse()
         .map_err(|e| anyhow::anyhow!("failed to parse '{}' as TOML: {}", path, e))?;
 
     // Build the new [[mesh.peer]] entry as a toml_edit Table
     let mut peer_entry = toml_edit::Table::new();
-    peer_entry["owner_id"]   = value(owner_id);
-    peer_entry["peer_url"]   = value(peer_url);
+    peer_entry["owner_id"] = value(owner_id);
+    peer_entry["peer_url"] = value(peer_url);
     peer_entry["age_pubkey"] = value(age_pubkey);
     if !allowed_tags.is_empty() {
         let mut tags_array = toml_edit::Array::new();
@@ -182,9 +187,11 @@ pub async fn append_mesh_peer(
 
     // Atomic write: write to .tmp then rename to prevent partial write corruption
     let tmp_path = format!("{}.tmp", path);
-    tokio::fs::write(&tmp_path, doc.to_string()).await
+    tokio::fs::write(&tmp_path, doc.to_string())
+        .await
         .map_err(|e| anyhow::anyhow!("failed to write tmp config '{}': {}", tmp_path, e))?;
-    tokio::fs::rename(&tmp_path, &path).await
+    tokio::fs::rename(&tmp_path, &path)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to rename '{}' → '{}': {}", tmp_path, path, e))?;
 
     Ok(())
@@ -198,10 +205,7 @@ pub async fn append_mesh_peer(
 pub fn load_config(path: &str) -> anyhow::Result<BastionConfig> {
     let cfg = config::Config::builder()
         .add_source(config::File::with_name(path))
-        .add_source(
-            config::Environment::with_prefix("BASTION")
-                .separator("__")
-        )
+        .add_source(config::Environment::with_prefix("BASTION").separator("__"))
         .build()?;
     Ok(cfg.try_deserialize()?)
 }
@@ -215,10 +219,16 @@ mod tests {
         let cfg = load_config("bastion.toml").expect("bastion.toml must exist at repo root");
         // default_model is deployment-specific (Mario runs OpenRouter free); assert it's set,
         // not a specific value — this test verifies config parsing, not the chosen model.
-        assert!(!cfg.agent.default_model.is_empty(), "default_model must be set in bastion.toml");
+        assert!(
+            !cfg.agent.default_model.is_empty(),
+            "default_model must be set in bastion.toml"
+        );
         assert!(cfg.agent.daily_budget_usd > 0.0);
         assert!(cfg.mcp.servers.contains_key("memupalace"));
-        assert_eq!(cfg.mcp.servers["memupalace"].url, "http://memupalace:8001/mcp");
+        assert_eq!(
+            cfg.mcp.servers["memupalace"].url,
+            "http://memupalace:8001/mcp"
+        );
     }
 
     // ── SEC-01 age_pubkey validation tests ───────────────────────────────────
@@ -231,7 +241,8 @@ mod tests {
             "https://peer.example.com",
             "not-an-age-key", // does not match ^age1[0-9a-z]+$
             &[],
-        ).await;
+        )
+        .await;
         assert!(result.is_err(), "must reject invalid age_pubkey");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -249,8 +260,12 @@ mod tests {
             "https://peer.example.com",
             "age1abcdef\"\nmalicious_key = true\nage1", // injection payload
             &[],
-        ).await;
-        assert!(result.is_err(), "must reject age_pubkey with TOML-breaking characters");
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "must reject age_pubkey with TOML-breaking characters"
+        );
     }
 
     /// SEC-01: valid age_pubkey passes regex (does not write to file — bails on missing config).
@@ -258,7 +273,8 @@ mod tests {
     #[tokio::test]
     async fn test_validate_age_pubkey_accepts_valid_key() {
         // validate_age_pubkey only — no filesystem I/O
-        let result = validate_age_pubkey("age1ql3z7hjy54pw3yywmz2fxnftqqhrlrr2e9xsmrwckkl2u5dc3kzqsrcq7t");
+        let result =
+            validate_age_pubkey("age1ql3z7hjy54pw3yywmz2fxnftqqhrlrr2e9xsmrwckkl2u5dc3kzqsrcq7t");
         assert!(result.is_ok(), "valid age pubkey must pass validation");
     }
 

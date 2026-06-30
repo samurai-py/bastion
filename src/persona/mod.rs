@@ -2,14 +2,14 @@
 // Each Persona is parsed from a SOUL.md file (front-matter + body).
 // The registry is built at startup and consulted by the router and runner.
 
-pub mod soul;
 pub mod router;
 pub mod runner;
+pub mod soul;
 
-pub use soul::{parse_soul, PersonaFront, BastionBlock};
+pub use soul::{parse_soul, BastionBlock, PersonaFront};
 
-use std::collections::HashMap;
 use crate::memory::PrivacyTier;
+use std::collections::HashMap;
 
 /// A loaded persona ready for execution.
 #[derive(Debug, Clone)]
@@ -208,6 +208,8 @@ mod tests {
     #[test]
     fn provider_model_unknown_returns_none() {
         let r = make_registry();
-        assert!(r.provider_model_for("unknown", "gpt-4o", "ollama:llama3").is_none());
+        assert!(r
+            .provider_model_for("unknown", "gpt-4o", "ollama:llama3")
+            .is_none());
     }
 }

@@ -7,14 +7,14 @@
 //! - Invokes `hooks::egress::check_egress` before each provider call (fail-closed, CF-1).
 //! - Includes the guardian persona when `RouterDecision.convene_reason == GoalImpact` (GOAL-04).
 
-pub mod policy;
 pub mod orchestrator;
+pub mod policy;
 pub mod synth;
 
 use crate::memory::PrivacyTier;
 use crate::persona::router::{ConveneReason, RouterDecision};
-use crate::persona::{Persona, PersonaRegistry};
 use crate::persona::runner::PersonaId;
+use crate::persona::{Persona, PersonaRegistry};
 
 /// The set of personas convened for a single Cabinet deliberation, plus
 /// the resolved tier for this deliberation (may be downgraded by policy::table_tier).
@@ -80,9 +80,9 @@ pub fn build_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::PrivacyTier;
     use crate::persona::router::{ConveneReason, ResponseMode, RouterDecision};
     use crate::persona::PersonaRegistry;
-    use crate::memory::PrivacyTier;
     use std::collections::HashMap;
 
     fn make_persona(name: &str, tier: PrivacyTier) -> Persona {
@@ -146,10 +146,7 @@ mod tests {
             make_persona("Aria", PrivacyTier::CloudOk),
             make_persona("Guardian", PrivacyTier::CloudOk),
         ]);
-        let decision = cabinet_decision_with_reason(
-            &["Aria"],
-            Some(ConveneReason::GoalImpact),
-        );
+        let decision = cabinet_decision_with_reason(&["Aria"], Some(ConveneReason::GoalImpact));
         let table = build_table(&registry, &decision, Some("Guardian")).unwrap();
         // GOAL-04: guardian must be included
         assert!(table.personas.iter().any(|p| p.name == "Guardian"));
@@ -163,13 +160,18 @@ mod tests {
             make_persona("Guardian", PrivacyTier::CloudOk),
         ]);
         // Guardian already in decision
-        let decision = cabinet_decision_with_reason(
-            &["Aria", "Guardian"],
-            Some(ConveneReason::GoalImpact),
-        );
+        let decision =
+            cabinet_decision_with_reason(&["Aria", "Guardian"], Some(ConveneReason::GoalImpact));
         let table = build_table(&registry, &decision, Some("Guardian")).unwrap();
         // Must not be duplicated
-        assert_eq!(table.personas.iter().filter(|p| p.name == "Guardian").count(), 1);
+        assert_eq!(
+            table
+                .personas
+                .iter()
+                .filter(|p| p.name == "Guardian")
+                .count(),
+            1
+        );
     }
 
     #[test]

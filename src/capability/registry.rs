@@ -1,8 +1,8 @@
+use crate::memory::PrivacyTier;
+use async_trait::async_trait;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde_json::Value;
-use async_trait::async_trait;
-use crate::memory::PrivacyTier;
 
 /// Invocation context — resolved BEFORE entering registry.invoke.
 pub struct InvokeCtx {
@@ -28,7 +28,9 @@ pub trait Capability: Send + Sync {
     /// by construction (NlCommandAdapter) override this to `true`. A remote MCP server
     /// cannot opt into the local short-circuit by naming its tool `cmd:*` — locality is
     /// a property of the adapter TYPE, not a forgeable string.
-    fn is_local(&self) -> bool { false }
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 /// Unified capability registry.
@@ -41,7 +43,9 @@ pub struct CapabilityRegistry {
 
 impl CapabilityRegistry {
     pub fn new() -> Self {
-        Self { inner: HashMap::new() }
+        Self {
+            inner: HashMap::new(),
+        }
     }
 
     /// Register a capability under its `name()`.
@@ -61,7 +65,10 @@ impl CapabilityRegistry {
             );
         }
         if self.inner.contains_key(name) {
-            anyhow::bail!("capability '{}' is already registered — refusing to overwrite", name);
+            anyhow::bail!(
+                "capability '{}' is already registered — refusing to overwrite",
+                name
+            );
         }
         self.inner.insert(name.to_owned(), cap);
         Ok(())
@@ -87,13 +94,16 @@ impl CapabilityRegistry {
     /// (name/description/input_schema). Compatible with `anthropic_tools_to_openai()`
     /// in openrouter.rs.
     pub fn list_tool_defs(&self) -> Vec<serde_json::Value> {
-        self.inner.values().map(|cap| {
-            serde_json::json!({
-                "name": cap.name(),
-                "description": cap.description(),
-                "input_schema": cap.input_schema()
+        self.inner
+            .values()
+            .map(|cap| {
+                serde_json::json!({
+                    "name": cap.name(),
+                    "description": cap.description(),
+                    "input_schema": cap.input_schema()
+                })
             })
-        }).collect()
+            .collect()
     }
 
     /// Single policy enforcement point (D-13 non-negotiable guardrail).
@@ -102,13 +112,10 @@ impl CapabilityRegistry {
     /// 1. Egress check — fail-closed on LocalOnly or None tier for non-local adapters
     /// 2. Approval gate — if ctx.needs_approval, gate on Phase 3 queue
     /// 3. Dispatch to capability adapter
-    pub async fn invoke(
-        &self,
-        name: &str,
-        args: Value,
-        ctx: &InvokeCtx,
-    ) -> anyhow::Result<Value> {
-        let cap = self.inner.get(name)
+    pub async fn invoke(&self, name: &str, args: Value, ctx: &InvokeCtx) -> anyhow::Result<Value> {
+        let cap = self
+            .inner
+            .get(name)
             .ok_or_else(|| anyhow::anyhow!("unknown capability: {}", name))?;
 
         // Policy 1: egress check.
@@ -137,7 +144,9 @@ impl CapabilityRegistry {
 }
 
 impl Default for CapabilityRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// RAII guard for ephemeral capabilities scoped to a single turn (SEAM #3).
@@ -161,7 +170,10 @@ impl<'a> TurnCapabilityScope<'a> {
                 registered.push(name);
             }
         }
-        Self { registry, registered }
+        Self {
+            registry,
+            registered,
+        }
     }
 }
 

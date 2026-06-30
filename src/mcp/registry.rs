@@ -1,12 +1,12 @@
-use std::collections::HashMap;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// A registry entry holds the server label, the full JSON Schema, and the
 /// tool description (fed to the LLM for tool selection via list_tool_defs).
 struct ToolEntry {
     server_label: String,
     input_schema: Value,
-    description:  String,
+    description: String,
 }
 
 pub struct ToolRegistry {
@@ -15,7 +15,9 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tool_index: HashMap::new() }
+        Self {
+            tool_index: HashMap::new(),
+        }
     }
 
     /// Register tools with their full schemas + description (fetched at connect time — CORE-02).
@@ -26,21 +28,27 @@ impl ToolRegistry {
         input_schema: Value,
         description: String,
     ) {
-        self.tool_index.insert(tool_name, ToolEntry {
-            server_label: server_label.to_owned(),
-            input_schema,
-            description,
-        });
+        self.tool_index.insert(
+            tool_name,
+            ToolEntry {
+                server_label: server_label.to_owned(),
+                input_schema,
+                description,
+            },
+        );
     }
 
     /// Backward-compat: register without schema (schema defaults to empty object).
     pub fn register(&mut self, server_label: &str, tool_names: Vec<String>) {
         for name in tool_names {
-            self.tool_index.insert(name, ToolEntry {
-                server_label: server_label.to_owned(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}}),
-                description: String::new(),
-            });
+            self.tool_index.insert(
+                name,
+                ToolEntry {
+                    server_label: server_label.to_owned(),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                    description: String::new(),
+                },
+            );
         }
     }
 
@@ -49,7 +57,9 @@ impl ToolRegistry {
     }
 
     pub fn server_for(&self, tool_name: &str) -> Option<&str> {
-        self.tool_index.get(tool_name).map(|e| e.server_label.as_str())
+        self.tool_index
+            .get(tool_name)
+            .map(|e| e.server_label.as_str())
     }
 
     /// Return the full input_schema for a tool (populated at connect_all time).
@@ -59,7 +69,9 @@ impl ToolRegistry {
 
     /// Return the tool description (empty string if none was provided).
     pub fn get_tool_description(&self, tool_name: &str) -> Option<&str> {
-        self.tool_index.get(tool_name).map(|e| e.description.as_str())
+        self.tool_index
+            .get(tool_name)
+            .map(|e| e.description.as_str())
     }
 }
 

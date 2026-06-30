@@ -20,10 +20,10 @@ pub enum Role {
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Role::User      => write!(f, "user"),
+            Role::User => write!(f, "user"),
             Role::Assistant => write!(f, "assistant"),
-            Role::Tool      => write!(f, "tool"),
-            Role::System    => write!(f, "system"),
+            Role::Tool => write!(f, "tool"),
+            Role::System => write!(f, "system"),
         }
     }
 }
@@ -33,11 +33,11 @@ impl FromStr for Role {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "user"      => Ok(Role::User),
+            "user" => Ok(Role::User),
             "assistant" => Ok(Role::Assistant),
-            "tool"      => Ok(Role::Tool),
-            "system"    => Ok(Role::System),
-            other       => anyhow::bail!("unknown role: {}", other),
+            "tool" => Ok(Role::Tool),
+            "system" => Ok(Role::System),
+            other => anyhow::bail!("unknown role: {}", other),
         }
     }
 }
@@ -52,46 +52,55 @@ pub enum MessageContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
-    ToolResult { tool_use_id: String, content: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    pub id:        String,
-    pub name:      String,
+    pub id: String,
+    pub name: String,
     pub arguments: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
-    pub input_tokens:  u32,
+    pub input_tokens: u32,
     pub output_tokens: u32,
-    pub cache_read:    u32,
-    pub cache_write:   u32,
+    pub cache_read: u32,
+    pub cache_write: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct LlmResponse {
-    pub text:       String,
+    pub text: String,
     pub tool_calls: Option<Vec<ToolCall>>,
-    pub usage:      TokenUsage,
+    pub usage: TokenUsage,
 }
 
 #[derive(Debug, Clone)]
 pub struct CallConfig {
     pub system_prompt: String,
-    pub max_tokens:    u32,
-    pub tools:         Vec<serde_json::Value>,
+    pub max_tokens: u32,
+    pub tools: Vec<serde_json::Value>,
 }
 
 impl Default for CallConfig {
     fn default() -> Self {
         Self {
             system_prompt: String::new(),
-            max_tokens:    4096,
-            tools:         vec![],
+            max_tokens: 4096,
+            tools: vec![],
         }
     }
 }
@@ -121,10 +130,10 @@ pub enum BastionError {
 /// Strip `<think>...</think>` blocks from LLM output (CORE-09).
 /// Handles: multiple blocks, multiline content, no blocks (returns clone).
 pub fn strip_think(s: &str) -> String {
-    let open  = "<think>";
+    let open = "<think>";
     let close = "</think>";
     let mut result = String::with_capacity(s.len());
-    let mut rest   = s;
+    let mut rest = s;
 
     loop {
         match rest.find(open) {
@@ -157,10 +166,16 @@ mod tests {
 
     #[test]
     fn strip_think_basic() {
-        assert_eq!(strip_think("hello <think>reasoning</think> world"), "hello  world");
+        assert_eq!(
+            strip_think("hello <think>reasoning</think> world"),
+            "hello  world"
+        );
         assert_eq!(strip_think("no thinks here"), "no thinks here");
         assert_eq!(strip_think("<think>only think</think>"), "");
-        assert_eq!(strip_think("a <think>x</think> b <think>y</think> c"), "a  b  c");
+        assert_eq!(
+            strip_think("a <think>x</think> b <think>y</think> c"),
+            "a  b  c"
+        );
         assert_eq!(strip_think("a <think>\nmultiline\n</think> b"), "a  b");
     }
 

@@ -1,48 +1,50 @@
+use crate::agent::command::{handle_command, CommandResult};
+use crate::agent::compactor::AutoCompact;
+use crate::agent::context::TurnContextProvider;
+use crate::agent::identity::IdentityProvider;
+use crate::goal::GoalEngine;
+use crate::hooks::egress::EgressHook;
+use crate::hooks::guardrails::InputGuardrail;
+use crate::hooks::output_validator::OutputValidator;
+use crate::mcp::McpClient;
+use crate::memory::SharedMemory;
+use crate::persona::PersonaRegistry;
+use crate::provider::{call_with_retry, SharedProvider};
+use crate::session::SessionManager;
+use crate::types::{
+    BastionError, CallConfig, ContentPart, Message, MessageContent, Role, TokenUsage,
+};
+use opentelemetry::trace::{Span as _, SpanKind, Tracer as _};
+use opentelemetry::{global as otel_global, KeyValue};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
-use opentelemetry::{global as otel_global, KeyValue};
-use opentelemetry::trace::{Tracer as _, Span as _, SpanKind};
-use crate::types::{Message, Role, MessageContent, ContentPart, CallConfig, BastionError, TokenUsage};
-use crate::provider::{SharedProvider, call_with_retry};
-use crate::session::SessionManager;
-use crate::mcp::McpClient;
-use crate::agent::compactor::AutoCompact;
-use crate::agent::command::{handle_command, CommandResult};
-use crate::memory::SharedMemory;
-use crate::persona::PersonaRegistry;
-use crate::goal::GoalEngine;
-use crate::hooks::guardrails::InputGuardrail;
-use crate::hooks::output_validator::OutputValidator;
-use crate::hooks::egress::EgressHook;
-use crate::agent::context::TurnContextProvider;
-use crate::agent::identity::IdentityProvider;
 
 const MAX_TOOL_ROUNDS: u32 = 10;
 const DEFAULT_SYSTEM_PROMPT: &str = "You are Bastion, a proactive personal AI assistant.";
 pub const DEFAULT_OWNER: &str = "_local";
 
 pub struct AgentLoop {
-    pub provider:          SharedProvider,
-    pub session:           SessionManager,
-    pub mcp:               Arc<McpClient>,
-    pub compactor:         AutoCompact,
-    pub session_id:        String,
-    pub daily_budget_usd:  f64,
+    pub provider: SharedProvider,
+    pub session: SessionManager,
+    pub mcp: Arc<McpClient>,
+    pub compactor: AutoCompact,
+    pub session_id: String,
+    pub daily_budget_usd: f64,
     /// Registry of loaded personas.
-    pub registry:          PersonaRegistry,
+    pub registry: PersonaRegistry,
     /// Shared memory backend (beliefs + provenance).
-    pub memory:            SharedMemory,
+    pub memory: SharedMemory,
     /// Goal engine for drift nudges.
-    pub goals:             GoalEngine,
+    pub goals: GoalEngine,
     /// Input guardrail — screens malformed/oversized input (HOOK-02).
-    pub input_guard:       InputGuardrail,
+    pub input_guard: InputGuardrail,
     /// Output-validator — NL contestation detection → belief revocation (HOOK-03).
-    pub output_validator:  OutputValidator,
+    pub output_validator: OutputValidator,
     /// Egress hook — fail-closed privacy egress check (PRIV-03, WR-04, T-04-02-04).
     /// Wired here so EgressHook is a live component in the AgentLoop; inline check_egress
     /// calls in run_provider_fallback and the cabinet path are the primary enforcement.
-    pub egress_hook:       EgressHook,
+    pub egress_hook: EgressHook,
     /// Unified capability registry (D-13) — single policy enforcement point.
     /// Starts empty; McpTool adapters are registered after McpClient connects.
     /// When non-empty, tool calls route through registry.invoke instead of run_provider_fallback.
@@ -53,26 +55,29 @@ pub struct AgentLoop {
     pub context_providers: Vec<Box<dyn TurnContextProvider>>,
     /// Pending queue for proactive messages.
     /// Phase 2: consumed by daemon_loop select arm (PROACT-05).
-    pub pending_tx:        mpsc::Sender<String>,
-    pub pending_rx:        Option<mpsc::Receiver<String>>,
+    pub pending_tx: mpsc::Sender<String>,
+    pub pending_rx: Option<mpsc::Receiver<String>>,
     /// Forced persona for the next turn (set by /as command).
-    pub forced_persona:    Option<String>,
+    pub forced_persona: Option<String>,
     /// CR-02: shared OTC store handle, injected by main.rs when the webhook channel
     /// starts. `/connect-app` writes one-time codes here for the mobile pairing flow
     /// (`/auth/exchange`). `None` when the webhook channel is not running.
-    pub otc_store:         Option<crate::channel::webhook::OtcStore>,
+    pub otc_store: Option<crate::channel::webhook::OtcStore>,
 }
 
 impl AgentLoop {
+    // Wires 8 independent subsystems (provider, session, mcp, registry, memory, goals…).
+    // A params struct would just be a one-call-site bag — no shared shape to extract.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        provider:         SharedProvider,
-        session:          SessionManager,
-        mcp:              McpClient,
-        session_id:       String,
+        provider: SharedProvider,
+        session: SessionManager,
+        mcp: McpClient,
+        session_id: String,
         daily_budget_usd: f64,
-        registry:         PersonaRegistry,
-        memory:           SharedMemory,
-        goals:            GoalEngine,
+        registry: PersonaRegistry,
+        memory: SharedMemory,
+        goals: GoalEngine,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
         // BIG-1 (Gap 2): McpClient is shared by-Arc so each McpToolAdapter can hold a
@@ -100,7 +105,9 @@ impl AgentLoop {
         };
         // M1: registrar IdentityProvider para injeção do bloco de identidade via SEAM #2.
         // No primeiro uso retorna o ONBOARDING_PROMPT; nos subsequentes retorna o bloco gravado.
-        agent.context_providers.push(Box::new(IdentityProvider::new(agent.memory.clone())));
+        agent
+            .context_providers
+            .push(Box::new(IdentityProvider::new(agent.memory.clone())));
 
         // BIG-1 (Gap 2): populate the capability_registry from every connected MCP tool.
         // Without this the registry stays empty, list_tool_defs() returns [] (so the normal
@@ -109,15 +116,28 @@ impl AgentLoop {
         // per tool makes ALL tool calls flow through capability_registry.invoke (D-13).
         // Snapshot tool metadata first (owned) so the agent.mcp borrow is released before we
         // mutably borrow agent.capability_registry.
-        let mcp_tools: Vec<(String, String, serde_json::Value, String)> = agent.mcp.registry()
+        let mcp_tools: Vec<(String, String, serde_json::Value, String)> = agent
+            .mcp
+            .registry()
             .list_tool_names()
             .iter()
             .map(|name| {
-                let server_label = agent.mcp.registry().server_for(name).unwrap_or("").to_string();
-                let schema = agent.mcp.registry().get_tool_schema(name)
+                let server_label = agent
+                    .mcp
+                    .registry()
+                    .server_for(name)
+                    .unwrap_or("")
+                    .to_string();
+                let schema = agent
+                    .mcp
+                    .registry()
+                    .get_tool_schema(name)
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-                let description = agent.mcp.registry().get_tool_description(name)
+                let description = agent
+                    .mcp
+                    .registry()
+                    .get_tool_description(name)
                     .unwrap_or("")
                     .to_string();
                 (name.to_string(), server_label, schema, description)
@@ -136,7 +156,10 @@ impl AgentLoop {
             }
         }
         let registered = agent.capability_registry.list_tool_defs().len();
-        tracing::info!(event = "capability_registry_populated", mcp_tools = registered);
+        tracing::info!(
+            event = "capability_registry_populated",
+            mcp_tools = registered
+        );
 
         agent
     }
@@ -150,18 +173,22 @@ impl AgentLoop {
     /// WR-06: uses the real owner_id (BASTION_OWNER_ID env var) rather than session_id
     /// as the local_owner passed to MeshSliceProvider. session_id is a per-session UUID
     /// that changes across restarts — it is NOT a stable owner identifier.
-    pub fn add_mesh_slice_provider(&mut self, store: crate::mesh::context_provider::MeshSliceStore) {
+    pub fn add_mesh_slice_provider(
+        &mut self,
+        store: crate::mesh::context_provider::MeshSliceStore,
+    ) {
         // WR-06: read real owner_id from env; fall back to DEFAULT_OWNER (not session_id).
         // BASTION_OWNER_ID is the stable identity used by P2PTransport and the mesh config.
         let local_owner = std::env::var("BASTION_OWNER_ID")
             .or_else(|_| std::env::var("MESH_OWNER_ID"))
             .unwrap_or_else(|_| DEFAULT_OWNER.to_string());
-        let mesh_provider = crate::mesh::context_provider::MeshSliceProvider::from_store(
-            local_owner,
-            store,
-        );
+        let mesh_provider =
+            crate::mesh::context_provider::MeshSliceProvider::from_store(local_owner, store);
         self.context_providers.push(Box::new(mesh_provider));
-        tracing::info!(event = "mesh_slice_provider_registered", "MeshSliceProvider registered in context_providers (SEAM #2)");
+        tracing::info!(
+            event = "mesh_slice_provider_registered",
+            "MeshSliceProvider registered in context_providers (SEAM #2)"
+        );
     }
 
     /// SEAM #2 — Constrói o system prompt para o turn atual.
@@ -182,7 +209,8 @@ impl AgentLoop {
                 // SECURITY: verificar egress pelo tier do BLOCO, não da persona.
                 // check_egress(Some(LocalOnly), "openrouter") → Err → não injeta.
                 // check_egress(Some(CloudOk), "openrouter") → Ok → injeta.
-                if crate::hooks::egress::check_egress(Some(block.max_tier), &provider_name).is_ok() {
+                if crate::hooks::egress::check_egress(Some(block.max_tier), &provider_name).is_ok()
+                {
                     parts.push(block.content);
                 } else {
                     tracing::debug!(
@@ -207,11 +235,7 @@ impl AgentLoop {
     /// Flow: input_guard (HOOK-02) → router → runner/cabinet → output_validator (HOOK-03) → text
     /// Cockpit commands (used by the mobile cockpit via /webhook): return real
     /// data from memory + the goal engine. Returns `None` for normal turns.
-    async fn cockpit_command(
-        &self,
-        input: &str,
-        owner: &str,
-    ) -> Option<anyhow::Result<String>> {
+    async fn cockpit_command(&self, input: &str, owner: &str) -> Option<anyhow::Result<String>> {
         let t = input.trim();
         if t == "/memories" {
             let mem = self.memory.read().await;
@@ -321,11 +345,16 @@ impl AgentLoop {
         // gate protects outbound LLM calls (sending local-only context to cloud providers), not
         // inbound user messages. A full transactional rollback requires a session.remove_last()
         // API that does not exist yet; deferred to Phase 4 (plan 08 session hardening).
-        self.session.append(
-            &session_id,
-            Message { role: Role::User, content: MessageContent::Text(user_input.to_owned()) },
-            None,
-        ).await?;
+        self.session
+            .append(
+                &session_id,
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Text(user_input.to_owned()),
+                },
+                None,
+            )
+            .await?;
 
         // 2. Load history and build token estimate
         let mut history = self.session.load_recent(&session_id).await?;
@@ -339,12 +368,10 @@ impl AgentLoop {
             crate::agent::dream::memory_flush(&history, &self.memory, owner).await;
 
             let provider_ref = self.provider.read().await;
-            history = self.compactor.compact(
-                &session_id,
-                &history,
-                &**provider_ref,
-                &self.session,
-            ).await?;
+            history = self
+                .compactor
+                .compact(&session_id, &history, &**provider_ref, &self.session)
+                .await?;
             drop(provider_ref);
         }
 
@@ -352,7 +379,8 @@ impl AgentLoop {
         //    If /as forced a persona, override the router's choice.
         let mut decision = {
             let provider_ref = self.provider.read().await;
-            crate::persona::router::route(&**provider_ref, &self.registry, user_input, owner).await?
+            crate::persona::router::route(&**provider_ref, &self.registry, user_input, owner)
+                .await?
         };
 
         if let Some(ref forced) = self.forced_persona.take() {
@@ -363,7 +391,11 @@ impl AgentLoop {
 
         // SEAM #4: registrar persona no span raiz via atributo (span name é imutável).
         // Após routing — persona é conhecida agora.
-        let agent_name = decision.personas.first().cloned().unwrap_or_else(|| "default".to_string());
+        let agent_name = decision
+            .personas
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
         turn_span.set_attribute(KeyValue::new("gen_ai.agent.name", agent_name));
 
         // WR-01 (review #2): capture the turn's privacy tier from the handling persona
@@ -371,7 +403,9 @@ impl AgentLoop {
         // run_provider_fallback so the fallback path no longer re-reads the already-taken
         // `self.forced_persona` (collapsed to None — over-blocked a forced CloudOk persona
         // and relied on accidental fail-closed for LocalOnly). None stays fail-closed.
-        let turn_tier: Option<crate::memory::PrivacyTier> = decision.personas.first()
+        let turn_tier: Option<crate::memory::PrivacyTier> = decision
+            .personas
+            .first()
             .and_then(|name| self.registry.get(name).map(|p| p.tier));
 
         // 5. Dispatch on decision.mode → build response text.
@@ -385,13 +419,15 @@ impl AgentLoop {
                     self.provider.clone(),
                     crate::cabinet::orchestrator::DEFAULT_ROUNDS,
                     &self.capability_registry,
-                ).await?;
+                )
+                .await?;
                 // CR-02: fail-closed egress on synthesis — the transcript may contain LocalOnly
                 // content. Gate synthesis on the table tier before touching the cloud provider.
                 let synth_provider_name = self.provider.read().await.name().to_owned();
                 crate::hooks::egress::check_egress(Some(table.tier), &synth_provider_name)?;
                 let provider_ref = self.provider.read().await;
-                let verdict = crate::cabinet::synth::synthesize(&**provider_ref, &transcript).await?;
+                let verdict =
+                    crate::cabinet::synth::synthesize(&**provider_ref, &transcript).await?;
                 drop(provider_ref);
                 render_verdict(&verdict)
             }
@@ -402,7 +438,7 @@ impl AgentLoop {
                 let system_prompt = self.build_system_prompt(owner, user_input).await;
                 let tools = self.capability_registry.list_tool_defs();
                 let config = CallConfig {
-                    system_prompt,   // ← dinâmico via SEAM #2
+                    system_prompt, // ← dinâmico via SEAM #2
                     max_tokens: 4096,
                     tools,
                 };
@@ -413,7 +449,8 @@ impl AgentLoop {
                     self.provider.clone(),
                     &history,
                     &config,
-                ).await?;
+                )
+                .await?;
 
                 // Process tool_calls if present via dispatch_tool_loop (BIG-1).
                 match output {
@@ -426,20 +463,27 @@ impl AgentLoop {
                         // dispatch_tool_loop — a LocalOnly→cloud downgrade.
                         let resolved_tier: Option<crate::memory::PrivacyTier> =
                             self.registry.get(&pid).map(|p| p.tier);
-                        let text = self.dispatch_tool_loop(
-                            &mut history,
-                            &session_id,
-                            &config,
-                            response,
-                            owner,
-                            resolved_tier,
-                        ).await?;
+                        let text = self
+                            .dispatch_tool_loop(
+                                &mut history,
+                                &session_id,
+                                &config,
+                                response,
+                                owner,
+                                resolved_tier,
+                            )
+                            .await?;
                         // Persist the assistant response (dispatch_tool_loop handles intermediate turns)
-                        self.session.append(
-                            &session_id,
-                            Message { role: Role::Assistant, content: crate::types::MessageContent::Text(text.clone()) },
-                            None,
-                        ).await?;
+                        self.session
+                            .append(
+                                &session_id,
+                                Message {
+                                    role: Role::Assistant,
+                                    content: crate::types::MessageContent::Text(text.clone()),
+                                },
+                                None,
+                            )
+                            .await?;
                         text
                     }
                     crate::persona::runner::RunnerOutput::Parallel(results) => {
@@ -451,22 +495,29 @@ impl AgentLoop {
                             // dispatch_tool_loop (None → blocked, not defaulted to cloud).
                             let resolved_tier: Option<crate::memory::PrivacyTier> =
                                 self.registry.get(&pid).map(|p| p.tier);
-                            let text = self.dispatch_tool_loop(
-                                &mut history,
-                                &session_id,
-                                &config,
-                                response,
-                                owner,
-                                resolved_tier,
-                            ).await?;
+                            let text = self
+                                .dispatch_tool_loop(
+                                    &mut history,
+                                    &session_id,
+                                    &config,
+                                    response,
+                                    owner,
+                                    resolved_tier,
+                                )
+                                .await?;
                             texts.push(text);
                         }
                         let combined = texts.join("\n\n");
-                        self.session.append(
-                            &session_id,
-                            Message { role: Role::Assistant, content: crate::types::MessageContent::Text(combined.clone()) },
-                            None,
-                        ).await?;
+                        self.session
+                            .append(
+                                &session_id,
+                                Message {
+                                    role: Role::Assistant,
+                                    content: crate::types::MessageContent::Text(combined.clone()),
+                                },
+                                None,
+                            )
+                            .await?;
                         combined
                     }
                     crate::persona::runner::RunnerOutput::ConveneCabinet(_) => String::new(),
@@ -480,14 +531,17 @@ impl AgentLoop {
         //    The Cabinet path also produces its own text.
         //    Only the truly empty case (no persona matched) reaches run_provider_fallback.
         let final_text = if route_text.is_empty() {
-            self.run_provider_fallback(&mut history, &session_id, owner, user_input, turn_tier).await?
+            self.run_provider_fallback(&mut history, &session_id, owner, user_input, turn_tier)
+                .await?
         } else {
             route_text
         };
 
         // HOOK-03: output-validator — NL contestation detection → belief revocation (D-13).
         // Runs after the response is produced (before return).
-        self.output_validator.validate(user_input, &self.memory, owner).await?;
+        self.output_validator
+            .validate(user_input, &self.memory, owner)
+            .await?;
 
         let latency_ms = t_start.elapsed().as_millis() as u64;
         tracing::info!(
@@ -518,22 +572,19 @@ impl AgentLoop {
         // skill-writer returns /skills/<name>/SKILL.md (its container path).
         if result.get("skill_reloaded").and_then(|v| v.as_bool()) == Some(true) {
             if let Some(raw_path) = result.get("skill_path").and_then(|v| v.as_str()) {
-                let skills_dir = std::env::var("SKILLS_DIR")
-                    .unwrap_or_else(|_| "/skills".to_string());
+                let skills_dir =
+                    std::env::var("SKILLS_DIR").unwrap_or_else(|_| "/skills".to_string());
                 // SEC: skill_path crosses the skill-writer→core container trust
                 // boundary. Keep ONLY Normal components — discarding RootDir,
                 // Prefix, CurDir and ParentDir ("..") — so a malicious segment
                 // cannot escape SKILLS_DIR.
-                let normals: Vec<std::path::PathBuf> =
-                    std::path::Path::new(raw_path)
-                        .components()
-                        .filter_map(|c| match c {
-                            std::path::Component::Normal(s) => {
-                                Some(std::path::PathBuf::from(s))
-                            }
-                            _ => None,
-                        })
-                        .collect();
+                let normals: Vec<std::path::PathBuf> = std::path::Path::new(raw_path)
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => Some(std::path::PathBuf::from(s)),
+                        _ => None,
+                    })
+                    .collect();
                 let skills_base = std::path::Path::new(&skills_dir);
                 // Strip the shared skills-base prefix and keep the FULL relative
                 // remainder (e.g. "personas/<slug>/<name>/SKILL.md" for private
@@ -543,18 +594,15 @@ impl AgentLoop {
                     .components()
                     .filter(|c| matches!(c, std::path::Component::Normal(_)))
                     .count();
-                let tail_components: Vec<std::path::PathBuf> =
-                    if normals.len() > base_norm_count {
-                        normals[base_norm_count..].to_vec()
-                    } else {
-                        normals.clone()
-                    };
+                let tail_components: Vec<std::path::PathBuf> = if normals.len() > base_norm_count {
+                    normals[base_norm_count..].to_vec()
+                } else {
+                    normals.clone()
+                };
                 // Require the reload target to be <name>/SKILL.md (at least two
                 // components, ending in SKILL.md) — guards the format coupling.
-                let last_is_skill_md = tail_components
-                    .last()
-                    .and_then(|p| p.to_str())
-                    == Some("SKILL.md");
+                let last_is_skill_md =
+                    tail_components.last().and_then(|p| p.to_str()) == Some("SKILL.md");
                 if tail_components.len() < 2 || !last_is_skill_md {
                     tracing::warn!(
                         event = "skill_reload_rejected",
@@ -635,23 +683,33 @@ impl AgentLoop {
             // Write assistant message to history BEFORE dispatching tools (Pitfall 1).
             let assistant_content = if let Some(ref tc) = response.tool_calls {
                 MessageContent::Parts(
-                    std::iter::once(ContentPart::Text { text: response.text.clone() })
-                        .chain(tc.iter().map(|t| ContentPart::ToolUse {
-                            id: t.id.clone(),
-                            name: t.name.clone(),
-                            input: t.arguments.clone(),
-                        }))
-                        .collect()
+                    std::iter::once(ContentPart::Text {
+                        text: response.text.clone(),
+                    })
+                    .chain(tc.iter().map(|t| ContentPart::ToolUse {
+                        id: t.id.clone(),
+                        name: t.name.clone(),
+                        input: t.arguments.clone(),
+                    }))
+                    .collect(),
                 )
             } else {
                 MessageContent::Text(response.text.clone())
             };
-            self.session.append(
-                session_id,
-                Message { role: Role::Assistant, content: assistant_content.clone() },
-                Some(response.usage.output_tokens),
-            ).await?;
-            history.push(Message { role: Role::Assistant, content: assistant_content });
+            self.session
+                .append(
+                    session_id,
+                    Message {
+                        role: Role::Assistant,
+                        content: assistant_content.clone(),
+                    },
+                    Some(response.usage.output_tokens),
+                )
+                .await?;
+            history.push(Message {
+                role: Role::Assistant,
+                content: assistant_content,
+            });
 
             match response.tool_calls {
                 None => break Ok(response.text),
@@ -674,8 +732,10 @@ impl AgentLoop {
                             // CR-01/CR-02: fail-closed — an unresolved tier is treated as the
                             // MOST restrictive (LocalOnly), never the most permissive. A None
                             // here previously defaulted to CloudOk, opening an egress path.
-                            privacy_tier: Some(resolved_tier.unwrap_or(crate::memory::PrivacyTier::LocalOnly)),
-                            needs_approval: false,  // v1.0: approval gate desabilitado — Phase 3 implementará o approval queue
+                            privacy_tier: Some(
+                                resolved_tier.unwrap_or(crate::memory::PrivacyTier::LocalOnly),
+                            ),
+                            needs_approval: false, // v1.0: approval gate desabilitado — Phase 3 implementará o approval queue
                         };
                         // SEAM #4: span filho execute_tool por tool call
                         let mut tool_span = tracer
@@ -695,21 +755,31 @@ impl AgentLoop {
                             // so a hallucinated/injected tool call can't execute ungated.
                             match crate::hooks::egress::check_egress(resolved_tier, "external") {
                                 Err(e) => {
-                                    tool_span.set_attribute(KeyValue::new("error.type", e.to_string()));
+                                    tool_span
+                                        .set_attribute(KeyValue::new("error.type", e.to_string()));
                                     serde_json::json!({"error": e.to_string()})
                                 }
-                                Ok(()) => self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
+                                Ok(()) => self
+                                    .mcp
+                                    .call_tool_with_timeout(&tc.name, tc.arguments.clone())
+                                    .await
                                     .unwrap_or_else(|e| {
                                         // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
-                                        tool_span.set_attribute(KeyValue::new("error.type", e.to_string()));
+                                        tool_span.set_attribute(KeyValue::new(
+                                            "error.type",
+                                            e.to_string(),
+                                        ));
                                         serde_json::json!({"error": e.to_string()})
-                                    })
+                                    }),
                             }
                         } else {
-                            self.capability_registry.invoke(&tc.name, tc.arguments.clone(), &ctx).await
+                            self.capability_registry
+                                .invoke(&tc.name, tc.arguments.clone(), &ctx)
+                                .await
                                 .unwrap_or_else(|e| {
                                     // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
-                                    tool_span.set_attribute(KeyValue::new("error.type", e.to_string()));
+                                    tool_span
+                                        .set_attribute(KeyValue::new("error.type", e.to_string()));
                                     serde_json::json!({"error": e.to_string()})
                                 })
                         };
@@ -728,17 +798,19 @@ impl AgentLoop {
                                 content: result_str,
                             }]),
                         };
-                        self.session.append(session_id, tool_msg.clone(), None).await?;
+                        self.session
+                            .append(session_id, tool_msg.clone(), None)
+                            .await?;
                         history.push(tool_msg);
                     }
                     rounds += 1;
 
                     // Budget check BEFORE next cloud call (PROV-06)
                     let provider_name = self.provider.read().await.name().to_owned();
-                    if provider_name != "ollama" {
-                        if !self.session.check_budget(self.daily_budget_usd).await? {
-                            anyhow::bail!(BastionError::BudgetExceeded);
-                        }
+                    if provider_name != "ollama"
+                        && !self.session.check_budget(self.daily_budget_usd).await?
+                    {
+                        anyhow::bail!(BastionError::BudgetExceeded);
                     }
 
                     // CR-02: fail-closed egress gate before the next cloud round. `history`
@@ -766,7 +838,8 @@ impl AgentLoop {
                     let next_response = {
                         let provider = self.provider.read().await;
                         let prov_ref: &dyn crate::provider::Provider = &**provider;
-                        crate::provider::call_with_retry(|| prov_ref.complete(history, config), 3).await?
+                        crate::provider::call_with_retry(|| prov_ref.complete(history, config), 3)
+                            .await?
                     };
                     // Record token usage and finish reason
                     chat_span.set_attribute(KeyValue::new(
@@ -777,8 +850,15 @@ impl AgentLoop {
                         "gen_ai.usage.output_tokens",
                         next_response.usage.output_tokens as i64,
                     ));
-                    let finish_reason = if next_response.tool_calls.is_some() { "tool_calls" } else { "stop" };
-                    chat_span.set_attribute(KeyValue::new("gen_ai.response.finish_reasons", finish_reason));
+                    let finish_reason = if next_response.tool_calls.is_some() {
+                        "tool_calls"
+                    } else {
+                        "stop"
+                    };
+                    chat_span.set_attribute(KeyValue::new(
+                        "gen_ai.response.finish_reasons",
+                        finish_reason,
+                    ));
                     // SECURITY: NÃO emitir gen_ai.input/output.messages por padrão (PII — T-05-05-01)
                     // Opt-in via BASTION_OTEL_CONTENT_EVENTS=true
                     if std::env::var("BASTION_OTEL_CONTENT_EVENTS").as_deref() == Ok("true") {
@@ -814,10 +894,16 @@ impl AgentLoop {
         turn_tier: Option<crate::memory::PrivacyTier>,
     ) -> anyhow::Result<String> {
         // Build tool definitions from ToolRegistry.
-        let tools: Vec<serde_json::Value> = self.mcp.registry().list_tool_names()
+        let tools: Vec<serde_json::Value> = self
+            .mcp
+            .registry()
+            .list_tool_names()
             .iter()
             .map(|name| {
-                let schema = self.mcp.registry().get_tool_schema(name)
+                let schema = self
+                    .mcp
+                    .registry()
+                    .get_tool_schema(name)
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
                 serde_json::json!({
@@ -870,10 +956,10 @@ impl AgentLoop {
 
             // Budget check BEFORE cloud call (PROV-06)
             let provider_name = self.provider.read().await.name().to_owned();
-            if provider_name != "ollama" {
-                if !self.session.check_budget(self.daily_budget_usd).await? {
-                    anyhow::bail!(BastionError::BudgetExceeded);
-                }
+            if provider_name != "ollama"
+                && !self.session.check_budget(self.daily_budget_usd).await?
+            {
+                anyhow::bail!(BastionError::BudgetExceeded);
             }
 
             // WR-01 (review #2): fail-closed egress gate on EVERY round, not just pre-loop.
@@ -889,7 +975,7 @@ impl AgentLoop {
                 // SAFETY: call_with_retry closure borrows prov_ref for the duration of this block.
                 // The READ lock is held for the entire duration of complete(), released after this block.
                 call_with_retry(|| prov_ref.complete(history, &config), 3).await?
-            };  // READ lock released here
+            }; // READ lock released here
 
             // Update budget with actual cost
             let cost_usd = estimate_cost_usd(provider_name.as_str(), &response.usage);
@@ -902,27 +988,37 @@ impl AgentLoop {
             // never see that they already called the tool and loop until the round cap.
             let assistant_content = if let Some(ref tc) = response.tool_calls {
                 MessageContent::Parts(
-                    std::iter::once(ContentPart::Text { text: response.text.clone() })
-                        .chain(tc.iter().map(|t| ContentPart::ToolUse {
-                            id: t.id.clone(),
-                            name: t.name.clone(),
-                            input: t.arguments.clone(),
-                        }))
-                        .collect()
+                    std::iter::once(ContentPart::Text {
+                        text: response.text.clone(),
+                    })
+                    .chain(tc.iter().map(|t| ContentPart::ToolUse {
+                        id: t.id.clone(),
+                        name: t.name.clone(),
+                        input: t.arguments.clone(),
+                    }))
+                    .collect(),
                 )
             } else {
                 MessageContent::Text(response.text.clone())
             };
-            self.session.append(
-                session_id,
-                Message { role: Role::Assistant, content: assistant_content.clone() },
-                Some(response.usage.output_tokens),
-            ).await?;
-            history.push(Message { role: Role::Assistant, content: assistant_content });
+            self.session
+                .append(
+                    session_id,
+                    Message {
+                        role: Role::Assistant,
+                        content: assistant_content.clone(),
+                    },
+                    Some(response.usage.output_tokens),
+                )
+                .await?;
+            history.push(Message {
+                role: Role::Assistant,
+                content: assistant_content,
+            });
 
             // Tool dispatch
             match response.tool_calls {
-                None => break response.text,  // final answer — no more tool calls
+                None => break response.text, // final answer — no more tool calls
                 Some(tool_calls) => {
                     for tc in &tool_calls {
                         tracing::debug!(event = "tool_dispatch", tool = %tc.name);
@@ -932,11 +1028,17 @@ impl AgentLoop {
                         // before dispatch (D-13). On block, return an error result and keep the
                         // loop going (parity with registry.invoke's caught-error behavior), rather
                         // than executing the tool ungated.
-                        let result = match crate::hooks::egress::check_egress(resolved_tier, "external") {
-                            Err(e) => serde_json::json!({ "error": e.to_string() }),
-                            Ok(()) => self.mcp.call_tool_with_timeout(&tc.name, tc.arguments.clone()).await
-                                .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
-                        };
+                        let result =
+                            match crate::hooks::egress::check_egress(resolved_tier, "external") {
+                                Err(e) => serde_json::json!({ "error": e.to_string() }),
+                                Ok(()) => self
+                                    .mcp
+                                    .call_tool_with_timeout(&tc.name, tc.arguments.clone())
+                                    .await
+                                    .unwrap_or_else(
+                                        |e| serde_json::json!({ "error": e.to_string() }),
+                                    ),
+                            };
 
                         // D-06: handle skill_reloaded signal from skill-writer container
                         // (shared helper — also used by dispatch_tool_loop, Gap 1 fix).
@@ -950,7 +1052,9 @@ impl AgentLoop {
                                 content: result_str,
                             }]),
                         };
-                        self.session.append(session_id, tool_msg.clone(), None).await?;
+                        self.session
+                            .append(session_id, tool_msg.clone(), None)
+                            .await?;
                         history.push(tool_msg);
                     }
                     rounds += 1;
@@ -976,7 +1080,8 @@ impl AgentLoop {
             &self.memory,
             &mut self.forced_persona,
             self.otc_store.as_ref(),
-        ).await
+        )
+        .await
     }
 
     /// Drain an `AgentHandle` receiver, serializing channel messages through `run_turn_for`.
@@ -993,7 +1098,10 @@ impl AgentLoop {
     /// (e.g. `webhook::error_status`) can map them to the correct HTTP status (WR-10).
     /// Internal error detail is never echoed to the channel caller — only logged here.
     #[cfg(test)]
-    pub async fn drain_handle(&mut self, mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
+    pub async fn drain_handle(
+        &mut self,
+        mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>,
+    ) {
         while let Some(req) = rx.recv().await {
             let result = self.run_turn_for(&req.text, &req.owner).await;
             if let Err(ref e) = result {
@@ -1014,7 +1122,6 @@ impl AgentLoop {
 // Render helpers
 // ---------------------------------------------------------------------------
 
-
 fn render_verdict(verdict: &crate::cabinet::synth::CabinetVerdict) -> String {
     let mut out = verdict.recommendation.clone();
     if !verdict.dissents.is_empty() {
@@ -1031,16 +1138,16 @@ fn render_verdict(verdict: &crate::cabinet::synth::CabinetVerdict) -> String {
 fn estimate_cost_usd(provider: &str, usage: &TokenUsage) -> f64 {
     match provider {
         "anthropic" => {
-            let input_cost  = usage.input_tokens  as f64 * 3.0  / 1_000_000.0;
+            let input_cost = usage.input_tokens as f64 * 3.0 / 1_000_000.0;
             let output_cost = usage.output_tokens as f64 * 15.0 / 1_000_000.0;
             input_cost + output_cost
         }
         "openai" => {
-            let input_cost  = usage.input_tokens  as f64 * 2.5  / 1_000_000.0;
+            let input_cost = usage.input_tokens as f64 * 2.5 / 1_000_000.0;
             let output_cost = usage.output_tokens as f64 * 10.0 / 1_000_000.0;
             input_cost + output_cost
         }
-        "ollama" => 0.0,  // local — no cost
+        "ollama" => 0.0, // local — no cost
         _ => 0.0,
     }
 }
@@ -1052,12 +1159,12 @@ fn estimate_cost_usd(provider: &str, usage: &TokenUsage) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::goal::{GoalEngine, ScoringConfig};
     use crate::memory::sqlite::SqliteMemory;
+    use crate::memory::PrivacyTier;
     use crate::persona::{Persona, PersonaRegistry};
     use crate::provider::{Provider, SharedProvider};
     use crate::types::{CallConfig, LlmResponse, Message};
-    use crate::memory::PrivacyTier;
-    use crate::goal::{GoalEngine, ScoringConfig};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1076,7 +1183,12 @@ mod tests {
             Ok(LlmResponse {
                 text: format!("response from {}", self.persona_name),
                 tool_calls: None,
-                usage: crate::types::TokenUsage { input_tokens: 10, output_tokens: 10, cache_read: 0, cache_write: 0 },
+                usage: crate::types::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 10,
+                    cache_read: 0,
+                    cache_write: 0,
+                },
             })
         }
         async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
@@ -1096,29 +1208,39 @@ mod tests {
                 "owner": DEFAULT_OWNER,
                 "mode": "single",
                 "convene_reason": null
-            }).to_string())
+            })
+            .to_string())
         }
-        fn context_limit(&self) -> usize { 8192 }
-        fn model_name(&self) -> &str { "mock" }
-        fn name(&self) -> &'static str { "mock" }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
     }
 
     fn make_provider(name: &str) -> SharedProvider {
-        Arc::new(RwLock::new(
-            Box::new(MockProvider { persona_name: name.to_string() }) as Box<dyn Provider>
-        ))
+        Arc::new(RwLock::new(Box::new(MockProvider {
+            persona_name: name.to_string(),
+        }) as Box<dyn Provider>))
     }
 
     fn make_registry(name: &str) -> PersonaRegistry {
         let mut personas = HashMap::new();
-        personas.insert(name.to_string(), Persona {
-            name: name.to_string(),
-            description: Some("Test persona".to_string()),
-            system_prompt: format!("You are {name}."),
-            tier: PrivacyTier::CloudOk,
-            weight: 0.8,
-            skills: vec![],
-        });
+        personas.insert(
+            name.to_string(),
+            Persona {
+                name: name.to_string(),
+                description: Some("Test persona".to_string()),
+                system_prompt: format!("You are {name}."),
+                tier: PrivacyTier::CloudOk,
+                weight: 0.8,
+                skills: vec![],
+            },
+        );
         PersonaRegistry::new_from_map(personas)
     }
 
@@ -1132,7 +1254,8 @@ mod tests {
         ));
 
         // connect_all with non-existent path returns empty client (load_mcp_config returns {})
-        let mcp = McpClient::connect_all("nonexistent_mcp.json").await
+        let mcp = McpClient::connect_all("nonexistent_mcp.json")
+            .await
             .expect("connect_all empty");
 
         AgentLoop::new(
@@ -1153,8 +1276,14 @@ mod tests {
         let path = f.path().to_str().unwrap().to_owned();
         let mut agent = make_loop(&path).await;
 
-        let resp = agent.run_turn("hello world").await.expect("run_turn failed");
-        assert!(!resp.is_empty(), "response must not be empty; got: {resp:?}");
+        let resp = agent
+            .run_turn("hello world")
+            .await
+            .expect("run_turn failed");
+        assert!(
+            !resp.is_empty(),
+            "response must not be empty; got: {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -1198,27 +1327,44 @@ mod tests {
         // Pre-store a belief
         {
             let mem = agent.memory.read().await;
-            mem.store_belief(DEFAULT_OWNER, None, "Mario exercises every morning", "sess1", "user", false, None)
-                .await
-                .expect("store_belief");
+            mem.store_belief(
+                DEFAULT_OWNER,
+                None,
+                "Mario exercises every morning",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store_belief");
         }
 
         // Verify belief is stored
         let before = {
             let mem = agent.memory.read().await;
-            mem.retrieve_tagged(DEFAULT_OWNER, None).await.expect("retrieve")
+            mem.retrieve_tagged(DEFAULT_OWNER, None)
+                .await
+                .expect("retrieve")
         };
         assert_eq!(before.len(), 1, "belief must exist before contestation");
 
         // Run a turn with a contestation phrase that overlaps with the belief
-        let _ = agent.run_turn("isso não é mais verdade sobre exercises morning").await;
+        let _ = agent
+            .run_turn("isso não é mais verdade sobre exercises morning")
+            .await;
 
         // After the turn, the output-validator should have revoked the belief
         let after = {
             let mem = agent.memory.read().await;
-            mem.retrieve_tagged(DEFAULT_OWNER, None).await.expect("retrieve")
+            mem.retrieve_tagged(DEFAULT_OWNER, None)
+                .await
+                .expect("retrieve")
         };
-        assert!(after.is_empty(), "belief must be revoked after contestation turn");
+        assert!(
+            after.is_empty(),
+            "belief must be revoked after contestation turn"
+        );
     }
 
     // Guards CR-01/CR-02 (privacy egress through the tool loop):
@@ -1230,13 +1376,15 @@ mod tests {
     //    a legitimate CloudOk persona's multi-round tool loop.
     #[tokio::test]
     async fn cloud_ok_persona_tool_loop_passes_egress_gate() {
+        use crate::types::{TokenUsage, ToolCall};
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use crate::types::{ToolCall, TokenUsage};
 
         // Round 0 returns a tool_call (forces a second provider round through
         // dispatch_tool_loop, where the new egress gate lives); round 1 returns
         // final text to terminate the loop.
-        struct ToolThenText { calls: AtomicUsize }
+        struct ToolThenText {
+            calls: AtomicUsize,
+        }
 
         #[async_trait]
         impl Provider for ToolThenText {
@@ -1250,30 +1398,54 @@ mod tests {
                             name: "noop".to_owned(),
                             arguments: serde_json::json!({}),
                         }]),
-                        usage: TokenUsage { input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0 },
+                        usage: TokenUsage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                            cache_read: 0,
+                            cache_write: 0,
+                        },
                     })
                 } else {
                     Ok(LlmResponse {
                         text: "done".to_owned(),
                         tool_calls: None,
-                        usage: TokenUsage { input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0 },
+                        usage: TokenUsage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                            cache_read: 0,
+                            cache_write: 0,
+                        },
                     })
                 }
             }
-            async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> { Ok("s".to_owned()) }
+            async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
+                Ok("s".to_owned())
+            }
             async fn complete_structured(
-                &self, _system: &str, _user: &str, _schema: serde_json::Value, _max_tokens: u32, _temperature: f32,
+                &self,
+                _system: &str,
+                _user: &str,
+                _schema: serde_json::Value,
+                _max_tokens: u32,
+                _temperature: f32,
             ) -> anyhow::Result<String> {
                 Ok(serde_json::json!({
                     "personas": ["Cloudy"],
                     "owner": DEFAULT_OWNER,
                     "mode": "single",
                     "convene_reason": null
-                }).to_string())
+                })
+                .to_string())
             }
-            fn context_limit(&self) -> usize { 8192 }
-            fn model_name(&self) -> &str { "mock" }
-            fn name(&self) -> &'static str { "mock" }
+            fn context_limit(&self) -> usize {
+                8192
+            }
+            fn model_name(&self) -> &str {
+                "mock"
+            }
+            fn name(&self) -> &'static str {
+                "mock"
+            }
         }
 
         let f = NamedTempFile::new().unwrap();
@@ -1285,32 +1457,48 @@ mod tests {
         let memory: SharedMemory = Arc::new(RwLock::new(
             Box::new(SqliteMemory::new(&path)) as Box<dyn crate::memory::Memory>
         ));
-        let mcp = McpClient::connect_all("nonexistent_mcp.json").await.expect("connect_all empty");
+        let mcp = McpClient::connect_all("nonexistent_mcp.json")
+            .await
+            .expect("connect_all empty");
 
         let mut personas = HashMap::new();
-        personas.insert("Cloudy".to_string(), Persona {
-            name: "Cloudy".to_string(),
-            description: Some("Cloud-ok persona".to_string()),
-            system_prompt: "You are Cloudy.".to_string(),
-            tier: PrivacyTier::CloudOk,
-            weight: 0.9,
-            skills: vec![],
-        });
+        personas.insert(
+            "Cloudy".to_string(),
+            Persona {
+                name: "Cloudy".to_string(),
+                description: Some("Cloud-ok persona".to_string()),
+                system_prompt: "You are Cloudy.".to_string(),
+                tier: PrivacyTier::CloudOk,
+                weight: 0.9,
+                skills: vec![],
+            },
+        );
         let registry = PersonaRegistry::new_from_map(personas);
 
-        let provider: SharedProvider = Arc::new(RwLock::new(
-            Box::new(ToolThenText { calls: AtomicUsize::new(0) }) as Box<dyn Provider>
-        ));
+        let provider: SharedProvider = Arc::new(RwLock::new(Box::new(ToolThenText {
+            calls: AtomicUsize::new(0),
+        }) as Box<dyn Provider>));
 
         let mut agent = AgentLoop::new(
-            provider, session, mcp, session_id, 10.0, registry, memory,
+            provider,
+            session,
+            mcp,
+            session_id,
+            10.0,
+            registry,
+            memory,
             GoalEngine::new(&path, ScoringConfig::default()),
         );
 
         // CloudOk persona + cloud provider: the multi-round tool loop must complete,
         // proving the per-round egress gate resolves Some(CloudOk) and lets it through.
-        let resp = agent.run_turn("do a thing").await
+        let resp = agent
+            .run_turn("do a thing")
+            .await
             .expect("CloudOk persona tool loop must not be egress-blocked");
-        assert_eq!(resp, "done", "tool loop must run a second round and return final text");
+        assert_eq!(
+            resp, "done",
+            "tool loop must run a second round and return final text"
+        );
     }
 }

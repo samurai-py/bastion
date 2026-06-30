@@ -7,10 +7,10 @@
 use tokio::task::JoinSet;
 
 use crate::hooks::egress::check_egress;
-use crate::types::{BastionError, CallConfig, LlmResponse, Message};
 use crate::persona::router::RouterDecision;
 use crate::persona::{Persona, PersonaRegistry};
 use crate::provider::SharedProvider;
+use crate::types::{BastionError, CallConfig, LlmResponse, Message};
 
 /// Stable identifier for a persona within a run.
 pub type PersonaId = String;
@@ -47,9 +47,7 @@ pub async fn run(
         crate::persona::router::ResponseMode::Parallel => {
             run_parallel(decision, registry, provider, history, config).await
         }
-        crate::persona::router::ResponseMode::Cabinet => {
-            Ok(RunnerOutput::ConveneCabinet(decision))
-        }
+        crate::persona::router::ResponseMode::Cabinet => Ok(RunnerOutput::ConveneCabinet(decision)),
     }
 }
 
@@ -122,7 +120,7 @@ async fn run_parallel(
         };
         let history_clone = history.to_owned();
         let provider_clone = provider.clone(); // clone Arc, not the inner value
-        // Capture tier before spawning — registry not Send so resolve here.
+                                               // Capture tier before spawning — registry not Send so resolve here.
         let tier = registry.get(&persona_id).map(|p| p.tier);
 
         set.spawn(async move {
@@ -201,11 +199,11 @@ fn get_system_prompt(registry: &PersonaRegistry, persona_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::PrivacyTier;
     use crate::persona::router::{ConveneReason, ResponseMode, RouterDecision};
     use crate::persona::{Persona, PersonaRegistry};
     use crate::provider::{Provider, SharedProvider};
     use crate::types::{CallConfig, LlmResponse, Message, TokenUsage};
-    use crate::memory::PrivacyTier;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -220,9 +218,14 @@ mod tests {
 
     #[async_trait]
     impl Provider for EchoProvider {
-        async fn complete(&self, _: &[Message], config: &CallConfig) -> anyhow::Result<LlmResponse> {
+        async fn complete(
+            &self,
+            _: &[Message],
+            config: &CallConfig,
+        ) -> anyhow::Result<LlmResponse> {
             // Return "echo:<persona_name>" extracted from "You are <name>." in the system prompt.
-            let name = config.system_prompt
+            let name = config
+                .system_prompt
                 .lines()
                 .find(|l| l.starts_with("You are "))
                 .and_then(|l| l.strip_prefix("You are "))
@@ -231,7 +234,12 @@ mod tests {
             Ok(LlmResponse {
                 text: format!("echo:{name}"),
                 tool_calls: None,
-                usage: TokenUsage { input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0 },
+                usage: TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read: 0,
+                    cache_write: 0,
+                },
             })
         }
         async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {
@@ -244,9 +252,15 @@ mod tests {
                 .unwrap_or("unknown");
             Ok(format!("echo:{name}"))
         }
-        fn context_limit(&self) -> usize { 8192 }
-        fn model_name(&self) -> &str { "echo" }
-        fn name(&self) -> &'static str { "echo" }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "echo"
+        }
+        fn name(&self) -> &'static str {
+            "echo"
+        }
     }
 
     fn make_provider() -> SharedProvider {
@@ -319,9 +333,15 @@ mod tests {
     async fn single_mode_returns_one_result() {
         let registry = make_registry_with(&["Aria"]);
         let provider = make_provider();
-        let output = run(single_decision("Aria"), &registry, provider, &make_history(), &make_config())
-            .await
-            .expect("run failed");
+        let output = run(
+            single_decision("Aria"),
+            &registry,
+            provider,
+            &make_history(),
+            &make_config(),
+        )
+        .await
+        .expect("run failed");
 
         match output {
             RunnerOutput::Single(id, response) => {
@@ -339,9 +359,15 @@ mod tests {
         let names = ["Alpha", "Beta", "Gamma"];
         let registry = make_registry_with(&names);
         let provider = make_provider();
-        let output = run(parallel_decision(&names), &registry, provider, &make_history(), &make_config())
-            .await
-            .expect("run failed");
+        let output = run(
+            parallel_decision(&names),
+            &registry,
+            provider,
+            &make_history(),
+            &make_config(),
+        )
+        .await
+        .expect("run failed");
 
         match output {
             RunnerOutput::Parallel(results) => {
@@ -366,9 +392,15 @@ mod tests {
         let registry = make_registry_with(&["Saúde", "Aria"]);
         let provider = make_provider();
         let decision = cabinet_decision(&["Saúde", "Aria"]);
-        let output = run(decision, &registry, provider, &make_history(), &make_config())
-            .await
-            .expect("run failed");
+        let output = run(
+            decision,
+            &registry,
+            provider,
+            &make_history(),
+            &make_config(),
+        )
+        .await
+        .expect("run failed");
 
         match output {
             RunnerOutput::ConveneCabinet(d) => {
@@ -391,9 +423,15 @@ mod tests {
         async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
             panic!("provider must NOT be called when egress is blocked");
         }
-        fn context_limit(&self) -> usize { 8192 }
-        fn model_name(&self) -> &str { "gpt-4o" }
-        fn name(&self) -> &'static str { "openai" }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "gpt-4o"
+        }
+        fn name(&self) -> &'static str {
+            "openai"
+        }
     }
 
     fn make_local_registry(names: &[&str]) -> PersonaRegistry {
@@ -429,8 +467,8 @@ mod tests {
             &make_history(),
             &make_config(),
         )
-            .await
-            .expect_err("all-blocked parallel turn must error");
+        .await
+        .expect_err("all-blocked parallel turn must error");
         assert!(
             matches!(
                 err.downcast_ref::<BastionError>(),

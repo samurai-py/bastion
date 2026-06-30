@@ -34,7 +34,11 @@ impl SpyProvider {
 
 #[async_trait]
 impl Provider for SpyProvider {
-    async fn complete(&self, _messages: &[Message], _config: &CallConfig) -> anyhow::Result<LlmResponse> {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _config: &CallConfig,
+    ) -> anyhow::Result<LlmResponse> {
         self.record();
         Ok(LlmResponse {
             text: "spy-response".into(),

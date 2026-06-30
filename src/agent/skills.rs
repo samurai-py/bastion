@@ -11,12 +11,12 @@ pub struct SkillMetadata {
 /// SKILL.md YAML frontmatter schema (agentskills.io compatible).
 #[derive(serde::Deserialize, Default)]
 struct SkillFrontmatter {
-    pub name:        Option<String>,
+    pub name: Option<String>,
     pub description: Option<String>,
     #[allow(dead_code)]
-    pub version:     Option<String>,
+    pub version: Option<String>,
     #[allow(dead_code)]
-    pub triggers:    Option<Vec<String>>,
+    pub triggers: Option<Vec<String>>,
 }
 
 pub struct SkillsLoader;
@@ -47,10 +47,14 @@ impl SkillsLoader {
         {
             let entry = entry?;
             let skill_dir = entry.path();
-            if !skill_dir.is_dir() { continue; }
+            if !skill_dir.is_dir() {
+                continue;
+            }
 
             let skill_md = skill_dir.join("SKILL.md");
-            if !skill_md.exists() { continue; }
+            if !skill_md.exists() {
+                continue;
+            }
 
             match Self::load_yaml_frontmatter(&skill_md) {
                 Ok(meta) => result.push(meta),
@@ -81,14 +85,16 @@ impl SkillsLoader {
 
         // Fall back to directory name if name missing or empty
         let name = parsed.name.filter(|s| !s.is_empty()).unwrap_or_else(|| {
-            skill_md.parent()
+            skill_md
+                .parent()
                 .and_then(|p| p.file_name())
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default()
         });
 
         // description may be a YAML block scalar (>) — serde_norway handles that natively
-        let description = parsed.description
+        let description = parsed
+            .description
             .map(|s| s.trim().to_owned())
             .unwrap_or_default();
 
@@ -102,7 +108,9 @@ impl SkillsLoader {
             return None;
         }
         // Skip opening ---
-        let rest = stripped[3..].trim_start_matches('\n').trim_start_matches('\r');
+        let rest = stripped[3..]
+            .trim_start_matches('\n')
+            .trim_start_matches('\r');
         let end = rest.find("\n---")?;
         Some(rest[..end].to_owned())
     }
@@ -116,14 +124,13 @@ impl SkillsLoader {
         let content = std::fs::read_to_string(std::path::Path::new(skill_path))
             .map_err(|e| anyhow::anyhow!("skills rescan: cannot read {}: {}", skill_path, e))?;
 
-        let name = Self::extract_tag(&content, "name")
-            .unwrap_or_else(|| {
-                std::path::Path::new(skill_path)
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            });
+        let name = Self::extract_tag(&content, "name").unwrap_or_else(|| {
+            std::path::Path::new(skill_path)
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
 
         let description = Self::extract_tag(&content, "description").unwrap_or_default();
 
@@ -190,6 +197,10 @@ mod tests {
 
         let meta = SkillsLoader::rescan(path.to_str().unwrap()).unwrap();
         assert_eq!(meta.name, "test-skill");
-        assert!(meta.description.contains("Line one."), "desc: {}", meta.description);
+        assert!(
+            meta.description.contains("Line one."),
+            "desc: {}",
+            meta.description
+        );
     }
 }

@@ -1,18 +1,20 @@
 use async_openai::{
-    Client,
     config::OpenAIConfig,
     types::chat::{ChatCompletionMessageToolCalls, CreateChatCompletionRequestArgs},
+    Client,
 };
 
-use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role, ToolCall, TokenUsage, strip_think};
 use super::Provider;
+use crate::types::{
+    strip_think, CallConfig, LlmResponse, Message, MessageContent, Role, TokenUsage, ToolCall,
+};
 
 /// OpenAI-compatible provider for Google Gemini via the official compatibility
 /// endpoint (https://generativelanguage.googleapis.com/v1beta/openai).
 /// Routed when the model name starts with `gemini` (e.g. `gemini-2.0-flash`).
 pub struct GeminiProvider {
     client: Client<OpenAIConfig>,
-    model:  String,
+    model: String,
 }
 
 impl GeminiProvider {
@@ -23,8 +25,9 @@ impl GeminiProvider {
             panic!("GEMINI_API_KEY required (missing or empty) — get one at https://aistudio.google.com/apikey");
         }
 
-        let base = std::env::var("GEMINI_BASE_URL")
-            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta/openai".to_owned());
+        let base = std::env::var("GEMINI_BASE_URL").unwrap_or_else(|_| {
+            "https://generativelanguage.googleapis.com/v1beta/openai".to_owned()
+        });
 
         let config = OpenAIConfig::default()
             .with_api_base(base)
@@ -32,14 +35,18 @@ impl GeminiProvider {
 
         Self {
             client: Client::with_config(config),
-            model:  model.to_owned(),
+            model: model.to_owned(),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl Provider for GeminiProvider {
-    async fn complete(&self, messages: &[Message], config: &CallConfig) -> anyhow::Result<LlmResponse> {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        config: &CallConfig,
+    ) -> anyhow::Result<LlmResponse> {
         let oai_messages = super::build_openai_messages(&config.system_prompt, messages);
 
         let mut args = CreateChatCompletionRequestArgs::default();
@@ -51,22 +58,31 @@ impl Provider for GeminiProvider {
         }
         let request = args.build()?;
 
-        let response = self.client.chat().create(request).await
+        let response = self
+            .client
+            .chat()
+            .create(request)
+            .await
             .map_err(|e| super::clarify_openai_error(self.name(), e))?;
 
-        let choice = response.choices.into_iter().next()
+        let choice = response
+            .choices
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("Gemini returned no choices"))?;
 
         let raw_text = choice.message.content.unwrap_or_default();
         let text = strip_think(&raw_text);
 
-        let tool_calls: Vec<ToolCall> = choice.message.tool_calls
+        let tool_calls: Vec<ToolCall> = choice
+            .message
+            .tool_calls
             .unwrap_or_default()
             .into_iter()
             .filter_map(|tc| match tc {
                 ChatCompletionMessageToolCalls::Function(f) => Some(ToolCall {
-                    id:        f.id,
-                    name:      f.function.name,
+                    id: f.id,
+                    name: f.function.name,
                     arguments: serde_json::from_str(&f.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
                 }),
@@ -74,15 +90,22 @@ impl Provider for GeminiProvider {
             })
             .collect();
 
-        let usage = response.usage.map(|u| TokenUsage {
-            input_tokens:  u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            ..Default::default()
-        }).unwrap_or_default();
+        let usage = response
+            .usage
+            .map(|u| TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                ..Default::default()
+            })
+            .unwrap_or_default();
 
         Ok(LlmResponse {
             text,
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
             usage,
         })
     }
@@ -118,18 +141,27 @@ impl Provider for GeminiProvider {
             .messages(oai_messages);
         let request = args.build()?;
 
-        let response = self.client.chat().create(request).await
+        let response = self
+            .client
+            .chat()
+            .create(request)
+            .await
             .map_err(|e| super::clarify_openai_error(self.name(), e))?;
-        let choice = response.choices.into_iter().next()
+        let choice = response
+            .choices
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("Gemini returned no choices"))?;
-        let raw = choice.message.content
+        let raw = choice
+            .message
+            .content
             .ok_or_else(|| anyhow::anyhow!("Gemini structured response had no content"))?;
         Ok(strip_think(&raw))
     }
 
     async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {
         let messages = vec![Message {
-            role:    Role::User,
+            role: Role::User,
             content: MessageContent::Text(prompt.to_owned()),
         }];
         let config = CallConfig {
@@ -140,7 +172,13 @@ impl Provider for GeminiProvider {
         Ok(resp.text)
     }
 
-    fn context_limit(&self) -> usize { 1_000_000 }
-    fn model_name(&self) -> &str { &self.model }
-    fn name(&self) -> &'static str { "gemini" }
+    fn context_limit(&self) -> usize {
+        1_000_000
+    }
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+    fn name(&self) -> &'static str {
+        "gemini"
+    }
 }

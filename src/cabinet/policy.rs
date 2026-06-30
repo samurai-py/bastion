@@ -24,7 +24,7 @@ use crate::memory::PrivacyTier;
 /// This function does not mutate any persona state. The returned tier is used only
 /// for the duration of the current deliberation round.
 pub fn table_tier(tiers: &[PrivacyTier]) -> PrivacyTier {
-    if tiers.is_empty() || tiers.iter().any(|t| *t == PrivacyTier::LocalOnly) {
+    if tiers.is_empty() || tiers.contains(&PrivacyTier::LocalOnly) {
         PrivacyTier::LocalOnly
     } else {
         PrivacyTier::CloudOk
@@ -64,6 +64,9 @@ mod tests {
 
     #[test]
     fn any_local_in_large_table_returns_local_only() {
-        assert_eq!(table_tier(&[CloudOk, CloudOk, LocalOnly, CloudOk]), LocalOnly);
+        assert_eq!(
+            table_tier(&[CloudOk, CloudOk, LocalOnly, CloudOk]),
+            LocalOnly
+        );
     }
 }

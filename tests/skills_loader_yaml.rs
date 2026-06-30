@@ -9,7 +9,11 @@ fn skills_loader_yaml_frontmatter_name_parsed() {
     let skill_dir = dir.path().join("weekly-review");
     std::fs::create_dir_all(&skill_dir).unwrap();
     let mut f = std::fs::File::create(skill_dir.join("SKILL.md")).unwrap();
-    writeln!(f, "---\nname: weekly-review\ndescription: Review weekly goals\n---\n\n# Weekly Review\n").unwrap();
+    writeln!(
+        f,
+        "---\nname: weekly-review\ndescription: Review weekly goals\n---\n\n# Weekly Review\n"
+    )
+    .unwrap();
 
     let meta = SkillsLoader::load_all(dir.path().to_str().unwrap()).unwrap();
     assert_eq!(meta.len(), 1);
@@ -22,7 +26,11 @@ fn skills_loader_yaml_frontmatter_description_parsed() {
     let skill_dir = dir.path().join("test-skill");
     std::fs::create_dir_all(&skill_dir).unwrap();
     let mut f = std::fs::File::create(skill_dir.join("SKILL.md")).unwrap();
-    writeln!(f, "---\nname: test-skill\ndescription: A test skill for validation\n---\n").unwrap();
+    writeln!(
+        f,
+        "---\nname: test-skill\ndescription: A test skill for validation\n---\n"
+    )
+    .unwrap();
 
     let meta = SkillsLoader::load_all(dir.path().to_str().unwrap()).unwrap();
     assert_eq!(meta[0].description, "A test skill for validation");
@@ -36,8 +44,13 @@ fn agentskills_compat_reference_skill_loads() {
         return;
     }
     let meta = SkillsLoader::load_all("skills/").unwrap();
-    let weekly = meta.iter().find(|m| m.name.contains("weekly") || m.name.contains("review"));
-    assert!(weekly.is_some(), "skills/weekly-review should load via load_all");
+    let weekly = meta
+        .iter()
+        .find(|m| m.name.contains("weekly") || m.name.contains("review"));
+    assert!(
+        weekly.is_some(),
+        "skills/weekly-review should load via load_all"
+    );
     assert!(!weekly.unwrap().name.is_empty());
     assert!(!weekly.unwrap().description.is_empty());
 }

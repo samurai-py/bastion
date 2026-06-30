@@ -3,8 +3,8 @@
 // 3-attempt serde-parse-retry on complete_structured output (AI-SPEC §4b).
 // Safe fallback to single persona + review flag on parse exhaustion (CF-2, T-02-09).
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::persona::PersonaRegistry;
 use crate::provider::Provider;
@@ -100,7 +100,7 @@ pub async fn route(
                     owner: owner.to_string(),
                     mode: d.mode,
                     convene_reason: d.convene_reason,
-                })
+                });
             }
             Err(parse_err) => {
                 // Pitfall 7: do NOT log raw for local-only context.
@@ -116,7 +116,11 @@ pub async fn route(
 
     // All 3 attempts failed to yield a parseable RouterDecision.
     // Safe fallback: single persona (first in registry or empty sentinel), no convene (CF-2).
-    tracing::warn!(event = "router_safe_fallback", owner, "router failed to parse after 3 attempts; falling back to safe single persona");
+    tracing::warn!(
+        event = "router_safe_fallback",
+        owner,
+        "router failed to parse after 3 attempts; falling back to safe single persona"
+    );
 
     let safe_persona = registry
         .names()
@@ -207,10 +211,10 @@ Do NOT include an "owner" field. No prose, no markdown fences."#
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::Provider;
-    use crate::types::{CallConfig, LlmResponse, Message};
     use crate::memory::PrivacyTier;
     use crate::persona::{Persona, PersonaRegistry};
+    use crate::provider::Provider;
+    use crate::types::{CallConfig, LlmResponse, Message};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -246,9 +250,15 @@ mod tests {
         async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
             unimplemented!()
         }
-        fn context_limit(&self) -> usize { 8192 }
-        fn model_name(&self) -> &str { "mock" }
-        fn name(&self) -> &'static str { "mock" }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
 
         async fn complete_structured(
             &self,
@@ -349,9 +359,20 @@ mod tests {
             .await
             .expect("route must not error — safe fallback");
 
-        assert_eq!(decision.mode, ResponseMode::Single, "fallback must be Single");
-        assert_eq!(decision.personas.len(), 1, "fallback must have exactly 1 persona");
-        assert!(decision.convene_reason.is_none(), "fallback must not convene Cabinet");
+        assert_eq!(
+            decision.mode,
+            ResponseMode::Single,
+            "fallback must be Single"
+        );
+        assert_eq!(
+            decision.personas.len(),
+            1,
+            "fallback must have exactly 1 persona"
+        );
+        assert!(
+            decision.convene_reason.is_none(),
+            "fallback must not convene Cabinet"
+        );
     }
 
     #[tokio::test]
@@ -394,7 +415,10 @@ mod tests {
             .expect("route failed");
 
         assert_eq!(decision.mode, ResponseMode::Single);
-        assert!(!decision.personas.is_empty(), "must have at least one persona");
+        assert!(
+            !decision.personas.is_empty(),
+            "must have at least one persona"
+        );
     }
 
     #[tokio::test]
@@ -409,9 +433,14 @@ mod tests {
 
         let provider = MockProvider::always(&json);
         let registry = make_registry();
-        let decision = route(&provider, &registry, "plano de fitness para perder peso", "user1")
-            .await
-            .expect("route failed");
+        let decision = route(
+            &provider,
+            &registry,
+            "plano de fitness para perder peso",
+            "user1",
+        )
+        .await
+        .expect("route failed");
 
         assert_eq!(decision.personas, vec!["Saúde"]);
         assert_eq!(decision.mode, ResponseMode::Single);
@@ -429,12 +458,20 @@ mod tests {
 
         let provider = MockProvider::always(&json);
         let registry = make_registry();
-        let decision = route(&provider, &registry, "receita de bolo de chocolate", "user1")
-            .await
-            .expect("route failed");
+        let decision = route(
+            &provider,
+            &registry,
+            "receita de bolo de chocolate",
+            "user1",
+        )
+        .await
+        .expect("route failed");
 
         assert_eq!(decision.mode, ResponseMode::Single);
-        assert!(!decision.personas.is_empty(), "must have at least one persona");
+        assert!(
+            !decision.personas.is_empty(),
+            "must have at least one persona"
+        );
     }
 
     #[test]
@@ -444,11 +481,15 @@ mod tests {
         let registry = make_registry();
         let prompt = build_router_system_prompt(&registry);
         assert!(
-            prompt.contains("Few-shot examples") || prompt.contains("few-shot") || prompt.contains("few_shot"),
+            prompt.contains("Few-shot examples")
+                || prompt.contains("few-shot")
+                || prompt.contains("few_shot"),
             "Router system prompt must contain few-shot examples section"
         );
         assert!(
-            prompt.contains("reuniões de trabalho") || prompt.contains("fitness") || prompt.contains("Examples"),
+            prompt.contains("reuniões de trabalho")
+                || prompt.contains("fitness")
+                || prompt.contains("Examples"),
             "Router system prompt must contain at least one routing example"
         );
     }

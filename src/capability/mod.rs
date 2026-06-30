@@ -11,5 +11,5 @@
 pub mod adapters;
 pub mod registry;
 
-pub use registry::{CapabilityRegistry, Capability, InvokeCtx};
-pub use adapters::{McpToolAdapter, DirectFnAdapter, NlCommandAdapter};
+pub use adapters::{DirectFnAdapter, McpToolAdapter, NlCommandAdapter};
+pub use registry::{Capability, CapabilityRegistry, InvokeCtx};

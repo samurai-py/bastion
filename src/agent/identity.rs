@@ -11,7 +11,7 @@
 //! Editável por conversa: o agente chama memory_revoke(old_id) + memory_store(new_content).
 
 use crate::agent::context::{ContextBlock, TurnContextProvider};
-use crate::memory::{SharedMemory, PrivacyTier};
+use crate::memory::{PrivacyTier, SharedMemory};
 
 /// System prompt de onboarding para o primeiro uso (sem identidade na memória).
 ///

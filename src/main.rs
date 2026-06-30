@@ -1,20 +1,19 @@
+use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use clap::{Parser, Subcommand};
 use tracing_subscriber::fmt;
 
-use bastion::agent::loop_::AgentLoop;
 use bastion::agent::handle;
+use bastion::agent::loop_::AgentLoop;
 use bastion::channel::OwnerMap;
+use bastion::goal::{GoalEngine, ScoringConfig};
 use bastion::mcp::McpClient;
 use bastion::memory::sqlite::SqliteMemory;
+use bastion::persona::PersonaRegistry;
+use bastion::proactive::CronService;
 use bastion::provider::registry::resolve_provider;
 use bastion::session::SessionManager;
-use bastion::persona::PersonaRegistry;
-use bastion::goal::{GoalEngine, ScoringConfig};
-use bastion::proactive::CronService;
-use axum;
 
 /// Inicializa o OTel TracerProvider.
 ///
@@ -34,8 +33,8 @@ fn init_otel_provider() -> anyhow::Result<opentelemetry_sdk::trace::SdkTracerPro
     // stdout exporter opt-in — off por padrão p/ não afogar o REPL do daemon.
     // ponytail: era sempre-ligado; agora atrás de BASTION_OTEL_STDOUT=true.
     if std::env::var("BASTION_OTEL_STDOUT").as_deref() == Ok("true") {
-        provider_builder = provider_builder
-            .with_batch_exporter(opentelemetry_stdout::SpanExporter::default());
+        provider_builder =
+            provider_builder.with_batch_exporter(opentelemetry_stdout::SpanExporter::default());
     }
 
     // OTLP exporter opcional — só se endpoint configurado
@@ -45,9 +44,7 @@ fn init_otel_provider() -> anyhow::Result<opentelemetry_sdk::trace::SdkTracerPro
             .with_tonic()
             .with_endpoint(&endpoint)
             .build()?;
-        provider_builder
-            .with_batch_exporter(otlp_exporter)
-            .build()
+        provider_builder.with_batch_exporter(otlp_exporter).build()
     } else {
         provider_builder.build()
     };
@@ -86,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(
         std::path::Path::new(&cfg.logging.log_path)
             .parent()
-            .unwrap_or_else(|| std::path::Path::new(".bastion"))
+            .unwrap_or_else(|| std::path::Path::new(".bastion")),
     )?;
     let log_file = std::fs::OpenOptions::new()
         .create(true)
@@ -136,9 +133,10 @@ async fn main() -> anyhow::Result<()> {
     let registry = PersonaRegistry::load_dir(".").await?;
 
     // Init shared memory
-    let memory: bastion::memory::SharedMemory = Arc::new(RwLock::new(
-        Box::new(SqliteMemory::new(&db_path)) as Box<dyn bastion::memory::Memory>
-    ));
+    let memory: bastion::memory::SharedMemory = Arc::new(RwLock::new(Box::new(SqliteMemory::new(
+        &db_path,
+    ))
+        as Box<dyn bastion::memory::Memory>));
 
     // Init goal engine
     let goals = GoalEngine::new(&db_path, ScoringConfig::default());
@@ -185,15 +183,21 @@ async fn main() -> anyhow::Result<()> {
 /// REPL daemon loop: stdin line by line, slash commands, graceful shutdown (D-01).
 /// Five select arms: stdin, pending_rx (proactive), inbound_rx (channel), SIGTERM, Ctrl-C.
 /// All arms serialize through ONE `&mut agent` — single-turn invariant holds (CR-07).
-async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig) -> anyhow::Result<()> {
+async fn daemon_loop(
+    agent: &mut AgentLoop,
+    cfg: &bastion::config::BastionConfig,
+) -> anyhow::Result<()> {
+    use bastion::agent::command::CommandResult;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::signal::unix::{signal, SignalKind};
-    use bastion::agent::command::CommandResult;
 
     // PROACT-05: take pending_rx out of the agent so we own it in the select! loop.
     // Because select! processes ONE branch per iteration and run_turn fully awaits,
     // a pending message is only picked up BETWEEN turns — this IS the structural guarantee.
-    let mut pending_rx = agent.pending_rx.take().expect("pending_rx must be available at daemon start");
+    let mut pending_rx = agent
+        .pending_rx
+        .take()
+        .expect("pending_rx must be available at daemon start");
 
     // CR-07: create AgentHandle + inbound receiver BEFORE the select! loop.
     // Channels (Telegram, webhook) hold clones of `handle` and send messages into `inbound_rx`.
@@ -212,7 +216,7 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
         let owner_map = webhook_owner_map;
         // Phase 6: mesh connectivity — load peers from config, create broadcast channel for SSE.
         let (events_tx, _) = tokio::sync::broadcast::channel::<String>(128);
-        let peer_map_initial = bastion::config::load_mesh_peers(&cfg);
+        let peer_map_initial = bastion::config::load_mesh_peers(cfg);
         let mesh_peer_map = Arc::new(RwLock::new(peer_map_initial));
         // WR-01: APP_JWT_SECRET must be set — no insecure fallback.
         // serve_with_mesh will also fail-closed, but reading it here gives a clearer startup error.
@@ -234,7 +238,8 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
 
                 // MeshSliceProvider::new returns (provider, store); add_mesh_slice_provider
                 // constructs from the store — so we use from_store path via add_mesh_slice_provider.
-                let (_, store) = bastion::mesh::context_provider::MeshSliceProvider::new(local_owner.clone());
+                let (_, store) =
+                    bastion::mesh::context_provider::MeshSliceProvider::new(local_owner.clone());
                 agent.add_mesh_slice_provider(store.clone());
 
                 // Periodic mesh sync (mesh.sync_interval minutes, default 15; 0 = disable)
@@ -246,11 +251,17 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
                     local_owner,
                     sync_interval,
                 );
-                tracing::info!(event = "mesh_transport_enabled", sync_interval_minutes = sync_interval);
+                tracing::info!(
+                    event = "mesh_transport_enabled",
+                    sync_interval_minutes = sync_interval
+                );
 
                 (Some(shared), Some(store))
             } else {
-                tracing::info!(event = "mesh_transport_disabled", "MESH_IDENTITY_KEY not set — mesh disabled");
+                tracing::info!(
+                    event = "mesh_transport_disabled",
+                    "MESH_IDENTITY_KEY not set — mesh disabled"
+                );
                 (None, None)
             };
 
@@ -262,8 +273,18 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
         agent.set_otc_store(otc_store.clone());
         tokio::spawn(async move {
             if let Err(e) = bastion::channel::webhook::serve_with_mesh(
-                h, &addr, owner_map, events_tx, mesh_peer_map, jwt_secret, mesh_transport, mesh_slice_store, otc_store,
-            ).await {
+                h,
+                &addr,
+                owner_map,
+                events_tx,
+                mesh_peer_map,
+                jwt_secret,
+                mesh_transport,
+                mesh_slice_store,
+                otc_store,
+            )
+            .await
+            {
                 tracing::error!(event = "webhook_error", error = %e, "webhook channel terminated");
             }
         });
@@ -308,8 +329,12 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
             .filter(|t| !t.is_empty());
         let infer_addr =
             std::env::var("BASTION_INFER_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
-        let host = infer_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&infer_addr);
-        let is_loopback = host == "127.0.0.1" || host == "::1" || host == "[::1]" || host == "localhost";
+        let host = infer_addr
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(&infer_addr);
+        let is_loopback =
+            host == "127.0.0.1" || host == "::1" || host == "[::1]" || host == "localhost";
 
         if infer_token.is_none() && !is_loopback {
             tracing::error!(
@@ -325,8 +350,7 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
                     "/api/infer running without BASTION_INFER_TOKEN — loopback-only dev mode"
                 );
             }
-            let infer_router =
-                bastion::api::infer::router(agent.provider.clone(), infer_token);
+            let infer_router = bastion::api::infer::router(agent.provider.clone(), infer_token);
             tokio::spawn(async move {
                 match tokio::net::TcpListener::bind(&infer_addr).await {
                     Ok(listener) => {
@@ -351,7 +375,8 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
         let owner = bastion::agent::loop_::DEFAULT_OWNER.to_string();
         // Only spawn heartbeat if there are goals to nudge (fire-and-forget task)
         tokio::spawn(async move {
-            cron.run_heartbeat(std::time::Duration::from_secs(86_400), &owner).await;
+            cron.run_heartbeat(std::time::Duration::from_secs(86_400), &owner)
+                .await;
         });
     }
 
@@ -363,7 +388,7 @@ async fn daemon_loop(agent: &mut AgentLoop, cfg: &bastion::config::BastionConfig
     // with a small fixed set of owners (T-05-02-03 accepted risk).
     let mut session_locks: HashMap<String, Arc<Mutex<()>>> = HashMap::new();
 
-    let mut stdin   = BufReader::new(tokio::io::stdin()).lines();
+    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
     // In a detached container (`docker compose up -d`) stdin is closed and returns EOF
     // immediately. The daemon must keep running to serve channels (Telegram), so we track
     // whether stdin is still live and disable that select arm on EOF instead of exiting.

@@ -44,9 +44,9 @@ pub fn parse_soul(md: &str) -> anyhow::Result<(PersonaFront, String)> {
         .ok_or_else(|| anyhow::anyhow!("SOUL.md missing opening '---' front-matter delimiter"))?;
 
     // Split at the closing `\n---` to separate YAML front-matter from markdown body
-    let (front_yaml, prose) = body
-        .split_once("\n---")
-        .ok_or_else(|| anyhow::anyhow!("SOUL.md front-matter is unterminated (missing closing '---')"))?;
+    let (front_yaml, prose) = body.split_once("\n---").ok_or_else(|| {
+        anyhow::anyhow!("SOUL.md front-matter is unterminated (missing closing '---')")
+    })?;
 
     let front: PersonaFront = serde_norway::from_str(front_yaml)
         .map_err(|e| anyhow::anyhow!("failed to parse SOUL.md front-matter: {e}"))?;

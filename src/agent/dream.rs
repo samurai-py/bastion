@@ -1,5 +1,5 @@
-use crate::types::Message;
 use crate::memory::SharedMemory;
+use crate::types::Message;
 
 /// Dream extracts durable facts from idle session history.
 #[async_trait::async_trait]
@@ -37,24 +37,36 @@ impl Dream for HeuristicDream {
             // Extract text content
             let text = match &msg.content {
                 MessageContent::Text(t) => t.clone(),
-                MessageContent::Parts(parts) => {
-                    parts.iter().filter_map(|p| {
+                MessageContent::Parts(parts) => parts
+                    .iter()
+                    .filter_map(|p| {
                         if let crate::types::ContentPart::Text { text } = p {
                             Some(text.clone())
                         } else {
                             None
                         }
-                    }).collect::<Vec<_>>().join(" ")
-                }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
             };
 
             // Simple heuristic: user messages that look like factual self-disclosures.
             // Triggers on "I am", "I have", "I like", "I work", "I live", "meu", "eu sou", "eu tenho".
             let lower = text.to_lowercase();
             let triggers = [
-                "i am ", "i have ", "i like ", "i work ", "i live ",
-                "eu sou ", "eu tenho ", "eu gosto ", "eu trabalho ", "eu moro ",
-                "meu ", "minha ", "my ",
+                "i am ",
+                "i have ",
+                "i like ",
+                "i work ",
+                "i live ",
+                "eu sou ",
+                "eu tenho ",
+                "eu gosto ",
+                "eu trabalho ",
+                "eu moro ",
+                "meu ",
+                "minha ",
+                "my ",
             ];
             if triggers.iter().any(|t| lower.contains(t)) && text.len() > 10 {
                 facts.push(text.trim().to_string());
@@ -126,7 +138,9 @@ mod tests {
     async fn make_memory(db_path: &str) -> SharedMemory {
         let session = crate::session::SessionManager::new(db_path);
         session.init_schema().await.expect("init_schema");
-        Arc::new(RwLock::new(Box::new(SqliteMemory::new(db_path)) as Box<dyn Memory>))
+        Arc::new(RwLock::new(
+            Box::new(SqliteMemory::new(db_path)) as Box<dyn Memory>
+        ))
     }
 
     #[tokio::test]
@@ -143,10 +157,14 @@ mod tests {
         let messages = vec![
             user_msg("I am a software developer living in Brazil"),
             assistant_msg("That's great!"),
-            user_msg("what is the weather?"),  // no trigger → not extracted
+            user_msg("what is the weather?"), // no trigger → not extracted
         ];
         let facts = dream.extract_facts(&messages).await.expect("extract_facts");
-        assert_eq!(facts.len(), 1, "should extract exactly the self-disclosure message");
+        assert_eq!(
+            facts.len(),
+            1,
+            "should extract exactly the self-disclosure message"
+        );
         assert!(facts[0].contains("developer"), "fact: {}", facts[0]);
     }
 
@@ -160,7 +178,7 @@ mod tests {
             user_msg("I have a dog named Rex"),
             user_msg("Eu gosto de café pela manhã"),
             assistant_msg("Nice to know!"),
-            user_msg("what's the weather?"),  // no trigger
+            user_msg("what's the weather?"), // no trigger
         ];
 
         memory_flush(&messages, &mem, "_local").await;
@@ -170,11 +188,18 @@ mod tests {
             m.retrieve_tagged("_local", None).await.expect("retrieve")
         };
 
-        assert!(beliefs.len() >= 1, "at least 1 belief must be stored; got {}", beliefs.len());
+        assert!(
+            !beliefs.is_empty(),
+            "at least 1 belief must be stored; got {}",
+            beliefs.len()
+        );
         let contents: Vec<&str> = beliefs.iter().map(|b| b.content.as_str()).collect();
         assert!(
-            contents.iter().any(|c| c.contains("dog") || c.contains("Rex") || c.contains("café")),
-            "expected a belief about dog or café; got: {:?}", contents
+            contents
+                .iter()
+                .any(|c| c.contains("dog") || c.contains("Rex") || c.contains("café")),
+            "expected a belief about dog or café; got: {:?}",
+            contents
         );
     }
 }

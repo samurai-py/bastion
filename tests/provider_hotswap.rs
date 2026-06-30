@@ -1,29 +1,43 @@
 // Provider hot-swap correctness test (PROV-05, D-11/D-12)
 // Tests that /model command swaps provider and that session history is preserved.
 
+use bastion::provider::{Provider, SharedProvider};
+use bastion::types::{CallConfig, LlmResponse, Message, TokenUsage};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use bastion::provider::{Provider, SharedProvider};
-use bastion::types::{Message, Role, MessageContent, CallConfig, LlmResponse, TokenUsage};
 
-struct MockProvider { name_str: &'static str, call_count: Arc<std::sync::atomic::AtomicU32> }
+struct MockProvider {
+    name_str: &'static str,
+    call_count: Arc<std::sync::atomic::AtomicU32>,
+}
 
 #[async_trait::async_trait]
 impl Provider for MockProvider {
     async fn complete(&self, _msgs: &[Message], _cfg: &CallConfig) -> anyhow::Result<LlmResponse> {
-        self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(LlmResponse {
             text: format!("response from {}", self.name_str),
             tool_calls: None,
-            usage: TokenUsage { input_tokens: 10, output_tokens: 5, ..Default::default() },
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
         })
     }
     async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
         Ok("simple".into())
     }
-    fn context_limit(&self) -> usize { 200_000 }
-    fn model_name(&self) -> &str { self.name_str }
-    fn name(&self) -> &'static str { self.name_str }
+    fn context_limit(&self) -> usize {
+        200_000
+    }
+    fn model_name(&self) -> &str {
+        self.name_str
+    }
+    fn name(&self) -> &'static str {
+        self.name_str
+    }
 }
 
 #[tokio::test]
@@ -87,6 +101,6 @@ async fn provider_swap_write_lock_does_not_block_existing_read() {
     }
 
     let name_during_read = read_task.await.unwrap();
-    assert_eq!(name_during_read, "anthropic");  // read completed before write
-    assert_eq!(shared.read().await.name(), "openai");  // write applied after
+    assert_eq!(name_during_read, "anthropic"); // read completed before write
+    assert_eq!(shared.read().await.name(), "openai"); // write applied after
 }

@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use serde_json::Value;
-use async_trait::async_trait;
 use crate::capability::registry::{Capability, InvokeCtx};
+use async_trait::async_trait;
+use serde_json::Value;
+use std::sync::Arc;
 
 /// Wraps an MCP tool dispatch via McpClient.
 ///
@@ -18,9 +18,15 @@ pub struct McpToolAdapter {
 
 #[async_trait]
 impl Capability for McpToolAdapter {
-    fn name(&self) -> &str { &self.tool_name }
-    fn description(&self) -> &str { &self.description }
-    fn input_schema(&self) -> &Value { &self.schema }
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn input_schema(&self) -> &Value {
+        &self.schema
+    }
     async fn invoke(&self, args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
         // Delegate to McpClient — no business logic here (thin adapter).
         // call_tool_with_timeout looks up server_label via internal ToolRegistry.
@@ -40,9 +46,15 @@ pub struct DirectFnAdapter {
 
 #[async_trait]
 impl Capability for DirectFnAdapter {
-    fn name(&self) -> &str { &self.cap_name }
-    fn description(&self) -> &str { &self.cap_description }
-    fn input_schema(&self) -> &Value { &self.schema }
+    fn name(&self) -> &str {
+        &self.cap_name
+    }
+    fn description(&self) -> &str {
+        &self.cap_description
+    }
+    fn input_schema(&self) -> &Value {
+        &self.schema
+    }
     async fn invoke(&self, args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
         (self.func)(args)
     }
@@ -70,7 +82,11 @@ pub struct NlCommandAdapter {
 
 impl NlCommandAdapter {
     /// Construct adapter with bare name (e.g. "model") — prefix added automatically.
-    pub fn new(bare_name: impl Into<String>, description: impl Into<String>, schema: Value) -> Self {
+    pub fn new(
+        bare_name: impl Into<String>,
+        description: impl Into<String>,
+        schema: Value,
+    ) -> Self {
         let bare: String = bare_name.into();
         Self {
             command_name: Self::registry_key(&bare),
@@ -88,12 +104,20 @@ impl NlCommandAdapter {
 #[async_trait]
 impl Capability for NlCommandAdapter {
     /// Returns "cmd:{command_name}" — the reserved registry-key convention.
-    fn name(&self) -> &str { &self.command_name }
-    fn description(&self) -> &str { &self.cap_description }
-    fn input_schema(&self) -> &Value { &self.schema }
+    fn name(&self) -> &str {
+        &self.command_name
+    }
+    fn description(&self) -> &str {
+        &self.cap_description
+    }
+    fn input_schema(&self) -> &Value {
+        &self.schema
+    }
     /// NL commands execute locally via handle_command — they never send data to a cloud
     /// provider, so they are the only adapter type that opts into the local egress path.
-    fn is_local(&self) -> bool { true }
+    fn is_local(&self) -> bool {
+        true
+    }
     async fn invoke(&self, _args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
         // NL commands are dispatched via existing handle_command in src/agent/command.rs.
         // This adapter is a thin shim for registry routing — actual execution happens in AgentLoop.

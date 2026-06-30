@@ -7,6 +7,12 @@ edition = "2021"
 name = "bastion"
 path = "src/main.rs"
 
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
 [dependencies]
 tokio              = { version = "1",    features = ["full"] }
 async-openai       = { version = "0.38", features = ["chat-completion"] }

@@ -11,8 +11,8 @@
 
 pub mod egress;
 pub mod guardrails;
-pub mod output_validator;
 pub mod observer;
+pub mod output_validator;
 
 /// Intercepts provider calls before and after execution.
 ///

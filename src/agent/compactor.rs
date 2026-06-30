@@ -1,6 +1,6 @@
-use crate::types::{Message, Role, MessageContent, ContentPart};
 use crate::provider::Provider;
 use crate::session::SessionManager;
+use crate::types::{ContentPart, Message, MessageContent, Role};
 
 pub struct AutoCompact {
     /// Token ratio threshold to trigger compaction. Default: 0.80 (D-08).
@@ -11,7 +11,10 @@ pub struct AutoCompact {
 
 impl Default for AutoCompact {
     fn default() -> Self {
-        Self { threshold: 0.80, keep_last: 20 }
+        Self {
+            threshold: 0.80,
+            keep_last: 20,
+        }
     }
 }
 
@@ -31,17 +34,23 @@ impl AutoCompact {
 
     /// Estimate token count from message content (fallback when no API usage data yet).
     pub fn estimate_tokens(messages: &[Message]) -> u32 {
-        messages.iter().map(|m| {
-            match &m.content {
-                MessageContent::Text(t) => (t.len() / 4) as u32,
-                MessageContent::Parts(parts) => {
-                    parts.iter().map(|p| match p {
-                        ContentPart::Text { text } => (text.len() / 4) as u32,
-                        _ => 50u32, // rough estimate for tool blocks
-                    }).sum()
+        messages
+            .iter()
+            .map(|m| {
+                match &m.content {
+                    MessageContent::Text(t) => (t.len() / 4) as u32,
+                    MessageContent::Parts(parts) => {
+                        parts
+                            .iter()
+                            .map(|p| match p {
+                                ContentPart::Text { text } => (text.len() / 4) as u32,
+                                _ => 50u32, // rough estimate for tool blocks
+                            })
+                            .sum()
+                    }
                 }
-            }
-        }).sum()
+            })
+            .sum()
     }
 
     /// Compact: keep system prompt + last N messages verbatim + rolling LLM summary of older messages.
@@ -63,27 +72,39 @@ impl AutoCompact {
         let recent = &messages[split_at..];
 
         // Build summarization prompt from older messages
-        let history_text: String = older.iter().map(|m| {
-            let role_str = m.role.to_string();
-            let content_str = match &m.content {
-                MessageContent::Text(t) => t.clone(),
-                MessageContent::Parts(_) => "[structured content]".to_owned(),
-            };
-            format!("[{}]: {}", role_str, content_str)
-        }).collect::<Vec<_>>().join("\n");
+        let history_text: String = older
+            .iter()
+            .map(|m| {
+                let role_str = m.role.to_string();
+                let content_str = match &m.content {
+                    MessageContent::Text(t) => t.clone(),
+                    MessageContent::Parts(_) => "[structured content]".to_owned(),
+                };
+                format!("[{}]: {}", role_str, content_str)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let summary_prompt = format!(
             "Summarize the following conversation history concisely, preserving key decisions, facts, and context needed for continuity:\n\n{}",
             history_text
         );
 
-        let summary = provider.complete_simple(&summary_prompt).await
+        let summary = provider
+            .complete_simple(&summary_prompt)
+            .await
             .map_err(|e| anyhow::anyhow!("AutoCompact summary failed: {}", e))?;
 
-        tracing::info!(event = "autocompact_fired", older_count = older.len(), recent_count = recent.len());
+        tracing::info!(
+            event = "autocompact_fired",
+            older_count = older.len(),
+            recent_count = recent.len()
+        );
 
         // Replace session history with summary sentinel + recent messages
-        session.replace_with_summary(session_id, summary.clone(), recent).await?;
+        session
+            .replace_with_summary(session_id, summary.clone(), recent)
+            .await?;
 
         // Return new in-memory history for the current turn
         let mut compacted = vec![Message {

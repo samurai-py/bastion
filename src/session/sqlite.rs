@@ -1,4 +1,4 @@
-use crate::types::{Message, MessageContent, Role, BastionError};
+use crate::types::{BastionError, Message, MessageContent, Role};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Open a SQLite connection with WAL mode and a 5-second busy timeout.
@@ -17,14 +17,17 @@ pub struct SessionManager {
 
 impl SessionManager {
     pub fn new(db_path: impl Into<String>) -> Self {
-        Self { db_path: db_path.into() }
+        Self {
+            db_path: db_path.into(),
+        }
     }
 
     pub async fn init_schema(&self) -> anyhow::Result<()> {
         let path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&path)?;
-            conn.execute_batch("
+            conn.execute_batch(
+                "
                 PRAGMA journal_mode=WAL;
                 PRAGMA busy_timeout=5000;
 
@@ -85,7 +88,8 @@ impl SessionManager {
                     last_confirmed   INTEGER,
                     created_at       INTEGER NOT NULL
                 );
-            ")?;
+            ",
+            )?;
             // Additive migration for pre-existing single-user DBs (idempotent —
             // errors with "duplicate column" on fresh DBs where CREATE already added it).
             let _ = conn.execute(
@@ -97,7 +101,8 @@ impl SessionManager {
             // Ignores "duplicate column name" error on DBs that already have this column (safe re-run).
             let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN privacy_tier TEXT", []);
             Ok::<_, anyhow::Error>(())
-        }).await?
+        })
+        .await?
     }
 
     /// Create a session owned by the default single-user identity.
@@ -130,16 +135,16 @@ impl SessionManager {
         let path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&path)?;
-            let mut stmt = conn.prepare(
-                "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1"
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1")?;
             let mut rows = stmt.query([])?;
             if let Some(row) = rows.next()? {
                 Ok::<_, anyhow::Error>(Some(row.get::<_, String>(0)?))
             } else {
                 Ok(None)
             }
-        }).await?
+        })
+        .await?
     }
 
     /// Owner-scoped session lookup — returns the most recent session for `owner_id`.
@@ -151,7 +156,7 @@ impl SessionManager {
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
-                "SELECT id FROM sessions WHERE owner_id = ?1 ORDER BY updated_at DESC LIMIT 1"
+                "SELECT id FROM sessions WHERE owner_id = ?1 ORDER BY updated_at DESC LIMIT 1",
             )?;
             let mut rows = stmt.query(rusqlite::params![owner])?;
             if let Some(row) = rows.next()? {
@@ -159,7 +164,8 @@ impl SessionManager {
             } else {
                 Ok(None)
             }
-        }).await?
+        })
+        .await?
     }
 
     pub async fn load_recent(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
@@ -168,7 +174,7 @@ impl SessionManager {
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&path)?;
             let mut stmt = conn.prepare(
-                "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY created_at ASC"
+                "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
             )?;
             let messages: Vec<Message> = stmt
                 .query_map(rusqlite::params![sid], |row| {
@@ -185,7 +191,8 @@ impl SessionManager {
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             Ok::<_, anyhow::Error>(messages)
-        }).await?
+        })
+        .await?
     }
 
     pub async fn append(
@@ -294,7 +301,8 @@ impl SessionManager {
                 rusqlite::params![today, cost_usd],
             )?;
             Ok::<_, anyhow::Error>(())
-        }).await?
+        })
+        .await?
     }
 
     pub async fn check_budget(&self, daily_limit: f64) -> anyhow::Result<bool> {
@@ -302,9 +310,7 @@ impl SessionManager {
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&path)?;
             let today = today_utc();
-            let mut stmt = conn.prepare(
-                "SELECT total_usd FROM budget WHERE date = ?1"
-            )?;
+            let mut stmt = conn.prepare("SELECT total_usd FROM budget WHERE date = ?1")?;
             let mut rows = stmt.query(rusqlite::params![today])?;
             if let Some(row) = rows.next()? {
                 let total: f64 = row.get(0)?;
@@ -312,7 +318,8 @@ impl SessionManager {
             } else {
                 Ok(true) // no spend today
             }
-        }).await?
+        })
+        .await?
     }
 }
 
@@ -352,7 +359,16 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let month_days: [u64; 12] = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let mut month = 1u64;
     for &md in &month_days {
@@ -366,5 +382,5 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }

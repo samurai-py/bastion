@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 
-use crate::mesh::{MeshPeerMap, SelectiveSlice, SharedMeshTransport};
-use crate::mesh::allowlist::{filter_for_mesh, OwnerAllowlist};
 use crate::memory::SharedMemory;
+use crate::mesh::allowlist::{filter_for_mesh, OwnerAllowlist};
+use crate::mesh::{MeshPeerMap, SelectiveSlice, SharedMeshTransport};
 
 /// Spawn a background task that syncs mesh slices to all registered peers
 /// every `sync_interval_minutes` minutes.
@@ -34,7 +34,10 @@ pub fn spawn_mesh_sync_job(
     sync_interval_minutes: u64,
 ) -> tokio::task::JoinHandle<()> {
     if sync_interval_minutes == 0 {
-        tracing::info!(event = "mesh_sync_job_disabled", "periodic mesh sync disabled (sync_interval=0)");
+        tracing::info!(
+            event = "mesh_sync_job_disabled",
+            "periodic mesh sync disabled (sync_interval=0)"
+        );
         return tokio::spawn(async {});
     }
 
@@ -51,13 +54,17 @@ pub fn spawn_mesh_sync_job(
                 map.all_peer_owner_ids()
                     .into_iter()
                     .filter_map(|owner_id| {
-                        map.resolve(&owner_id).map(|p| (owner_id, p.allowed_tags.clone()))
+                        map.resolve(&owner_id)
+                            .map(|p| (owner_id, p.allowed_tags.clone()))
                     })
                     .collect()
             };
 
             if peer_list.is_empty() {
-                tracing::debug!(event = "mesh_sync_tick_no_peers", "no peers registered, skipping");
+                tracing::debug!(
+                    event = "mesh_sync_tick_no_peers",
+                    "no peers registered, skipping"
+                );
                 continue;
             }
 
@@ -65,25 +72,28 @@ pub fn spawn_mesh_sync_job(
 
             for (peer_owner, allowed_tags) in &peer_list {
                 // Build filtered slice for this peer (filter_for_mesh applies allowlist + CloudOk gate)
-                let slice = match build_filtered_slice(&memory, &local_owner, peer_owner, allowed_tags).await {
-                    Ok(s) if !s.beliefs.is_empty() => s,
-                    Ok(_) => {
-                        tracing::debug!(
-                            event = "mesh_sync_tick_empty_slice",
-                            peer = %peer_owner,
-                            "no shareable beliefs for peer — skipping"
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            event = "mesh_sync_tick_slice_error",
-                            peer = %peer_owner,
-                            error = %e
-                        );
-                        continue;
-                    }
-                };
+                let slice =
+                    match build_filtered_slice(&memory, &local_owner, peer_owner, allowed_tags)
+                        .await
+                    {
+                        Ok(s) if !s.beliefs.is_empty() => s,
+                        Ok(_) => {
+                            tracing::debug!(
+                                event = "mesh_sync_tick_empty_slice",
+                                peer = %peer_owner,
+                                "no shareable beliefs for peer — skipping"
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "mesh_sync_tick_slice_error",
+                                peer = %peer_owner,
+                                error = %e
+                            );
+                            continue;
+                        }
+                    };
 
                 if let Err(e) = transport.send(slice, peer_owner).await {
                     // Non-fatal: log and continue to next peer (one peer failure doesn't block others)

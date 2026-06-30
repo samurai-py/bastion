@@ -33,6 +33,9 @@ pub struct Belief {
 #[async_trait]
 pub trait Memory: Send + Sync {
     /// Store a belief and one provenance row; returns the new belief id.
+    // A belief + its provenance is 8 flat fields; bundling them into a struct here
+    // would force every impl and caller through a one-use wrapper for no gain.
+    #[allow(clippy::too_many_arguments)]
     async fn store_belief(
         &self,
         owner_id: &str,

@@ -18,7 +18,7 @@ use crate::cabinet::{CabinetTable, Turn, TurnKind};
 use crate::hooks::egress::check_egress;
 use crate::persona::runner::PersonaId;
 use crate::provider::SharedProvider;
-use crate::types::{CallConfig, Message, Role, MessageContent};
+use crate::types::{CallConfig, Message, MessageContent, Role};
 
 pub const DEFAULT_ROUNDS: u8 = 2;
 pub const MAX_ROUNDS: u8 = 3;
@@ -104,8 +104,7 @@ pub async fn deliberate(
                 // Acquire read lock INSIDE the task (loop_.rs:118-125 pattern).
                 let result = {
                     let guard = provider_clone.read().await;
-                    guard.complete(&history, &config).await
-                        .map(|r| r.text)
+                    guard.complete(&history, &config).await.map(|r| r.text)
                 };
 
                 // Tag by RETURNED PersonaId — never by spawn order (CF-3 / Pitfall 4).
@@ -171,7 +170,9 @@ fn build_turn_prompt(
     kind: TurnKind,
 ) -> String {
     let header = if kind == TurnKind::Position {
-        format!("You are {persona_id}. Provide your position on the matter below.\n\n{system_prompt}")
+        format!(
+            "You are {persona_id}. Provide your position on the matter below.\n\n{system_prompt}"
+        )
     } else {
         let prior = transcript
             .iter()
@@ -208,23 +209,29 @@ mod tests {
 
     #[async_trait]
     impl Provider for EchoProvider {
-        async fn complete(&self, _: &[Message], config: &CallConfig) -> anyhow::Result<LlmResponse> {
+        async fn complete(
+            &self,
+            _: &[Message],
+            config: &CallConfig,
+        ) -> anyhow::Result<LlmResponse> {
             // Extract the persona name from "You are <Name>." in system_prompt.
             // The system_prompt may have trailing content, so find the first token after "You are ".
-            let name = config.system_prompt
+            let name = config
+                .system_prompt
                 .lines()
                 .find(|l| l.starts_with("You are "))
                 .and_then(|l| l.strip_prefix("You are "))
-                .map(|s| {
-                    s.split(|c: char| c == '.' || c == ' ')
-                        .next()
-                        .unwrap_or("unknown")
-                })
+                .map(|s| s.split(['.', ' ']).next().unwrap_or("unknown"))
                 .unwrap_or("unknown");
             Ok(LlmResponse {
                 text: format!("response-from:{name}"),
                 tool_calls: None,
-                usage: TokenUsage { input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0 },
+                usage: TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read: 0,
+                    cache_write: 0,
+                },
             })
         }
         async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {
@@ -233,17 +240,19 @@ mod tests {
                 .lines()
                 .find(|l| l.starts_with("You are "))
                 .and_then(|l| l.strip_prefix("You are "))
-                .map(|s| {
-                    s.split(|c: char| c == '.' || c == ' ')
-                        .next()
-                        .unwrap_or("unknown")
-                })
+                .map(|s| s.split(['.', ' ']).next().unwrap_or("unknown"))
                 .unwrap_or("unknown");
             Ok(format!("response-from:{name}"))
         }
-        fn context_limit(&self) -> usize { 8192 }
-        fn model_name(&self) -> &str { "echo" }
-        fn name(&self) -> &'static str { "mock" }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "echo"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
     }
 
     fn make_provider() -> SharedProvider {
@@ -281,7 +290,9 @@ mod tests {
         let provider = make_provider();
 
         // Request 99 rounds — must be clamped to MAX_ROUNDS=3
-        let transcript = deliberate(&table, provider, 99, &make_registry()).await.unwrap();
+        let transcript = deliberate(&table, provider, 99, &make_registry())
+            .await
+            .unwrap();
 
         // Each round produces 3 turns (one per persona), and rounds are clamped to 3
         let max_turns = usize::from(MAX_ROUNDS) * table.personas.len();
@@ -305,7 +316,9 @@ mod tests {
         let provider = make_provider();
 
         // 1 round = only position turns (easier to check attribution)
-        let transcript = deliberate(&table, provider, 1, &make_registry()).await.unwrap();
+        let transcript = deliberate(&table, provider, 1, &make_registry())
+            .await
+            .unwrap();
 
         assert_eq!(transcript.len(), 3, "expected 3 position turns");
 
@@ -314,9 +327,11 @@ mod tests {
             // The persona field (PersonaId) must match the name echoed in the text.
             // This proves attribution is by returned PersonaId — not spawn order (CF-3).
             assert!(
-                turn.text.starts_with(&format!("response-from:{}", turn.persona)),
+                turn.text
+                    .starts_with(&format!("response-from:{}", turn.persona)),
                 "attribution mismatch: persona={} text={}",
-                turn.persona, turn.text
+                turn.persona,
+                turn.text
             );
         }
     }
@@ -329,7 +344,9 @@ mod tests {
         ]);
         let provider = make_provider();
 
-        let transcript = deliberate(&table, provider, 1, &make_registry()).await.unwrap();
+        let transcript = deliberate(&table, provider, 1, &make_registry())
+            .await
+            .unwrap();
         for turn in &transcript {
             assert_eq!(turn.kind, TurnKind::Position);
         }
@@ -343,11 +360,19 @@ mod tests {
         ]);
         let provider = make_provider();
 
-        let transcript = deliberate(&table, provider, 2, &make_registry()).await.unwrap();
+        let transcript = deliberate(&table, provider, 2, &make_registry())
+            .await
+            .unwrap();
 
         // First 2 turns: Position; next 2: Reply
-        let positions: Vec<_> = transcript.iter().filter(|t| t.kind == TurnKind::Position).collect();
-        let replies: Vec<_> = transcript.iter().filter(|t| t.kind == TurnKind::Reply).collect();
+        let positions: Vec<_> = transcript
+            .iter()
+            .filter(|t| t.kind == TurnKind::Position)
+            .collect();
+        let replies: Vec<_> = transcript
+            .iter()
+            .filter(|t| t.kind == TurnKind::Reply)
+            .collect();
         assert_eq!(positions.len(), 2);
         assert_eq!(replies.len(), 2);
     }
@@ -364,7 +389,9 @@ mod tests {
         let provider = make_provider(); // name() == "mock"
 
         // All turns should be skipped (egress blocked) — empty transcript.
-        let transcript = deliberate(&table, provider, 1, &make_registry()).await.unwrap();
+        let transcript = deliberate(&table, provider, 1, &make_registry())
+            .await
+            .unwrap();
         assert!(
             transcript.is_empty(),
             "expected empty transcript when egress blocks all calls, got {} turns",

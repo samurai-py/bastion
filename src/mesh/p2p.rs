@@ -7,12 +7,16 @@
 //! - CR-06: receive() asserts envelope.to_owner == self.local_owner (cross-owner injection prevention).
 //! - SEC-02: reqwest client built with redirect::Policy::none() (open-redirect SSRF prevention).
 
+use anyhow::Context;
+use opentelemetry::{
+    global as otel_global,
+    trace::{Span as _, SpanKind, Tracer as _},
+    KeyValue,
+};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use opentelemetry::{global as otel_global, trace::{Tracer as _, Span as _, SpanKind}, KeyValue};
-use anyhow::Context;
 
-use crate::mesh::{MeshTransport, MeshEnvelope, SelectiveSlice, MeshPeerMap};
+use crate::mesh::{MeshEnvelope, MeshPeerMap, MeshTransport, SelectiveSlice};
 
 pub struct P2PTransport {
     /// Local age identity private key (bech32 string). Loaded from env MESH_IDENTITY_KEY.
@@ -57,8 +61,9 @@ impl MeshTransport for P2PTransport {
     /// This impl does NOT re-filter — it trusts the caller to have done so.
     async fn send(&self, slice: SelectiveSlice, to_owner: &str) -> anyhow::Result<()> {
         let peers = self.peers.read().await;
-        let peer = peers.resolve(to_owner)
-            .ok_or_else(|| anyhow::anyhow!("mesh peer '{}' not registered in MeshPeerMap", to_owner))?;
+        let peer = peers.resolve(to_owner).ok_or_else(|| {
+            anyhow::anyhow!("mesh peer '{}' not registered in MeshPeerMap", to_owner)
+        })?;
 
         // Collect tags for OTel event
         let tags: Vec<String> = {
@@ -73,11 +78,12 @@ impl MeshTransport for P2PTransport {
         let belief_count = slice.beliefs.len();
 
         // Serialize SelectiveSlice to bytes
-        let plaintext = serde_json::to_vec(&slice)
-            .context("failed to serialize SelectiveSlice")?;
+        let plaintext = serde_json::to_vec(&slice).context("failed to serialize SelectiveSlice")?;
 
         // age encrypt with peer's public key — simple API: encrypt(&pubkey, plaintext)
-        let recipient: age::x25519::Recipient = peer.age_pubkey.parse()
+        let recipient: age::x25519::Recipient = peer
+            .age_pubkey
+            .parse()
             .map_err(|_| anyhow::anyhow!("invalid age public key for peer '{}'", to_owner))?;
         let peer_url = peer.peer_url.clone();
         let peer_age_pubkey = peer.age_pubkey.clone();
@@ -110,7 +116,8 @@ impl MeshTransport for P2PTransport {
             .start(&tracer);
 
         // POST to peer /mesh/ingest
-        let resp = self.http
+        let resp = self
+            .http
             .post(&url)
             .json(&envelope)
             .send()
@@ -131,7 +138,8 @@ impl MeshTransport for P2PTransport {
             "from_owner": &self.local_owner,
             "to_owner": to_owner,
             "tags": tags,
-        }).to_string();
+        })
+        .to_string();
         let _ = self.events_tx.send(event_json);
 
         Ok(())
@@ -139,7 +147,9 @@ impl MeshTransport for P2PTransport {
 
     async fn receive(&self, envelope: MeshEnvelope) -> anyhow::Result<SelectiveSlice> {
         // age decrypt with local identity — simple API: decrypt(&identity, &ciphertext)
-        let identity: age::x25519::Identity = self.local_identity_key.parse()
+        let identity: age::x25519::Identity = self
+            .local_identity_key
+            .parse()
             .map_err(|_| anyhow::anyhow!("invalid local age identity key"))?;
 
         let plaintext = age::decrypt(&identity, &envelope.ciphertext)
@@ -153,7 +163,8 @@ impl MeshTransport for P2PTransport {
         if envelope.from_owner != slice.from_owner {
             anyhow::bail!(
                 "from_owner mismatch: envelope claims '{}', payload contains '{}' — rejecting",
-                envelope.from_owner, slice.from_owner
+                envelope.from_owner,
+                slice.from_owner
             );
         }
 
@@ -170,7 +181,10 @@ impl MeshTransport for P2PTransport {
         // Verify sender is a registered peer (Pitfall 2 — unregistered peer rejection)
         let peers = self.peers.read().await;
         if peers.resolve(&slice.from_owner).is_none() {
-            anyhow::bail!("received mesh envelope from unregistered peer '{}'", slice.from_owner);
+            anyhow::bail!(
+                "received mesh envelope from unregistered peer '{}'",
+                slice.from_owner
+            );
         }
 
         tracing::info!(
@@ -202,23 +216,19 @@ mod tests {
 
         let (tx, _) = broadcast::channel(1);
         let peers = Arc::new(RwLock::new(MeshPeerMap::new()));
-        let transport = P2PTransport::new(
-            "local-owner".to_string(),
-            identity_str,
-            peers,
-            tx,
-        );
+        let transport = P2PTransport::new("local-owner".to_string(), identity_str, peers, tx);
 
         // Build a plaintext SelectiveSlice from "remote-owner"
         let plaintext = serde_json::to_vec(&crate::mesh::SelectiveSlice {
             from_owner: "remote-owner".to_string(),
             beliefs: vec![],
-        }).unwrap();
+        })
+        .unwrap();
 
         // Encrypt with local node's public key so decrypt succeeds (tests the to_owner check, not decrypt)
         let recipient = identity.to_public();
-        let ciphertext = age::encrypt(&recipient, &plaintext)
-            .expect("age encrypt must succeed in test");
+        let ciphertext =
+            age::encrypt(&recipient, &plaintext).expect("age encrypt must succeed in test");
 
         // Construct envelope addressed to a DIFFERENT owner — NOT "local-owner"
         let envelope = MeshEnvelope {
@@ -229,7 +239,10 @@ mod tests {
         };
 
         let result = transport.receive(envelope).await;
-        assert!(result.is_err(), "receive() must reject envelope addressed to wrong owner");
+        assert!(
+            result.is_err(),
+            "receive() must reject envelope addressed to wrong owner"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("to_owner") || err_msg.contains("wrong owner"),

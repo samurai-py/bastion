@@ -10,8 +10,8 @@
 //! D-08: the full debate transcript is opt-in (exposed via `/cabinet`); this function
 //! only returns the synthesized verdict, not the raw transcript.
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::cabinet::Turn;
 use crate::provider::Provider;
@@ -123,7 +123,14 @@ fn build_transcript_text(transcript: &[Turn]) -> String {
     }
     transcript
         .iter()
-        .map(|t| format!("[{}] ({}): {}", t.persona, format!("{:?}", t.kind).to_lowercase(), t.text))
+        .map(|t| {
+            format!(
+                "[{}] ({}): {}",
+                t.persona,
+                format!("{:?}", t.kind).to_lowercase(),
+                t.text
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -134,9 +141,7 @@ fn build_transcript_text(transcript: &[Turn]) -> String {
 /// `dissents` contains each participant's stance so nothing is dropped (CF-3).
 fn raw_positions_fallback(transcript: &[Turn]) -> CabinetVerdict {
     let raw_text = build_transcript_text(transcript);
-    let recommendation = format!(
-        "Could not synthesize — raw positions follow:\n{raw_text}"
-    );
+    let recommendation = format!("Could not synthesize — raw positions follow:\n{raw_text}");
 
     // Each unique persona gets a dissent entry with their last-seen turn as position.
     // This ensures the caller sees ALL stances, not a fabricated consensus.
@@ -149,7 +154,10 @@ fn raw_positions_fallback(transcript: &[Turn]) -> CabinetVerdict {
         .map(|(persona, position)| Dissent { persona, position })
         .collect();
 
-    CabinetVerdict { recommendation, dissents }
+    CabinetVerdict {
+        recommendation,
+        dissents,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -189,9 +197,15 @@ mod tests {
         async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
             unimplemented!()
         }
-        fn context_limit(&self) -> usize { 8192 }
-        fn model_name(&self) -> &str { "mock" }
-        fn name(&self) -> &'static str { "mock" }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
 
         async fn complete_structured(
             &self,
@@ -240,7 +254,10 @@ mod tests {
 
         let verdict = synthesize(&provider, &transcript).await.unwrap();
 
-        assert!(!verdict.dissents.is_empty(), "dissents must be non-empty for divergent transcript");
+        assert!(
+            !verdict.dissents.is_empty(),
+            "dissents must be non-empty for divergent transcript"
+        );
         assert_eq!(verdict.dissents[0].persona, "Finance");
     }
 
@@ -259,9 +276,16 @@ mod tests {
             verdict.recommendation
         );
         // Dissents must list all participants (CF-3 — nothing dropped)
-        let persona_names: Vec<&str> = verdict.dissents.iter().map(|d| d.persona.as_str()).collect();
+        let persona_names: Vec<&str> = verdict
+            .dissents
+            .iter()
+            .map(|d| d.persona.as_str())
+            .collect();
         assert!(persona_names.contains(&"Aria"), "Aria must be in dissents");
-        assert!(persona_names.contains(&"Finance"), "Finance must be in dissents");
+        assert!(
+            persona_names.contains(&"Finance"),
+            "Finance must be in dissents"
+        );
     }
 
     #[tokio::test]
@@ -284,7 +308,10 @@ mod tests {
         let provider = ScriptedProvider::sequence(&["garbage", "garbage", "garbage"]);
         let verdict = synthesize(&provider, &[]).await.unwrap();
         // No panic, recommendation mentions raw positions
-        assert!(verdict.recommendation.contains("raw positions") || verdict.recommendation.contains("No transcript"));
+        assert!(
+            verdict.recommendation.contains("raw positions")
+                || verdict.recommendation.contains("No transcript")
+        );
     }
 
     #[test]
@@ -305,6 +332,9 @@ mod tests {
         let prompt_en = build_synthesis_prompt("en-US");
         assert!(prompt_ptbr.contains("pt-BR"), "pt-BR must appear in prompt");
         assert!(prompt_en.contains("en-US"), "en-US must appear in prompt");
-        assert_ne!(prompt_ptbr, prompt_en, "prompts for different languages must differ");
+        assert_ne!(
+            prompt_ptbr, prompt_en,
+            "prompts for different languages must differ"
+        );
     }
 }

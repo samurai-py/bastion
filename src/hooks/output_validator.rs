@@ -52,7 +52,9 @@ const CONTESTATION_PHRASES: &[&str] = &[
 /// are also included in [`CONTESTATION_PHRASES`] so ASCII-normalised input matches.
 pub fn detect_contestation(text: &str) -> bool {
     let lower = text.to_lowercase();
-    CONTESTATION_PHRASES.iter().any(|&phrase| lower.contains(phrase))
+    CONTESTATION_PHRASES
+        .iter()
+        .any(|&phrase| lower.contains(phrase))
 }
 
 /// Output-validator: scans user input for contestation intent and soft-revokes
@@ -101,7 +103,8 @@ impl OutputValidator {
 
         // Find the best-matching belief (highest overlap, tiebreak by most-recent id).
         let best = beliefs.iter().max_by_key(|b| {
-            let belief_words: std::collections::HashSet<&str> = b.content
+            let belief_words: std::collections::HashSet<&str> = b
+                .content
                 .split_whitespace()
                 .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
                 .filter(|w| w.len() >= 3)
@@ -112,7 +115,8 @@ impl OutputValidator {
 
         if let Some(belief) = best {
             // Only revoke if there is at least one overlapping keyword.
-            let belief_words: std::collections::HashSet<&str> = belief.content
+            let belief_words: std::collections::HashSet<&str> = belief
+                .content
                 .split_whitespace()
                 .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
                 .filter(|w| w.len() >= 3)
@@ -136,7 +140,9 @@ mod tests {
 
     #[test]
     fn detects_pt_br_contestation() {
-        assert!(detect_contestation("isso não é mais verdade sobre exercício"));
+        assert!(detect_contestation(
+            "isso não é mais verdade sobre exercício"
+        ));
         assert!(detect_contestation("Você está errado sobre isso"));
         assert!(detect_contestation("não é verdade"));
         assert!(detect_contestation("Isso está errado"));
@@ -188,15 +194,25 @@ mod tests {
         // Store a belief about exercising
         let _id = {
             let m = mem.read().await;
-            m.store_belief(owner, None, "Mario exercises every morning", "sess1", "user", false, None)
-                .await
-                .expect("store_belief")
+            m.store_belief(
+                owner,
+                None,
+                "Mario exercises every morning",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store_belief")
         };
 
         // Verify it is retrieved before contestation
         let before = {
             let m = mem.read().await;
-            m.retrieve_tagged(owner, None).await.expect("retrieve before")
+            m.retrieve_tagged(owner, None)
+                .await
+                .expect("retrieve before")
         };
         assert_eq!(before.len(), 1, "belief should exist before contestation");
 
@@ -214,7 +230,9 @@ mod tests {
         // After contestation: belief should be revoked (excluded from retrieve_tagged)
         let after = {
             let m = mem.read().await;
-            m.retrieve_tagged(owner, None).await.expect("retrieve after")
+            m.retrieve_tagged(owner, None)
+                .await
+                .expect("retrieve after")
         };
         assert!(
             after.is_empty(),
@@ -240,9 +258,17 @@ mod tests {
 
         {
             let m = mem.read().await;
-            m.store_belief(owner, None, "Mario likes coffee", "sess1", "user", false, None)
-                .await
-                .expect("store");
+            m.store_belief(
+                owner,
+                None,
+                "Mario likes coffee",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store");
         }
 
         let validator = OutputValidator;
@@ -255,6 +281,10 @@ mod tests {
             let m = mem.read().await;
             m.retrieve_tagged(owner, None).await.expect("retrieve")
         };
-        assert_eq!(beliefs.len(), 1, "belief must remain intact when no contestation");
+        assert_eq!(
+            beliefs.len(),
+            1,
+            "belief must remain intact when no contestation"
+        );
     }
 }

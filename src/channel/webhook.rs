@@ -54,7 +54,15 @@ impl Channel for WebhookChannel {
             );
             anyhow::anyhow!("APP_JWT_SECRET must be set; refusing to start with hardcoded default")
         })?;
-        serve(agent, &self.addr, self.owner_map, events_tx, mesh_peer_map, jwt_secret).await
+        serve(
+            agent,
+            &self.addr,
+            self.owner_map,
+            events_tx,
+            mesh_peer_map,
+            jwt_secret,
+        )
+        .await
     }
 
     fn default_persona(&self) -> Option<&str> {
@@ -67,7 +75,10 @@ impl Channel for WebhookChannel {
 use axum::{
     extract::State,
     http::HeaderMap,
-    response::{IntoResponse, sse::{Event, Sse, KeepAlive}},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::post,
     Json, Router,
 };
@@ -155,12 +166,14 @@ pub fn error_status(e: &anyhow::Error) -> StatusCode {
 ///   1. Try JWT decode (HS256, signed with jwt_secret) → use sub claim as owner_id (CR-01).
 ///   2. Fall back to static owner_map lookup (pre-existing CLI/API tokens, backward compat).
 ///   3. Reject with 401 if both fail.
+// Err is boxed: clippy::result_large_err — axum::response::Response is 128+ bytes,
+// and the Ok path (a plain owner String) is the common case.
 fn resolve_owner_or_401(
     headers: &HeaderMap,
     owner_map: &OwnerMap,
     jwt_secret: &str,
     event_name: &'static str,
-) -> Result<String, axum::response::Response> {
+) -> Result<String, Box<axum::response::Response>> {
     let token = headers
         .get("x-bastion-token")
         .and_then(|v| v.to_str().ok())
@@ -181,7 +194,9 @@ fn resolve_owner_or_401(
         Some(o) => Ok(o.to_owned()),
         None => {
             tracing::warn!(event = event_name, "unknown or missing x-bastion-token");
-            Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({}))).into_response())
+            Err(Box::new(
+                (StatusCode::UNAUTHORIZED, Json(serde_json::json!({}))).into_response(),
+            ))
         }
     }
 }
@@ -222,9 +237,14 @@ async fn handle(
     Json(p): Json<In>,
 ) -> impl IntoResponse {
     // CR-03: owner comes from a trusted header map, never from the request body.
-    let owner = match resolve_owner_or_401(&headers, &state.owner_map, &state.jwt_secret, "webhook_unauthorized") {
+    let owner = match resolve_owner_or_401(
+        &headers,
+        &state.owner_map,
+        &state.jwt_secret,
+        "webhook_unauthorized",
+    ) {
         Ok(o) => o,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Cockpit mock interceptor (opt-in) — return deterministic data for the
@@ -248,13 +268,15 @@ async fn handle(
 /// GET /events — real-time SSE feed.
 /// CR-03: same x-bastion-token auth as /webhook.
 /// BroadcastStream capacity=128; lagged receivers get Err which is filtered out.
-async fn sse_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, &state.jwt_secret, "sse_unauthorized") {
+async fn sse_handler(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let _owner = match resolve_owner_or_401(
+        &headers,
+        &state.owner_map,
+        &state.jwt_secret,
+        "sse_unauthorized",
+    ) {
         Ok(o) => o,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let rx = state.events_tx.subscribe();
     let stream = BroadcastStream::new(rx)
@@ -279,15 +301,24 @@ async fn ingest_handler(
     // CR-03: enforce auth BEFORE body deserialization. Taking the raw body (not
     // Json<...>) prevents Axum's Json extractor from rejecting an unauthenticated
     // request with 415 before resolve_owner_or_401 ever runs (#mesh-ingest-401).
-    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, &state.jwt_secret, "mesh_ingest_unauthorized") {
+    let _owner = match resolve_owner_or_401(
+        &headers,
+        &state.owner_map,
+        &state.jwt_secret,
+        "mesh_ingest_unauthorized",
+    ) {
         Ok(o) => o,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let envelope: crate::mesh::MeshEnvelope = match serde_json::from_slice(&body) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(event = "mesh_ingest_bad_body", error = %e);
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("invalid envelope: {e}") }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid envelope: {e}") })),
+            )
+                .into_response();
         }
     };
 
@@ -295,8 +326,8 @@ async fn ingest_handler(
     // local_owner is the value MESH_OWNER_ID (or BASTION_OWNER_ID) was set to at startup.
     // This check is belt-and-suspenders: P2PTransport::receive() also asserts to_owner,
     // but we guard here to return 403 before spending CPU on decryption.
-    if let Ok(local_owner) = std::env::var("MESH_OWNER_ID")
-        .or_else(|_| std::env::var("BASTION_OWNER_ID"))
+    if let Ok(local_owner) =
+        std::env::var("MESH_OWNER_ID").or_else(|_| std::env::var("BASTION_OWNER_ID"))
     {
         if envelope.to_owner != local_owner {
             tracing::warn!(
@@ -304,15 +335,26 @@ async fn ingest_handler(
                 to_owner = %envelope.to_owner,
                 local_owner = %local_owner,
             );
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "envelope addressed to wrong owner" }))).into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "envelope addressed to wrong owner" })),
+            )
+                .into_response();
         }
     }
 
     let transport = match &state.mesh_transport {
         Some(t) => t.clone(),
         None => {
-            tracing::warn!(event = "mesh_ingest_no_transport", "mesh transport not configured");
-            return (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({ "error": "mesh not configured" }))).into_response();
+            tracing::warn!(
+                event = "mesh_ingest_no_transport",
+                "mesh transport not configured"
+            );
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(serde_json::json!({ "error": "mesh not configured" })),
+            )
+                .into_response();
         }
     };
     match transport.receive(envelope).await {
@@ -323,11 +365,19 @@ async fn ingest_handler(
                 let mut s = store.write().await;
                 s.insert(slice.from_owner.clone(), slice.beliefs.clone());
             }
-            (StatusCode::OK, Json(serde_json::json!({ "status": "accepted", "beliefs": slice.beliefs.len() }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "accepted", "beliefs": slice.beliefs.len() })),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!(event = "mesh_ingest_error", error = %e);
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
         }
     }
 }
@@ -343,7 +393,13 @@ async fn auth_exchange_handler(
 ) -> impl IntoResponse {
     let otc = match body.get("otc").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "missing otc" }))).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing otc" })),
+            )
+                .into_response()
+        }
     };
 
     // Validate OTC against store (5-min TTL)
@@ -363,17 +419,34 @@ async fn auth_exchange_handler(
             // Issue JWT (HS256, 90-day expiry).
             // JWT encodes device name in "sub" claim.
             // The issued JWT IS the x-bastion-token used on subsequent requests.
-            use jsonwebtoken::{encode, Header, EncodingKey};
+            use jsonwebtoken::{encode, EncodingKey, Header};
             let exp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs() + 90 * 24 * 3600; // 90 days
-            let claims = Claims { sub: device_name.clone(), device: device_name.clone(), exp };
-            match encode(&Header::default(), &claims, &EncodingKey::from_secret(state.jwt_secret.as_bytes())) {
-                Ok(jwt) => (StatusCode::OK, Json(serde_json::json!({ "jwt": jwt, "device_name": &device_name }))).into_response(),
+                .as_secs()
+                + 90 * 24 * 3600; // 90 days
+            let claims = Claims {
+                sub: device_name.clone(),
+                device: device_name.clone(),
+                exp,
+            };
+            match encode(
+                &Header::default(),
+                &claims,
+                &EncodingKey::from_secret(state.jwt_secret.as_bytes()),
+            ) {
+                Ok(jwt) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "jwt": jwt, "device_name": &device_name })),
+                )
+                    .into_response(),
                 Err(e) => {
                     tracing::error!(event = "auth_exchange_jwt_error", error = %e);
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "jwt encoding failed" }))).into_response()
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "jwt encoding failed" })),
+                    )
+                        .into_response()
                 }
             }
         }
@@ -382,11 +455,19 @@ async fn auth_exchange_handler(
             // WR-03: return same body as unknown-OTC to prevent enumeration oracle.
             state.otc_store.write().await.remove(&otc);
             tracing::warn!(event = "auth_exchange_expired_otc");
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid OTC" }))).into_response()
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid OTC" })),
+            )
+                .into_response()
         }
         None => {
             tracing::warn!(event = "auth_exchange_invalid_otc");
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid OTC" }))).into_response()
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid OTC" })),
+            )
+                .into_response()
         }
     }
 }
@@ -401,7 +482,7 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
             || v4.is_private()  // 10.x, 172.16-31.x, 192.168.x
             || v4.is_link_local() // 169.254.x
             || v4.is_unspecified() // 0.0.0.0
-            || v4.is_broadcast()   // 255.255.255.255
+            || v4.is_broadcast() // 255.255.255.255
         }
         std::net::IpAddr::V6(v6) => {
             // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible addresses must be
@@ -436,17 +517,22 @@ async fn mesh_pair_handler(
     headers: HeaderMap,
     Json(body): Json<MeshPairBody>,
 ) -> impl IntoResponse {
-    let _owner = match resolve_owner_or_401(&headers, &state.owner_map, &state.jwt_secret, "mesh_pair_unauthorized") {
+    let _owner = match resolve_owner_or_401(
+        &headers,
+        &state.owner_map,
+        &state.jwt_secret,
+        "mesh_pair_unauthorized",
+    ) {
         Ok(o) => o,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Validate pairing token (same OTC store used by /connect-app pairing flow)
     let result = {
         let store = state.otc_store.read().await;
-        store.get(&body.token).map(|(peer_owner_id, issued_at)| {
-            (peer_owner_id.clone(), issued_at.elapsed())
-        })
+        store
+            .get(&body.token)
+            .map(|(peer_owner_id, issued_at)| (peer_owner_id.clone(), issued_at.elapsed()))
     };
 
     match result {
@@ -466,8 +552,13 @@ async fn mesh_pair_handler(
             // SEC-02: validate peer_url before registering — prevent SSRF to loopback/RFC1918/link-local.
             {
                 use url::Url;
-                let parsed = Url::parse(&body.peer_url).ok()
-                    .and_then(|u| if u.scheme() == "https" { Some(u) } else { None });
+                let parsed = Url::parse(&body.peer_url).ok().and_then(|u| {
+                    if u.scheme() == "https" {
+                        Some(u)
+                    } else {
+                        None
+                    }
+                });
                 let parsed = match parsed {
                     Some(u) => u,
                     None => {
@@ -494,37 +585,62 @@ async fn mesh_pair_handler(
                     Err(e) => {
                         // DNS failure — reject (fail-closed; attacker might be testing internal names)
                         tracing::warn!(event = "mesh_pair_dns_failed", url = %body.peer_url, error = %e);
-                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer_url DNS resolution failed" }))).into_response();
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": "peer_url DNS resolution failed" })),
+                        )
+                            .into_response();
                     }
                 }
             }
 
             // Register peer in MeshPeerMap
             let peer = MeshPeer {
-                peer_url:     body.peer_url.clone(),
-                age_pubkey:   body.age_pubkey.clone(),
+                peer_url: body.peer_url.clone(),
+                age_pubkey: body.age_pubkey.clone(),
                 allowed_tags: vec![], // set after pairing via config update
             };
-            state.mesh_peer_map.write().await.register(peer_owner_id.clone(), peer);
+            state
+                .mesh_peer_map
+                .write()
+                .await
+                .register(peer_owner_id.clone(), peer);
 
             // Persist to bastion.toml [[mesh.peer]] (best-effort; full persistence in config.rs)
             // allowed_tags starts empty — set post-pairing via config update
-            if let Err(e) = crate::config::append_mesh_peer(&peer_owner_id, &body.peer_url, &body.age_pubkey, &[]).await {
+            if let Err(e) = crate::config::append_mesh_peer(
+                &peer_owner_id,
+                &body.peer_url,
+                &body.age_pubkey,
+                &[],
+            )
+            .await
+            {
                 tracing::warn!(event = "mesh_pair_persist_failed", error = %e, "peer registered in memory but toml persist failed");
             }
 
             tracing::info!(event = "mesh_pair_ok", peer_owner = %peer_owner_id, peer_url = %body.peer_url);
-            (StatusCode::OK, Json(serde_json::json!({ "status": "paired", "peer_owner": peer_owner_id }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "paired", "peer_owner": peer_owner_id })),
+            )
+                .into_response()
         }
         Some(_) => {
             // WR-03: return same body as unknown-token to prevent enumeration oracle.
             state.otc_store.write().await.remove(&body.token);
             tracing::warn!(event = "mesh_pair_expired_token");
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid pairing token" }))).into_response()
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid pairing token" })),
+            )
+                .into_response()
         }
-        None => {
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid pairing token" }))).into_response()
-        }
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid pairing token" })),
+        )
+            .into_response(),
     }
 }
 
@@ -536,7 +652,18 @@ pub async fn serve(
     mesh_peer_map: Arc<RwLock<MeshPeerMap>>,
     jwt_secret: String,
 ) -> anyhow::Result<()> {
-    serve_with_mesh(agent, addr, owner_map, events_tx, mesh_peer_map, jwt_secret, None, None, new_otc_store()).await
+    serve_with_mesh(
+        agent,
+        addr,
+        owner_map,
+        events_tx,
+        mesh_peer_map,
+        jwt_secret,
+        None,
+        None,
+        new_otc_store(),
+    )
+    .await
 }
 
 /// Extended serve function that accepts optional mesh transport and slice store.
@@ -544,6 +671,9 @@ pub async fn serve(
 ///
 /// `otc_store`: shared OTC store — pass a handle to skill commands so they can insert
 /// BAST-XXXX codes for /auth/exchange and /mesh/pair. Use `new_otc_store()` to create one.
+// Wires 9 independent server dependencies from daemon startup; a params struct would be
+// a single-call-site bag (only main.rs constructs this) with no reusable shape.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_with_mesh(
     agent: AgentHandle,
     addr: &str,
@@ -586,8 +716,8 @@ mod tests {
     use crate::channel::OwnerMap;
     use axum::body::Body;
     use http::{Request, StatusCode};
-    use tower::ServiceExt;
     use tokio::sync::mpsc;
+    use tower::ServiceExt;
 
     fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
@@ -642,7 +772,9 @@ mod tests {
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let out: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(out["reply"], "echo:hello");
     }
@@ -695,9 +827,15 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(req).await.unwrap();
-        assert_ne!(response.status(), StatusCode::OK, "error must not return 200");
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "error must not return 200"
+        );
 
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let text = String::from_utf8_lossy(&bytes);
         // Body must not contain any stack trace, error message, or internal token detail
         assert!(!text.contains("thread"), "stack trace in response: {text}");
@@ -714,7 +852,9 @@ mod tests {
         assert_eq!(error_status(&budget_err), StatusCode::TOO_MANY_REQUESTS);
 
         // Guardrail errors are now typed BastionError::InputGuardrailRejected (WR-09)
-        let guard_err = anyhow::anyhow!(BastionError::InputGuardrailRejected("input is empty".to_owned()));
+        let guard_err = anyhow::anyhow!(BastionError::InputGuardrailRejected(
+            "input is empty".to_owned()
+        ));
         assert_eq!(error_status(&guard_err), StatusCode::BAD_REQUEST);
 
         // Unknown errors → 500
@@ -807,7 +947,8 @@ mod tests {
             "token": "BAST-PEER-INVALID",
             "peer_url": "http://peer:8080",
             "age_pubkey": "age1test"
-        }).to_string();
+        })
+        .to_string();
         let req = Request::builder()
             .method("POST")
             .uri("/mesh/pair")
@@ -863,9 +1004,14 @@ mod tests {
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(val.get("jwt").and_then(|v| v.as_str()).is_some(), "jwt field missing: {val}");
+        assert!(
+            val.get("jwt").and_then(|v| v.as_str()).is_some(),
+            "jwt field missing: {val}"
+        );
         assert_eq!(val["device_name"], "mario-phone");
     }
 
@@ -884,9 +1030,13 @@ mod tests {
 
     /// Helper: mint a valid HS256 JWT signed with the test secret.
     fn mint_jwt(secret: &str, sub: &str, exp_offset_secs: i64) -> String {
-        use jsonwebtoken::{encode, Header, EncodingKey};
+        use jsonwebtoken::{encode, EncodingKey, Header};
         #[derive(serde::Serialize)]
-        struct C { sub: String, device: String, exp: u64 }
+        struct C {
+            sub: String,
+            device: String,
+            exp: u64,
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -896,8 +1046,17 @@ mod tests {
         } else {
             now.saturating_sub((-exp_offset_secs) as u64)
         };
-        let claims = C { sub: sub.to_string(), device: sub.to_string(), exp };
-        encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).unwrap()
+        let claims = C {
+            sub: sub.to_string(),
+            device: sub.to_string(),
+            exp,
+        };
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
     }
 
     /// CR-01: valid JWT (signed with test-secret, sub="mario-phone") → 200 on /webhook.

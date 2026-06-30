@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 /// The channel layer (e.g. `webhook::error_status`) can then classify the error correctly
 /// instead of receiving a generic "reply dropped" anyhow string.
 pub struct AgentRequest {
-    pub text:  String,
+    pub text: String,
     pub owner: String,
     pub reply: oneshot::Sender<anyhow::Result<String>>,
 }
@@ -36,11 +36,17 @@ impl AgentHandle {
     pub async fn ask(&self, text: String, owner: String) -> anyhow::Result<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(AgentRequest { text, owner, reply: reply_tx })
+            .send(AgentRequest {
+                text,
+                owner,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("AgentLoop receiver dropped"))?;
         // Unwrap the outer oneshot (channel dropped = agent crashed) then the inner Result.
-        reply_rx.await.map_err(|_| anyhow::anyhow!("AgentLoop reply dropped"))?
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("AgentLoop reply dropped"))?
     }
 }
 
@@ -90,6 +96,10 @@ mod tests {
 
         // Consumer processed both one-at-a-time (log has exactly 2 entries).
         let entries = log.lock().unwrap();
-        assert_eq!(entries.len(), 2, "expected 2 processed entries, got {entries:?}");
+        assert_eq!(
+            entries.len(),
+            2,
+            "expected 2 processed entries, got {entries:?}"
+        );
     }
 }

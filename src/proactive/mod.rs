@@ -117,7 +117,10 @@ impl CronService {
         let mem = memory.read().await;
         let mut stored = 0usize;
         for fact in &facts {
-            match mem.store_belief(owner, None, fact, "idle_dream", "dream", false, None).await {
+            match mem
+                .store_belief(owner, None, fact, "idle_dream", "dream", false, None)
+                .await
+            {
                 Ok(_) => stored += 1,
                 Err(e) => tracing::warn!(event = "idle_tick_store_error", error = %e),
             }
@@ -135,9 +138,9 @@ impl CronService {
 mod tests {
     use super::*;
     use crate::agent::dream::Dream;
+    use crate::goal::ScoringConfig;
     use crate::memory::sqlite::SqliteMemory;
     use crate::memory::Memory;
-    use crate::goal::ScoringConfig;
     use crate::types::Message;
     use async_trait::async_trait;
     use std::sync::Arc;
@@ -174,7 +177,13 @@ mod tests {
         setup_db(&path).await;
 
         let sm = crate::session::SessionManager::new(&path);
-        let engine = GoalEngine::new(&path, ScoringConfig { window_days: 7, progress_threshold: 1 });
+        let engine = GoalEngine::new(
+            &path,
+            ScoringConfig {
+                window_days: 7,
+                progress_threshold: 1,
+            },
+        );
 
         // Create a goal
         let _goal_id = engine
@@ -202,7 +211,10 @@ mod tests {
 
         handle.abort();
 
-        assert!(!msg.is_empty(), "heartbeat message must not be empty; got: {msg:?}");
+        assert!(
+            !msg.is_empty(),
+            "heartbeat message must not be empty; got: {msg:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -219,7 +231,8 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<String>(16);
         let svc = CronService::new(tx, engine);
 
-        svc.on_event("calendar: meeting in 10 minutes".to_string()).await;
+        svc.on_event("calendar: meeting in 10 minutes".to_string())
+            .await;
 
         let msg = rx.recv().await.expect("message expected");
         assert_eq!(msg, "calendar: meeting in 10 minutes");
@@ -236,7 +249,7 @@ mod tests {
         setup_db(&path).await;
 
         let memory: crate::memory::SharedMemory = Arc::new(RwLock::new(
-            Box::new(SqliteMemory::new(&path)) as Box<dyn Memory>
+            Box::new(SqliteMemory::new(&path)) as Box<dyn Memory>,
         ));
 
         let engine = GoalEngine::new(&path, ScoringConfig::default());
@@ -259,7 +272,12 @@ mod tests {
             m.retrieve_tagged("_local", None).await.expect("retrieve")
         };
 
-        assert_eq!(beliefs.len(), 2, "idle_tick must store all 2 facts; got {}", beliefs.len());
+        assert_eq!(
+            beliefs.len(),
+            2,
+            "idle_tick must store all 2 facts; got {}",
+            beliefs.len()
+        );
     }
 
     // -----------------------------------------------------------------------

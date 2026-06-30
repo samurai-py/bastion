@@ -5,21 +5,29 @@
 //! per-deployment (cloud personal use with unlimited CC). NOT the OSS default.
 //! ponytail: justified by the unlimited-CC constraint; see decisions/structured-output-strategy.md.
 
-use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role};
 use super::Provider;
+use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role};
 
 pub struct TerminalAgentProvider {
-    bin:   String, // "claude" | "opencode"
+    bin: String,   // "claude" | "opencode"
     model: String, // label, e.g. "claude_code"
 }
 
 impl TerminalAgentProvider {
     pub fn new(bin: &str, model: &str) -> Self {
-        Self { bin: bin.to_owned(), model: model.to_owned() }
+        Self {
+            bin: bin.to_owned(),
+            model: model.to_owned(),
+        }
     }
 
     async fn run(&self, prompt: &str) -> anyhow::Result<String> {
-        let mut args = vec!["-p".to_owned(), prompt.to_owned(), "--output-format".to_owned(), "text".to_owned()];
+        let mut args = vec![
+            "-p".to_owned(),
+            prompt.to_owned(),
+            "--output-format".to_owned(),
+            "text".to_owned(),
+        ];
         // Claude Code: pin the runtime model (default Haiku 4.5; override via env).
         // Skipped for opencode — different --model syntax; lets it use its own default.
         if self.bin == "claude" {
@@ -30,11 +38,16 @@ impl TerminalAgentProvider {
         }
         let out = tokio::process::Command::new(&self.bin)
             .args(&args)
-            .output().await
+            .output()
+            .await
             .map_err(|e| anyhow::anyhow!("{} spawn failed: {e}", self.bin))?;
         if !out.status.success() {
-            anyhow::bail!("{} exited {}: {}", self.bin, out.status,
-                String::from_utf8_lossy(&out.stderr).trim());
+            anyhow::bail!(
+                "{} exited {}: {}",
+                self.bin,
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     }
@@ -43,11 +56,21 @@ impl TerminalAgentProvider {
 /// Flatten system + conversation into one prompt for a headless agent CLI.
 fn render_prompt(system: &str, messages: &[Message]) -> String {
     let mut s = String::new();
-    if !system.is_empty() { s.push_str(system); s.push_str("\n\n"); }
+    if !system.is_empty() {
+        s.push_str(system);
+        s.push_str("\n\n");
+    }
     for m in messages {
-        let who = match m.role { Role::User => "User", Role::Assistant => "Assistant", _ => "System" };
+        let who = match m.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            _ => "System",
+        };
         if let MessageContent::Text(t) = &m.content {
-            s.push_str(who); s.push_str(": "); s.push_str(t); s.push('\n');
+            s.push_str(who);
+            s.push_str(": ");
+            s.push_str(t);
+            s.push('\n');
         }
     }
     s
@@ -71,12 +94,20 @@ fn extract_json(raw: &str) -> Option<&str> {
     let start = raw.find('{')?;
     let (mut depth, mut in_str, mut esc) = (0usize, false, false);
     for (i, c) in raw[start..].char_indices() {
-        if esc { esc = false; continue; }
+        if esc {
+            esc = false;
+            continue;
+        }
         match c {
             '\\' if in_str => esc = true,
-            '"'            => in_str = !in_str,
+            '"' => in_str = !in_str,
             '{' if !in_str => depth += 1,
-            '}' if !in_str => { depth -= 1; if depth == 0 { return Some(&raw[start..=start + i]); } }
+            '}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&raw[start..=start + i]);
+                }
+            }
             _ => {}
         }
     }
@@ -85,9 +116,19 @@ fn extract_json(raw: &str) -> Option<&str> {
 
 #[async_trait::async_trait]
 impl Provider for TerminalAgentProvider {
-    async fn complete(&self, messages: &[Message], config: &CallConfig) -> anyhow::Result<LlmResponse> {
-        let text = self.run(&render_prompt(&config.system_prompt, messages)).await?;
-        Ok(LlmResponse { text, tool_calls: None, usage: Default::default() })
+    async fn complete(
+        &self,
+        messages: &[Message],
+        config: &CallConfig,
+    ) -> anyhow::Result<LlmResponse> {
+        let text = self
+            .run(&render_prompt(&config.system_prompt, messages))
+            .await?;
+        Ok(LlmResponse {
+            text,
+            tool_calls: None,
+            usage: Default::default(),
+        })
     }
 
     async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {
@@ -95,16 +136,27 @@ impl Provider for TerminalAgentProvider {
     }
 
     async fn complete_structured(
-        &self, system: &str, user: &str, schema: serde_json::Value, _max_tokens: u32, _temperature: f32,
+        &self,
+        system: &str,
+        user: &str,
+        schema: serde_json::Value,
+        _max_tokens: u32,
+        _temperature: f32,
     ) -> anyhow::Result<String> {
         let raw = self.run(&structured_prompt(system, user, &schema)).await?;
         // Return extracted JSON if found, else raw — the caller serde-parses-and-retries.
         Ok(extract_json(&raw).unwrap_or(&raw).to_owned())
     }
 
-    fn context_limit(&self) -> usize { 200_000 }
-    fn model_name(&self) -> &str { &self.model }
-    fn name(&self) -> &'static str { "claude_code" } // ponytail: egress bypassed anyway; opencode shares the tag
+    fn context_limit(&self) -> usize {
+        200_000
+    }
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+    fn name(&self) -> &'static str {
+        "claude_code"
+    } // ponytail: egress bypassed anyway; opencode shares the tag
 }
 
 #[cfg(test)]
@@ -115,8 +167,14 @@ mod tests {
     fn extract_json_handles_bare_fenced_prose_and_braces_in_strings() {
         assert_eq!(extract_json(r#"{"a":1}"#), Some(r#"{"a":1}"#));
         assert_eq!(extract_json("```json\n{\"a\":1}\n```"), Some(r#"{"a":1}"#));
-        assert_eq!(extract_json(r#"Sure! {"a":{"b":2}} done"#), Some(r#"{"a":{"b":2}}"#));
-        assert_eq!(extract_json(r#"{"s":"has } brace"}"#), Some(r#"{"s":"has } brace"}"#));
+        assert_eq!(
+            extract_json(r#"Sure! {"a":{"b":2}} done"#),
+            Some(r#"{"a":{"b":2}}"#)
+        );
+        assert_eq!(
+            extract_json(r#"{"s":"has } brace"}"#),
+            Some(r#"{"s":"has } brace"}"#)
+        );
         assert_eq!(extract_json("no json here"), None);
     }
 }

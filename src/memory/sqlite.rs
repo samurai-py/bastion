@@ -10,7 +10,9 @@ pub struct SqliteMemory {
 
 impl SqliteMemory {
     pub fn new(db_path: impl Into<String>) -> Self {
-        Self { db_path: db_path.into() }
+        Self {
+            db_path: db_path.into(),
+        }
     }
 }
 
@@ -210,7 +212,15 @@ mod tests {
     async fn test_store_and_retrieve() {
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", Some("health"), "Mario exercises daily", "sess1", "user", false, None)
+            .store_belief(
+                "owner1",
+                Some("health"),
+                "Mario exercises daily",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
             .await
             .expect("store");
         assert!(id > 0);
@@ -228,20 +238,37 @@ mod tests {
     async fn test_revoke_excludes_from_retrieve_but_row_preserved() {
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", Some("finance"), "Has savings", "sess1", "user", false, None)
+            .store_belief(
+                "owner1",
+                Some("finance"),
+                "Has savings",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
             .await
             .expect("store");
 
         // Before revoke: retrieve returns it
-        let before = mem.retrieve_tagged("owner1", Some("finance")).await.expect("before");
+        let before = mem
+            .retrieve_tagged("owner1", Some("finance"))
+            .await
+            .expect("before");
         assert_eq!(before.len(), 1);
 
         // Revoke
         mem.revoke_belief("owner1", id).await.expect("revoke");
 
         // After revoke: retrieve_tagged excludes it
-        let after = mem.retrieve_tagged("owner1", Some("finance")).await.expect("after");
-        assert!(after.is_empty(), "revoked belief must not appear in retrieve_tagged");
+        let after = mem
+            .retrieve_tagged("owner1", Some("finance"))
+            .await
+            .expect("after");
+        assert!(
+            after.is_empty(),
+            "revoked belief must not appear in retrieve_tagged"
+        );
 
         // But raw SELECT still returns it with revoked=1, weight=0
         let path = mem.db_path.clone();
@@ -268,7 +295,15 @@ mod tests {
         // This test verifies the row count stays the same after revoke
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", None, "Global belief", "sess1", "dream", false, None)
+            .store_belief(
+                "owner1",
+                None,
+                "Global belief",
+                "sess1",
+                "dream",
+                false,
+                None,
+            )
             .await
             .expect("store");
 
@@ -296,7 +331,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(count_before, count_after, "row must not be deleted on revoke (D-15)");
+        assert_eq!(
+            count_before, count_after,
+            "row must not be deleted on revoke (D-15)"
+        );
     }
 
     #[tokio::test]
@@ -306,9 +344,17 @@ mod tests {
         mem.store_belief("owner1", None, "Global fact", "sess1", "user", false, None)
             .await
             .expect("store global");
-        mem.store_belief("owner1", Some("health"), "Health-tagged", "sess1", "user", false, None)
-            .await
-            .expect("store tagged");
+        mem.store_belief(
+            "owner1",
+            Some("health"),
+            "Health-tagged",
+            "sess1",
+            "user",
+            false,
+            None,
+        )
+        .await
+        .expect("store tagged");
 
         let results = mem
             .retrieve_tagged("owner1", Some("health"))
@@ -324,9 +370,17 @@ mod tests {
         mem.store_belief("owner1", None, "Core belief", "sess1", "system", true, None)
             .await
             .expect("store core");
-        mem.store_belief("owner1", None, "Normal belief", "sess1", "user", false, None)
-            .await
-            .expect("store normal");
+        mem.store_belief(
+            "owner1",
+            None,
+            "Normal belief",
+            "sess1",
+            "user",
+            false,
+            None,
+        )
+        .await
+        .expect("store normal");
 
         let core = mem.load_core("owner1").await.expect("load_core");
         assert_eq!(core.len(), 1);
@@ -353,7 +407,15 @@ mod tests {
         // IDOR guard: owner2 cannot revoke or read provenance of owner1's belief.
         let (_f, mem) = make_db().await;
         let id = mem
-            .store_belief("owner1", None, "Owner1 secret", "sess1", "user", false, None)
+            .store_belief(
+                "owner1",
+                None,
+                "Owner1 secret",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
             .await
             .expect("store");
 
@@ -363,11 +425,18 @@ mod tests {
 
         // Belief still active for the real owner
         let still = mem.retrieve_tagged("owner1", None).await.expect("retrieve");
-        assert_eq!(still.len(), 1, "belief must survive cross-owner revoke attempt");
+        assert_eq!(
+            still.len(),
+            1,
+            "belief must survive cross-owner revoke attempt"
+        );
 
         // Wrong owner gets empty provenance (indistinguishable from missing id)
         let prov_wrong = mem.provenance_for("owner2", id).await.expect("prov wrong");
-        assert!(prov_wrong.is_empty(), "cross-owner provenance must be empty");
+        assert!(
+            prov_wrong.is_empty(),
+            "cross-owner provenance must be empty"
+        );
 
         // Real owner still sees provenance
         let prov_ok = mem.provenance_for("owner1", id).await.expect("prov ok");
@@ -400,7 +469,9 @@ mod tests {
             "user",
             false,
             Some(PrivacyTier::CloudOk),
-        ).await.expect("store cloud-ok belief");
+        )
+        .await
+        .expect("store cloud-ok belief");
 
         // Store a LocalOnly belief — should be stripped
         mem.store_belief(
@@ -411,10 +482,15 @@ mod tests {
             "user",
             false,
             Some(PrivacyTier::LocalOnly),
-        ).await.expect("store local-only belief");
+        )
+        .await
+        .expect("store local-only belief");
 
         // Retrieve from real DB (not hand-built Beliefs)
-        let beliefs = mem.retrieve_tagged("owner1", Some("mercado")).await.expect("retrieve");
+        let beliefs = mem
+            .retrieve_tagged("owner1", Some("mercado"))
+            .await
+            .expect("retrieve");
         assert_eq!(beliefs.len(), 2, "both beliefs should be retrieved");
 
         // filter_for_mesh with allowlist that includes 'mercado'
@@ -425,7 +501,11 @@ mod tests {
         let passed = filter_for_mesh(beliefs, &allowlist);
 
         // Only CloudOk belief survives
-        assert_eq!(passed.len(), 1, "only CloudOk belief must survive filter_for_mesh");
+        assert_eq!(
+            passed.len(),
+            1,
+            "only CloudOk belief must survive filter_for_mesh"
+        );
         assert_eq!(passed[0].content, "Alice spends 2k/month on groceries");
         assert_eq!(passed[0].tier, Some(PrivacyTier::CloudOk));
     }

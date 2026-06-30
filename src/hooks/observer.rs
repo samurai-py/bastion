@@ -63,7 +63,8 @@ mod tests {
     #[tokio::test]
     async fn lifelog_record_empty_metadata() {
         let log = LifeLog;
-        log.record("test_event", serde_json::Value::Object(Default::default())).await;
+        log.record("test_event", serde_json::Value::Object(Default::default()))
+            .await;
     }
 
     /// Verify LifeLog works with metadata containing only operational fields.

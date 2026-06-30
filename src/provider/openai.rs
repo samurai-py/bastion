@@ -1,5 +1,4 @@
 use async_openai::{
-    Client,
     config::OpenAIConfig,
     types::chat::{
         ChatCompletionMessageToolCalls, ChatCompletionRequestMessage,
@@ -7,14 +6,17 @@ use async_openai::{
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
         CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema,
     },
+    Client,
 };
 
-use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role, ToolCall, TokenUsage, strip_think};
 use super::Provider;
+use crate::types::{
+    strip_think, CallConfig, LlmResponse, Message, MessageContent, Role, TokenUsage, ToolCall,
+};
 
 pub struct OpenAIProvider {
     client: Client<OpenAIConfig>,
-    model:  String,
+    model: String,
 }
 
 impl OpenAIProvider {
@@ -26,14 +28,18 @@ impl OpenAIProvider {
         }
         Self {
             client: Client::new(),
-            model:  model.to_owned(),
+            model: model.to_owned(),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl Provider for OpenAIProvider {
-    async fn complete(&self, messages: &[Message], config: &CallConfig) -> anyhow::Result<LlmResponse> {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        config: &CallConfig,
+    ) -> anyhow::Result<LlmResponse> {
         let oai_messages = super::build_openai_messages(&config.system_prompt, messages);
 
         let mut args = CreateChatCompletionRequestArgs::default();
@@ -45,22 +51,31 @@ impl Provider for OpenAIProvider {
         }
         let request = args.build()?;
 
-        let response = self.client.chat().create(request).await
+        let response = self
+            .client
+            .chat()
+            .create(request)
+            .await
             .map_err(|e| super::clarify_openai_error(self.name(), e))?;
 
-        let choice = response.choices.into_iter().next()
+        let choice = response
+            .choices
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("OpenAI returned no choices"))?;
 
         let raw_text = choice.message.content.unwrap_or_default();
         let text = strip_think(&raw_text);
 
-        let tool_calls: Vec<ToolCall> = choice.message.tool_calls
+        let tool_calls: Vec<ToolCall> = choice
+            .message
+            .tool_calls
             .unwrap_or_default()
             .into_iter()
             .filter_map(|tc| match tc {
                 ChatCompletionMessageToolCalls::Function(f) => Some(ToolCall {
-                    id:        f.id,
-                    name:      f.function.name,
+                    id: f.id,
+                    name: f.function.name,
                     arguments: serde_json::from_str(&f.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
                 }),
@@ -68,22 +83,29 @@ impl Provider for OpenAIProvider {
             })
             .collect();
 
-        let usage = response.usage.map(|u| TokenUsage {
-            input_tokens:  u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            ..Default::default()
-        }).unwrap_or_default();
+        let usage = response
+            .usage
+            .map(|u| TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                ..Default::default()
+            })
+            .unwrap_or_default();
 
         Ok(LlmResponse {
             text,
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
             usage,
         })
     }
 
     async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {
         let messages = vec![Message {
-            role:    Role::User,
+            role: Role::User,
             content: MessageContent::Text(prompt.to_owned()),
         }];
         let config = CallConfig {
@@ -94,9 +116,15 @@ impl Provider for OpenAIProvider {
         Ok(resp.text)
     }
 
-    fn context_limit(&self) -> usize { 128_000 }
-    fn model_name(&self) -> &str { &self.model }
-    fn name(&self) -> &'static str { "openai" }
+    fn context_limit(&self) -> usize {
+        128_000
+    }
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+    fn name(&self) -> &'static str {
+        "openai"
+    }
 
     async fn complete_structured(
         &self,
@@ -137,13 +165,22 @@ impl Provider for OpenAIProvider {
             .messages(messages);
         let request = args.build()?;
 
-        let response = self.client.chat().create(request).await
+        let response = self
+            .client
+            .chat()
+            .create(request)
+            .await
             .map_err(|e| super::clarify_openai_error(self.name(), e))?;
 
-        let choice = response.choices.into_iter().next()
+        let choice = response
+            .choices
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("OpenAI returned no choices"))?;
 
-        choice.message.content
+        choice
+            .message
+            .content
             .ok_or_else(|| anyhow::anyhow!("OpenAI structured response had no content"))
     }
 }

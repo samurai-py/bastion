@@ -1,10 +1,9 @@
-/// Goal engine: persisted goal model (GOAL-01), zero-LLM heuristic progress scoring
-/// (GOAL-02, D-09), drift nudge + confirm/replan flow (GOAL-03, D-10/D-11/D-12).
-///
-/// Security: all SQL writes use rusqlite::params! (T-02-16).
-/// Keyword scoring is done in Rust after fetching rows — no string-built SQL (T-02-16).
-/// Window-bounded query caps unbounded scans (T-02-18).
-
+//! Goal engine: persisted goal model (GOAL-01), zero-LLM heuristic progress scoring
+//! (GOAL-02, D-09), drift nudge + confirm/replan flow (GOAL-03, D-10/D-11/D-12).
+//!
+//! Security: all SQL writes use rusqlite::params! (T-02-16).
+//! Keyword scoring is done in Rust after fetching rows — no string-built SQL (T-02-16).
+//! Window-bounded query caps unbounded scans (T-02-18).
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
@@ -357,10 +356,10 @@ pub fn build_drift_nudge(goal: &Goal) -> String {
 /// Splits on whitespace, lowercases, drops common Portuguese stopwords.
 fn derive_keywords(goal: &Goal) -> Vec<String> {
     const STOPWORDS: &[&str] = &[
-        "a", "o", "e", "de", "da", "do", "em", "um", "uma", "para", "com", "por",
-        "que", "se", "os", "as", "ao", "na", "no", "mais", "mas", "ou", "foi",
-        "ele", "ela", "ser", "ter", "ao", "pelo", "pela", "this", "the", "and",
-        "to", "of", "in", "is", "it", "for", "on", "with", "at",
+        "a", "o", "e", "de", "da", "do", "em", "um", "uma", "para", "com", "por", "que", "se",
+        "os", "as", "ao", "na", "no", "mais", "mas", "ou", "foi", "ele", "ela", "ser", "ter", "ao",
+        "pelo", "pela", "this", "the", "and", "to", "of", "in", "is", "it", "for", "on", "with",
+        "at",
     ];
 
     let mut kws: Vec<String> = goal
@@ -448,7 +447,13 @@ mod tests {
         let engine = GoalEngine::new(&db, ScoringConfig::default());
 
         let id = engine
-            .create_goal("user1", "aprender Rust", Some("livros lidos"), None, Some("mentor"))
+            .create_goal(
+                "user1",
+                "aprender Rust",
+                Some("livros lidos"),
+                None,
+                Some("mentor"),
+            )
             .await
             .expect("create_goal failed");
         assert!(id > 0);
@@ -537,7 +542,9 @@ mod tests {
 
         // Verify last_confirmed was actually written to DB
         let goals = engine.list_goals("user1").await.unwrap();
-        let lc = goals[0].last_confirmed.expect("last_confirmed should be set");
+        let lc = goals[0]
+            .last_confirmed
+            .expect("last_confirmed should be set");
         assert!(lc >= before && lc <= after, "last_confirmed out of range");
     }
 
@@ -566,7 +573,10 @@ mod tests {
         let nudge = engine.drift_nudge("user1", goal_id).await.unwrap();
         assert!(nudge.is_some(), "should return Some nudge at threshold");
         let text = nudge.unwrap();
-        assert!(text.contains("aprender Rust"), "nudge should mention the goal");
+        assert!(
+            text.contains("aprender Rust"),
+            "nudge should mention the goal"
+        );
     }
 
     #[tokio::test]
@@ -589,7 +599,10 @@ mod tests {
 
         let nudge = engine.drift_nudge("user1", goal_id).await.unwrap();
         // With no messages and no deadline, should be None
-        assert!(nudge.is_none(), "should return None when no interactions and no deadline");
+        assert!(
+            nudge.is_none(),
+            "should return None when no interactions and no deadline"
+        );
     }
 
     // ------------------------------------------------------------------

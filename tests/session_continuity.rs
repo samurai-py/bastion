@@ -1,5 +1,5 @@
 use bastion::session::SessionManager;
-use bastion::types::{Message, Role, MessageContent};
+use bastion::types::{Message, MessageContent, Role};
 
 #[tokio::test]
 async fn messages_survive_restart() {
@@ -10,8 +10,26 @@ async fn messages_survive_restart() {
     sm.init_schema().await.unwrap();
     let sid = sm.create_session().await.unwrap();
 
-    sm.append(&sid, Message { role: Role::User, content: MessageContent::Text("hello".into()) }, None).await.unwrap();
-    sm.append(&sid, Message { role: Role::Assistant, content: MessageContent::Text("hi".into()) }, Some(42)).await.unwrap();
+    sm.append(
+        &sid,
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("hello".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    sm.append(
+        &sid,
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text("hi".into()),
+        },
+        Some(42),
+    )
+    .await
+    .unwrap();
 
     // Simulate restart
     let sm2 = SessionManager::new(&db);
@@ -28,13 +46,35 @@ async fn orphaned_tool_result_rejected() {
     let sm = SessionManager::new(&db);
     sm.init_schema().await.unwrap();
     let sid = sm.create_session().await.unwrap();
-    sm.append(&sid, Message { role: Role::User, content: MessageContent::Text("q".into()) }, None).await.unwrap();
+    sm.append(
+        &sid,
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("q".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     // Try to append Tool without preceding Assistant — must fail
-    let result = sm.append(&sid, Message { role: Role::Tool, content: MessageContent::Text("result".into()) }, None).await;
+    let result = sm
+        .append(
+            &sid,
+            Message {
+                role: Role::Tool,
+                content: MessageContent::Text("result".into()),
+            },
+            None,
+        )
+        .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("Orphaned") || err.contains("orphaned") || err.contains("tool_use"), "got: {}", err);
+    assert!(
+        err.contains("Orphaned") || err.contains("orphaned") || err.contains("tool_use"),
+        "got: {}",
+        err
+    );
 }
 
 #[tokio::test]

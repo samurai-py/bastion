@@ -23,9 +23,9 @@
 //! This is an ASYNC exchange — no blocking, no unified Cabinet across instances.
 //! Rich governance (sync, HITL, RBAC) = closed/Fabric. OSS = neutral mechanism only.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
 
 use crate::agent::context::{ContextBlock, TurnContextProvider};
 use crate::memory::{Belief, PrivacyTier, SharedMemory};
@@ -39,6 +39,10 @@ pub struct MeshSliceProvider {
     slice_store: MeshSliceStore,
     /// The local owner_id (to scope context correctly).
     /// WR-06: this must be set from the real BASTION_OWNER_ID, not session_id.
+    // ponytail: held but not yet read — part of the WR-06 constructor contract; the
+    // per-owner slice-scoping read site is not wired yet. Kept (not removed) so the
+    // contract and the two public constructors stay stable for that wiring.
+    #[allow(dead_code)]
     local_owner: String,
 }
 
@@ -53,7 +57,10 @@ impl MeshSliceProvider {
     }
 
     pub fn from_store(local_owner: String, slice_store: MeshSliceStore) -> Self {
-        Self { local_owner, slice_store }
+        Self {
+            local_owner,
+            slice_store,
+        }
     }
 }
 
@@ -74,10 +81,13 @@ impl TurnContextProvider for MeshSliceProvider {
                 continue;
             }
             // Format as opaque text block — AgentLoop includes verbatim, never parses structure
-            let lines: Vec<String> = beliefs.iter().map(|b| {
-                let tag = b.persona_tag.as_deref().unwrap_or("general");
-                format!("[{}:{}] {}", from_owner, tag, b.content)
-            }).collect();
+            let lines: Vec<String> = beliefs
+                .iter()
+                .map(|b| {
+                    let tag = b.persona_tag.as_deref().unwrap_or("general");
+                    format!("[{}:{}] {}", from_owner, tag, b.content)
+                })
+                .collect();
             let content = format!(
                 "=== Shared context from {} ===\n{}\n===",
                 from_owner,
@@ -112,11 +122,12 @@ pub async fn write_cabinet_synthesis(
         owner_id,
         Some("mesh_cabinet_synthesis"),
         synthesis_content,
-        "cabinet_synthesis",  // session_id placeholder
-        "cabinet_synthesis",  // source
-        false,                // not a core belief
-        Some(crate::memory::PrivacyTier::CloudOk),  // CR-04: synthesis must cross the mesh
-    ).await?;
+        "cabinet_synthesis",                       // session_id placeholder
+        "cabinet_synthesis",                       // source
+        false,                                     // not a core belief
+        Some(crate::memory::PrivacyTier::CloudOk), // CR-04: synthesis must cross the mesh
+    )
+    .await?;
     tracing::info!(
         event = "mesh_cabinet_synthesis_written",
         owner_id = %owner_id,

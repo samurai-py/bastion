@@ -35,21 +35,21 @@ const ALL_PROVIDERS: &[&str] = &["ollama", "openai", "gemini", "openrouter", "an
 /// Safe pairs (→ Ok):   (CloudOk, *any*)  and  (LocalOnly, "ollama")
 /// Blocked pairs (→ Err): (LocalOnly, non-ollama)  and  (None, *any*)
 #[rstest]
-#[case(Some(PrivacyTier::CloudOk),    "ollama",       true)]
-#[case(Some(PrivacyTier::CloudOk),    "openai",       true)]
-#[case(Some(PrivacyTier::CloudOk),    "gemini",       true)]
-#[case(Some(PrivacyTier::CloudOk),    "openrouter",   true)]
-#[case(Some(PrivacyTier::CloudOk),    "anthropic",    true)]
-#[case(Some(PrivacyTier::LocalOnly),  "ollama",       true)]
-#[case(Some(PrivacyTier::LocalOnly),  "openai",       false)]
-#[case(Some(PrivacyTier::LocalOnly),  "gemini",       false)]
-#[case(Some(PrivacyTier::LocalOnly),  "openrouter",   false)]
-#[case(Some(PrivacyTier::LocalOnly),  "anthropic",    false)]
-#[case(None,                          "ollama",       false)]
-#[case(None,                          "openai",       false)]
-#[case(None,                          "gemini",       false)]
-#[case(None,                          "openrouter",   false)]
-#[case(None,                          "anthropic",    false)]
+#[case(Some(PrivacyTier::CloudOk), "ollama", true)]
+#[case(Some(PrivacyTier::CloudOk), "openai", true)]
+#[case(Some(PrivacyTier::CloudOk), "gemini", true)]
+#[case(Some(PrivacyTier::CloudOk), "openrouter", true)]
+#[case(Some(PrivacyTier::CloudOk), "anthropic", true)]
+#[case(Some(PrivacyTier::LocalOnly), "ollama", true)]
+#[case(Some(PrivacyTier::LocalOnly), "openai", false)]
+#[case(Some(PrivacyTier::LocalOnly), "gemini", false)]
+#[case(Some(PrivacyTier::LocalOnly), "openrouter", false)]
+#[case(Some(PrivacyTier::LocalOnly), "anthropic", false)]
+#[case(None, "ollama", false)]
+#[case(None, "openai", false)]
+#[case(None, "gemini", false)]
+#[case(None, "openrouter", false)]
+#[case(None, "anthropic", false)]
 fn privacy_egress_matrix(
     #[case] tier: Option<PrivacyTier>,
     #[case] provider: &str,
@@ -60,20 +60,25 @@ fn privacy_egress_matrix(
         assert!(
             result.is_ok(),
             "Expected Ok for {:?} + {}, got Err: {:?}",
-            tier, provider, result
+            tier,
+            provider,
+            result
         );
     } else {
         assert!(
             result.is_err(),
             "Expected Err(PrivacyEgressBlocked) for {:?} + {}, got Ok",
-            tier, provider
+            tier,
+            provider
         );
         // Assert the error is specifically PrivacyEgressBlocked
         let err_str = result.unwrap_err().to_string();
         assert!(
             err_str.contains("Privacy egress blocked"),
             "Expected PrivacyEgressBlocked error for {:?} + {}, got: {}",
-            tier, provider, err_str
+            tier,
+            provider,
+            err_str
         );
     }
 }
@@ -111,7 +116,8 @@ async fn injection_blocked_regardless_of_content() {
             assert!(
                 result.is_err(),
                 "Injection payload must be blocked for LocalOnly → {}: payload = {:?}",
-                provider, payload
+                provider,
+                payload
             );
             let err_str = result.unwrap_err().to_string();
             assert!(
@@ -129,7 +135,10 @@ async fn injection_blocked_regardless_of_content() {
     // If check_egress had passed (it won't), we would call spy.complete_simple().
     // Since check_egress errors out, spy should never be called.
     let egress_result = check_egress(Some(PrivacyTier::LocalOnly), spy.name);
-    assert!(egress_result.is_err(), "Egress must block before any provider call");
+    assert!(
+        egress_result.is_err(),
+        "Egress must block before any provider call"
+    );
 
     let call_log = calls.lock().unwrap();
     assert!(
@@ -183,7 +192,11 @@ async fn memory_revocation_clean() {
         .retrieve_tagged("owner1", None)
         .await
         .expect("retrieve before revoke");
-    assert_eq!(before.len(), 1, "belief must be retrievable before revocation");
+    assert_eq!(
+        before.len(),
+        1,
+        "belief must be retrievable before revocation"
+    );
 
     // Revoke (owner-scoped)
     mem.revoke_belief("owner1", belief_id)
@@ -210,9 +223,15 @@ async fn memory_revocation_clean() {
     };
 
     let (raw_id, raw_revoked, raw_weight) = db_check;
-    assert_eq!(raw_id, belief_id, "row must still exist (D-15: never deleted)");
+    assert_eq!(
+        raw_id, belief_id,
+        "row must still exist (D-15: never deleted)"
+    );
     assert_eq!(raw_revoked, 1, "revoked column must be 1 after revocation");
-    assert!(raw_weight < 1e-9, "weight must be 0.0 after revocation; got {raw_weight}");
+    assert!(
+        raw_weight < 1e-9,
+        "weight must be 0.0 after revocation; got {raw_weight}"
+    );
 
     // c: retrieve_tagged must exclude revoked rows
     let after = mem
@@ -265,7 +284,9 @@ async fn cabinet_preserves_dissent() {
     .to_string();
 
     let provider = MockProvider::always("mock", &verdict_json);
-    let verdict = synthesize(&provider, &transcript).await.expect("synthesize");
+    let verdict = synthesize(&provider, &transcript)
+        .await
+        .expect("synthesize");
 
     // Snapshot the verdict for regression detection
     insta::assert_json_snapshot!("cabinet_divergent_verdict", verdict);
@@ -380,15 +401,17 @@ async fn proactive_suppressed_during_active_session() {
 /// PrivacyEgressBlocked and the SpyProvider must record ZERO calls.
 #[tokio::test]
 async fn runner_egress_single_local_only_blocks_cloud_provider() {
-    use bastion::persona::{Persona, PersonaRegistry};
     use bastion::persona::router::{ResponseMode, RouterDecision};
     use bastion::persona::runner::run;
+    use bastion::persona::{Persona, PersonaRegistry};
     use std::collections::HashMap;
     use tokio::sync::RwLock;
 
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let spy = SpyProvider::new("openai", Arc::clone(&calls));
-    let provider = Arc::new(RwLock::new(Box::new(spy) as Box<dyn bastion::provider::Provider>));
+    let provider = Arc::new(RwLock::new(
+        Box::new(spy) as Box<dyn bastion::provider::Provider>
+    ));
 
     let mut personas = HashMap::new();
     personas.insert(
@@ -412,13 +435,23 @@ async fn runner_egress_single_local_only_blocks_cloud_provider() {
     };
 
     let history = vec![bastion::types::Message {
-        role:    bastion::types::Role::User,
+        role: bastion::types::Role::User,
         content: bastion::types::MessageContent::Text("my health data".to_owned()),
     }];
-    let result = run(decision, &registry, provider, &history, &bastion::types::CallConfig::default()).await;
+    let result = run(
+        decision,
+        &registry,
+        provider,
+        &history,
+        &bastion::types::CallConfig::default(),
+    )
+    .await;
 
     // Must return PrivacyEgressBlocked error
-    assert!(result.is_err(), "LocalOnly + cloud provider must return Err");
+    assert!(
+        result.is_err(),
+        "LocalOnly + cloud provider must return Err"
+    );
     let err_str = result.unwrap_err().to_string();
     assert!(
         err_str.contains("Privacy egress blocked"),
@@ -442,15 +475,17 @@ async fn runner_egress_single_local_only_blocks_cloud_provider() {
 /// - SpyProvider records ZERO calls
 #[tokio::test]
 async fn runner_egress_parallel_local_only_blocks_all_cloud_calls() {
-    use bastion::persona::{Persona, PersonaRegistry};
     use bastion::persona::router::{ResponseMode, RouterDecision};
     use bastion::persona::runner::run;
+    use bastion::persona::{Persona, PersonaRegistry};
     use std::collections::HashMap;
     use tokio::sync::RwLock;
 
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let spy = SpyProvider::new("openai", Arc::clone(&calls));
-    let provider = Arc::new(RwLock::new(Box::new(spy) as Box<dyn bastion::provider::Provider>));
+    let provider = Arc::new(RwLock::new(
+        Box::new(spy) as Box<dyn bastion::provider::Provider>
+    ));
 
     let mut personas = HashMap::new();
     for name in &["Saúde", "Privado"] {
@@ -476,13 +511,23 @@ async fn runner_egress_parallel_local_only_blocks_all_cloud_calls() {
     };
 
     let history = vec![bastion::types::Message {
-        role:    bastion::types::Role::User,
+        role: bastion::types::Role::User,
         content: bastion::types::MessageContent::Text("sensitive message".to_owned()),
     }];
-    let result = run(decision, &registry, provider, &history, &bastion::types::CallConfig::default()).await;
+    let result = run(
+        decision,
+        &registry,
+        provider,
+        &history,
+        &bastion::types::CallConfig::default(),
+    )
+    .await;
 
     // All tasks blocked → Err (all parallel persona calls failed)
-    assert!(result.is_err(), "All LocalOnly + cloud tasks must return Err collectively");
+    assert!(
+        result.is_err(),
+        "All LocalOnly + cloud tasks must return Err collectively"
+    );
 
     // SpyProvider must record ZERO calls
     let call_log = calls.lock().unwrap();
@@ -512,21 +557,44 @@ async fn owner_isolation_distinct_sessions() {
     sm.init_schema().await.expect("init_schema");
 
     // Create sessions for two distinct owners
-    let sess_a = sm.create_session_for("owner-a").await.expect("create_session_for a");
-    let sess_b = sm.create_session_for("owner-b").await.expect("create_session_for b");
+    let sess_a = sm
+        .create_session_for("owner-a")
+        .await
+        .expect("create_session_for a");
+    let sess_b = sm
+        .create_session_for("owner-b")
+        .await
+        .expect("create_session_for b");
 
     // Sessions must be distinct
     assert_ne!(sess_a, sess_b, "each owner must get a distinct session_id");
 
     // load_most_recent_id_for must return the correct session per owner
-    let found_a = sm.load_most_recent_id_for("owner-a").await.expect("lookup a");
-    let found_b = sm.load_most_recent_id_for("owner-b").await.expect("lookup b");
+    let found_a = sm
+        .load_most_recent_id_for("owner-a")
+        .await
+        .expect("lookup a");
+    let found_b = sm
+        .load_most_recent_id_for("owner-b")
+        .await
+        .expect("lookup b");
 
-    assert_eq!(found_a.as_deref(), Some(sess_a.as_str()), "owner-a must get their own session");
-    assert_eq!(found_b.as_deref(), Some(sess_b.as_str()), "owner-b must get their own session");
+    assert_eq!(
+        found_a.as_deref(),
+        Some(sess_a.as_str()),
+        "owner-a must get their own session"
+    );
+    assert_eq!(
+        found_b.as_deref(),
+        Some(sess_b.as_str()),
+        "owner-b must get their own session"
+    );
 
     // A new / unknown owner has no session
-    let found_c = sm.load_most_recent_id_for("owner-c").await.expect("lookup c");
+    let found_c = sm
+        .load_most_recent_id_for("owner-c")
+        .await
+        .expect("lookup c");
     assert!(found_c.is_none(), "unknown owner must have no session");
 }
 
@@ -535,8 +603,8 @@ async fn owner_isolation_distinct_sessions() {
 #[tokio::test]
 async fn owner_isolation_spoofed_sender_rejected() {
     use bastion::agent::handle;
-    use bastion::channel::OwnerMap;
     use bastion::channel::telegram::handle_update;
+    use bastion::channel::OwnerMap;
 
     let (h, mut rx) = handle::channel();
 
@@ -567,9 +635,9 @@ async fn owner_isolation_spoofed_sender_rejected() {
 /// guardrail errors → 400, and other errors → 500. No body leak.
 #[test]
 fn webhook_error_status_maps_correct_http_status() {
+    use axum::http::StatusCode;
     use bastion::channel::webhook::error_status;
     use bastion::types::BastionError;
-    use axum::http::StatusCode;
 
     // PrivacyEgressBlocked → 403 Forbidden
     let egress_err = anyhow::anyhow!(BastionError::PrivacyEgressBlocked);
@@ -588,7 +656,9 @@ fn webhook_error_status_maps_correct_http_status() {
     );
 
     // Guardrail typed error → 400 Bad Request (WR-09: typed variant, not string prefix)
-    let guard_err = anyhow::anyhow!(BastionError::InputGuardrailRejected("input is empty".to_owned()));
+    let guard_err = anyhow::anyhow!(BastionError::InputGuardrailRejected(
+        "input is empty".to_owned()
+    ));
     assert_eq!(
         error_status(&guard_err),
         StatusCode::BAD_REQUEST,
@@ -649,10 +719,20 @@ async fn channel_inbound_two_owners_get_distinct_sessions() {
     let (reply_a_tx, reply_a_rx) = tokio::sync::oneshot::channel();
     let (reply_b_tx, reply_b_rx) = tokio::sync::oneshot::channel();
 
-    tx.send(AgentRequest { text: "hello from a".into(), owner: "owner-a".into(), reply: reply_a_tx })
-        .await.expect("send a");
-    tx.send(AgentRequest { text: "hello from b".into(), owner: "owner-b".into(), reply: reply_b_tx })
-        .await.expect("send b");
+    tx.send(AgentRequest {
+        text: "hello from a".into(),
+        owner: "owner-a".into(),
+        reply: reply_a_tx,
+    })
+    .await
+    .expect("send a");
+    tx.send(AgentRequest {
+        text: "hello from b".into(),
+        owner: "owner-b".into(),
+        reply: reply_b_tx,
+    })
+    .await
+    .expect("send b");
     drop(tx); // close channel so consumer exits
 
     let reply_a = reply_a_rx.await.expect("reply_a recv").expect("reply_a ok");
@@ -662,8 +742,14 @@ async fn channel_inbound_two_owners_get_distinct_sessions() {
     assert_eq!(reply_b, "owner:owner-b", "owner-b must get their own reply");
 
     // Verify sessions remain distinct after all turns.
-    let found_a = sm.load_most_recent_id_for("owner-a").await.expect("lookup a");
-    let found_b = sm.load_most_recent_id_for("owner-b").await.expect("lookup b");
+    let found_a = sm
+        .load_most_recent_id_for("owner-a")
+        .await
+        .expect("lookup a");
+    let found_b = sm
+        .load_most_recent_id_for("owner-b")
+        .await
+        .expect("lookup b");
     assert_ne!(found_a, found_b, "sessions must stay distinct");
 
     consumer.await.expect("consumer task");
@@ -677,8 +763,8 @@ async fn channel_inbound_two_owners_get_distinct_sessions() {
 #[tokio::test]
 async fn channel_inbound_unmapped_sender_rejected() {
     use bastion::agent::handle;
-    use bastion::channel::OwnerMap;
     use bastion::channel::telegram::handle_update;
+    use bastion::channel::OwnerMap;
 
     let (h, mut rx) = handle::channel();
 
@@ -715,10 +801,10 @@ async fn channel_inbound_unmapped_sender_rejected() {
 /// This tests the full chain: agent error → typed reply → error_status.
 #[tokio::test]
 async fn channel_typed_error_reaches_webhook_error_status() {
+    use axum::http::StatusCode;
     use bastion::agent::handle;
     use bastion::channel::webhook::error_status;
     use bastion::types::BastionError;
-    use axum::http::StatusCode;
 
     let (h, mut rx) = handle::channel();
 
@@ -726,13 +812,18 @@ async fn channel_typed_error_reaches_webhook_error_status() {
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
             // Simulate agent returning PrivacyEgressBlocked for a LocalOnly persona (CR-01/CR-02).
-            let _ = req.reply.send(Err(anyhow::anyhow!(BastionError::PrivacyEgressBlocked)));
+            let _ = req
+                .reply
+                .send(Err(anyhow::anyhow!(BastionError::PrivacyEgressBlocked)));
         }
     });
 
     // Ask through the handle — must receive the typed Err.
     let result = h.ask("my health data".into(), "mario".into()).await;
-    assert!(result.is_err(), "agent-originated denial must propagate as Err");
+    assert!(
+        result.is_err(),
+        "agent-originated denial must propagate as Err"
+    );
 
     let err = result.unwrap_err();
     // error_status must map PrivacyEgressBlocked → 403, not 500 (WR-10 closed).
@@ -752,8 +843,8 @@ async fn channel_typed_error_reaches_webhook_error_status() {
 async fn cli_session_deterministic_across_turns() {
     use bastion::agent::loop_::AgentLoop;
     use bastion::goal::{GoalEngine, ScoringConfig};
-    use bastion::memory::sqlite::SqliteMemory;
     use bastion::mcp::McpClient;
+    use bastion::memory::sqlite::SqliteMemory;
     use bastion::persona::{Persona, PersonaRegistry};
     use bastion::provider::Provider;
     use bastion::session::SessionManager;
@@ -776,50 +867,75 @@ async fn cli_session_deterministic_across_turns() {
             Ok(LlmResponse {
                 text: "cli-response".into(),
                 tool_calls: None,
-                usage: TokenUsage { input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0 },
+                usage: TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_read: 0,
+                    cache_write: 0,
+                },
             })
         }
         async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
             Ok("cli-simple".into())
         }
         async fn complete_structured(
-            &self, _system: &str, _user: &str,
-            _schema: serde_json::Value, _max_tokens: u32, _temperature: f32,
+            &self,
+            _system: &str,
+            _user: &str,
+            _schema: serde_json::Value,
+            _max_tokens: u32,
+            _temperature: f32,
         ) -> anyhow::Result<String> {
             Ok(serde_json::json!({
                 "personas": ["Local"],
                 "owner": "_local",
                 "mode": "single",
                 "convene_reason": null
-            }).to_string())
+            })
+            .to_string())
         }
-        fn context_limit(&self) -> usize { 8192 }
-        fn model_name(&self) -> &str { "cli-mock" }
-        fn name(&self) -> &'static str { "mock" }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "cli-mock"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
     }
 
     let session = SessionManager::new(&path);
     session.init_schema().await.expect("init_schema");
     // Create TWO _local sessions — the older one should NOT be picked up.
-    let _old_sess = session.create_session_for("_local").await.expect("old sess");
+    let _old_sess = session
+        .create_session_for("_local")
+        .await
+        .expect("old sess");
     // Small sleep to ensure updated_at ordering differs (SQLite timestamps are integer seconds).
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let new_sess = session.create_session().await.expect("new sess");
 
-    let memory: bastion::memory::SharedMemory = SArc::new(RwLock::new(
-        Box::new(SqliteMemory::new(&path)) as Box<dyn bastion::memory::Memory>
-    ));
-    let mcp = McpClient::connect_all("nonexistent.json").await.expect("mcp");
+    let memory: bastion::memory::SharedMemory = SArc::new(RwLock::new(Box::new(SqliteMemory::new(
+        &path,
+    ))
+        as Box<dyn bastion::memory::Memory>));
+    let mcp = McpClient::connect_all("nonexistent.json")
+        .await
+        .expect("mcp");
 
     let mut personas = HashMap::new();
-    personas.insert("Local".to_string(), Persona {
-        name: "Local".to_string(),
-        description: None,
-        system_prompt: "You are Local.".into(),
-        tier: bastion::memory::PrivacyTier::CloudOk,
-        weight: 0.9,
-        skills: vec![],
-    });
+    personas.insert(
+        "Local".to_string(),
+        Persona {
+            name: "Local".to_string(),
+            description: None,
+            system_prompt: "You are Local.".into(),
+            tier: bastion::memory::PrivacyTier::CloudOk,
+            weight: 0.9,
+            skills: vec![],
+        },
+    );
 
     let provider: bastion::provider::SharedProvider =
         SArc::new(RwLock::new(Box::new(CliMockProvider) as Box<dyn Provider>));
@@ -838,12 +954,18 @@ async fn cli_session_deterministic_across_turns() {
     // Two consecutive CLI turns — both must succeed.
     let r1 = agent.run_turn("hello turn 1").await.expect("turn 1");
     let r2 = agent.run_turn("hello turn 2").await.expect("turn 2");
-    assert!(!r1.is_empty() && !r2.is_empty(), "both turns must produce responses");
+    assert!(
+        !r1.is_empty() && !r2.is_empty(),
+        "both turns must produce responses"
+    );
 
     // After two turns, messages must be appended to new_sess, NOT _old_sess.
     // Use a fresh SessionManager (same db) to verify messages are in new_sess.
     let verify_sm = SessionManager::new(&path);
-    let msgs_new = verify_sm.load_recent(&new_sess).await.expect("load_recent new");
+    let msgs_new = verify_sm
+        .load_recent(&new_sess)
+        .await
+        .expect("load_recent new");
     assert!(
         msgs_new.len() >= 2,
         "new session must have messages from both turns; got {} (WR-08)",

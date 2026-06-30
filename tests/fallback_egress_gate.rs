@@ -23,7 +23,11 @@ fn fallback_egress_gate_local_only_blocks_cloud() {
 fn fallback_egress_gate_local_only_allows_ollama() {
     // WR-04: LocalOnly + ollama is the only permitted combination for local-only personas
     let result = check_egress(Some(PrivacyTier::LocalOnly), "ollama");
-    assert!(result.is_ok(), "LocalOnly should allow ollama but got Err: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "LocalOnly should allow ollama but got Err: {:?}",
+        result
+    );
 }
 
 #[test]

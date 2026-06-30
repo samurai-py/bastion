@@ -2,8 +2,8 @@
 //! filter_for_mesh runs BEFORE check_egress — LocalOnly beliefs are stripped here
 //! so the egress gate only ever sees CloudOk beliefs for mesh.
 
-use crate::memory::Belief;
 use crate::hooks::egress::check_egress;
+use crate::memory::Belief;
 
 /// Declares which belief tags this owner permits to flow to a specific peer.
 #[derive(Debug, Clone)]
@@ -20,15 +20,14 @@ pub struct OwnerAllowlist {
 /// 2. Egress gate: check_egress(belief.tier, "mesh") — LocalOnly always denied.
 ///
 /// Result: only CloudOk beliefs with an explicitly-allowlisted tag survive.
-pub fn filter_for_mesh(
-    beliefs: Vec<Belief>,
-    allowlist: &OwnerAllowlist,
-) -> Vec<Belief> {
+pub fn filter_for_mesh(beliefs: Vec<Belief>, allowlist: &OwnerAllowlist) -> Vec<Belief> {
     beliefs
         .into_iter()
         .filter(|b| {
             // Stage 1: tag allowlist
-            let tag_ok = b.persona_tag.as_ref()
+            let tag_ok = b
+                .persona_tag
+                .as_ref()
                 .map(|t| allowlist.allowed_tags.contains(t))
                 .unwrap_or(false); // no tag → deny (conservative)
             if !tag_ok {

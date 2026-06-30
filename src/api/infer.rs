@@ -142,7 +142,10 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::RwLock;
         let provider: crate::provider::SharedProvider =
-            Arc::new(RwLock::new(Box::new(StubProvider { name: "anthropic", fail: false })
+            Arc::new(RwLock::new(Box::new(StubProvider {
+                name: "anthropic",
+                fail: false,
+            })
                 as Box<dyn crate::provider::Provider>));
         super::router(provider, None)
     }
@@ -151,7 +154,10 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::RwLock;
         let provider: crate::provider::SharedProvider =
-            Arc::new(RwLock::new(Box::new(StubProvider { name: "anthropic", fail: true })
+            Arc::new(RwLock::new(Box::new(StubProvider {
+                name: "anthropic",
+                fail: true,
+            })
                 as Box<dyn crate::provider::Provider>));
         super::router(provider, None)
     }
@@ -160,7 +166,10 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::RwLock;
         let provider: crate::provider::SharedProvider =
-            Arc::new(RwLock::new(Box::new(StubProvider { name: "ollama", fail: false })
+            Arc::new(RwLock::new(Box::new(StubProvider {
+                name: "ollama",
+                fail: false,
+            })
                 as Box<dyn crate::provider::Provider>));
         super::router(provider, None)
     }
@@ -169,7 +178,10 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::RwLock;
         let provider: crate::provider::SharedProvider =
-            Arc::new(RwLock::new(Box::new(StubProvider { name: "anthropic", fail: false })
+            Arc::new(RwLock::new(Box::new(StubProvider {
+                name: "anthropic",
+                fail: false,
+            })
                 as Box<dyn crate::provider::Provider>));
         super::router(provider, Some(token.to_owned()))
     }
@@ -250,7 +262,9 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let out: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(out["text"], "ok");
     }
@@ -295,7 +309,9 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_ne!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let text = String::from_utf8_lossy(&bytes);
         assert!(
             !text.contains("provider error"),
