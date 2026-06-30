@@ -1,180 +1,201 @@
-"""MCP Server for memupalace — exposes memory tools as a callable registry."""
+"""memupalace MCP server — exposes 6 memory tools via streamable-http (MUPL-01).
+
+Replaces MemupalaceMCPServer (manual dispatch) with fastmcp HTTP server.
+Transport: streamable-http, porta 8001 (or MEMUPALACE_PORT env var).
+
+Tools: memory_add, memory_search, memory_list_locations, memory_delete,
+       memory_embed, memory_invalidate (D-03).
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+import os
 
-if TYPE_CHECKING:
-    from skills.memupalace.embedder import ONNXEmbedder
-    from skills.memupalace.factory import Memupalace
+from fastmcp import FastMCP
+
+from skills.memupalace import query_sanitizer
+from skills.memupalace.factory import Memupalace
+from skills.memupalace.insight_cache import InsightCache
+from skills.memupalace.models import MemupalaceSettings
+
+logger = logging.getLogger(__name__)
+
+mcp = FastMCP("memupalace")
+
+# Singleton instance — initialized lazily on first tool call
+_mp: Memupalace | None = None
+
+# MUPL-02: TTL cache — avoids redundant LLM insight round-trips
+_insight_cache: InsightCache = InsightCache()
 
 
-class MemupalaceMCPServer:
-    """Simple MCP-style server that dispatches named tool calls.
+def _get_mp() -> Memupalace:
+    """Return (or initialize) the singleton Memupalace instance."""
+    global _mp
+    if _mp is None:
+        settings = MemupalaceSettings.from_env()
+        from skills.memupalace.factory import create_memupalace
 
-    No external MCP framework required — tools are registered as a plain dict
-    of {name: callable}, making the server easy to test and wire up.
-    """
+        _mp = create_memupalace(settings)
+    return _mp
 
-    def __init__(self, memupalace: "Memupalace", embedder: "ONNXEmbedder") -> None:
-        self._mp = memupalace
-        self._embedder = embedder
-        self._tools: dict[str, object] = {
-            "memory_add": self._memory_add,
-            "memory_search": self._memory_search,
-            "memory_list_locations": self._memory_list_locations,
-            "memory_delete": self._memory_delete,
-            "memory_embed": self._memory_embed,
-        }
 
-    # ------------------------------------------------------------------
-    # Registry API
-    # ------------------------------------------------------------------
-
-    def list_tools(self) -> list[str]:
-        """Return the names of all registered tools."""
-        return list(self._tools.keys())
-
-    def call_tool(self, name: str, **kwargs: object) -> object:
-        """Dispatch a tool call by name.
-
-        Raises:
-            ValueError: If *name* is not a registered tool.
-        """
-        if name not in self._tools:
-            raise ValueError(
-                f"Unknown tool: '{name}'. Available tools: {self.list_tools()}"
-            )
-        fn = self._tools[name]
-        return fn(**kwargs)  # type: ignore[operator]
-
-    # ------------------------------------------------------------------
-    # Tool implementations
-    # ------------------------------------------------------------------
-
-    def _memory_add(
-        self,
-        content: str,
-        wing: str,
-        hall: str | None = None,
-        room: str | None = None,
-    ) -> dict:
-        """Add or reinforce a memory.
-
-        Returns a dict with keys ``id`` and ``operation``.
-
-        Raises:
-            ValueError: If *content* is empty/whitespace or location slugs are invalid.
-        """
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError(
-                "Parameter 'content' must be a non-empty, non-whitespace string."
-            )
-        if not isinstance(wing, str) or not wing.strip():
-            raise ValueError(
-                "Parameter 'wing' must be a non-empty string."
-            )
-
-        result = self._mp.add(content=content, wing=wing, hall=hall, room=room)
-        return result.model_dump()
-
-    def _memory_search(
-        self,
-        query: str,
-        wing: str | None = None,
-        hall: str | None = None,
-        room: str | None = None,
-        limit: int = 5,
-        min_score: float | None = None,
-    ) -> list[dict]:
-        """Search memories by semantic similarity.
-
-        Returns a list of dicts, each representing a SearchResult.
-
-        Raises:
-            ValueError: If *query* is empty/whitespace or *limit* is not positive.
-        """
-        if not isinstance(query, str) or not query.strip():
-            raise ValueError(
-                "Parameter 'query' must be a non-empty, non-whitespace string."
-            )
-        if not isinstance(limit, int) or limit < 1:
-            raise ValueError(
-                f"Parameter 'limit' must be a positive integer, got {limit!r}."
-            )
-
-        results = self._mp.search(
-            query=query,
-            wing=wing,
-            hall=hall,
-            room=room,
-            limit=limit,
-            min_score=min_score,
+def _validate_str(name: str, value: object) -> str:
+    """Guard: raises ValueError if value is not a non-empty, non-whitespace string."""
+    if not isinstance(value, str) or not str(value).strip():
+        raise ValueError(
+            f"Parameter '{name}' must be a non-empty, non-whitespace string."
         )
-        return [r.model_dump() for r in results]
-
-    def _memory_list_locations(
-        self,
-        wing: str | None = None,
-        hall: str | None = None,
-    ) -> list[str]:
-        """List distinct location values.
-
-        - wing=None → all wings
-        - wing set, hall=None → halls in that wing
-        - wing+hall set → rooms in that wing+hall
-        """
-        return self._mp.list_locations(wing=wing, hall=hall)
-
-    def _memory_delete(self, memory_id: str) -> dict[str, str]:
-        """Delete a memory by ID.
-
-        Returns ``{"deleted": memory_id}`` on success.
-
-        Raises:
-            ValueError: If *memory_id* is empty.
-            KeyError: If *memory_id* does not exist in the store.
-        """
-        if not isinstance(memory_id, str) or not memory_id.strip():
-            raise ValueError(
-                "Parameter 'memory_id' must be a non-empty string."
-            )
-        self._mp.delete(memory_id)
-        return {"deleted": memory_id}
-
-    def _memory_embed(self, text: str) -> list[float]:
-        """Return the embedding vector for *text* using the shared ONNXEmbedder.
-
-        Reuses the already-loaded model — no second model is instantiated.
-
-        Raises:
-            ValueError: If *text* is empty or whitespace-only.
-        """
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError(
-                "Parameter 'text' must be a non-empty, non-whitespace string. "
-                "Cannot embed empty or whitespace-only text."
-            )
-        return self._embedder.embed(text)
+    return str(value)
 
 
 # ---------------------------------------------------------------------------
-# Factory
+# Tool: memory_add
 # ---------------------------------------------------------------------------
 
 
-def create_mcp_server(settings: object) -> "MemupalaceMCPServer":
-    """Create a fully wired MCP server (requires a real ONNX model on disk).
+@mcp.tool()
+def memory_add(
+    content: str,
+    wing: str = "general",
+    hall: str | None = None,
+    room: str | None = None,
+    rust_belief_id: str | None = None,
+) -> dict:
+    """Add a memory to memupalace. rust_belief_id links to Rust SQLite belief (D-03).
 
-    Args:
-        settings: A ``MemupalaceSettings`` instance.
-
-    Returns:
-        A ``MemupalaceMCPServer`` ready to handle tool calls.
+    MUPL-02: checks InsightCache first — if content+wing was recently cached,
+    returns the cached result without a redundant store.add() call.
     """
-    from skills.memupalace.embedder import ONNXEmbedder
-    from skills.memupalace.factory import _create_memupalace_with_embedder
+    _validate_str("content", content)
+    # MUPL-02: key the cache-aside on the FULL memory identity (content + wing +
+    # placement + belief link). Keying on content alone would silently collapse
+    # two distinct memories that differ only in hall/room/rust_belief_id into one
+    # store and return a stale id (data loss).
+    key_material = f"{content}::{hall}::{room}::{rust_belief_id}"
+    cache_key = InsightCache.make_key(key_material, wing)
+    cached = _insight_cache.get(cache_key)
+    if cached is not None:
+        logger.debug("memory_add: insight cache hit (wing=%s)", wing)
+        return {"id": cached, "operation": "cache_hit"}
 
-    embedder = ONNXEmbedder(settings.onnx_model_path)  # type: ignore[union-attr]
-    memupalace = _create_memupalace_with_embedder(settings, embedder)  # type: ignore[arg-type]
-    return MemupalaceMCPServer(memupalace=memupalace, embedder=embedder)
+    result = _get_mp().add(
+        content, wing=wing, hall=hall, room=room, rust_belief_id=rust_belief_id
+    )
+    _insight_cache.set(cache_key, result.id)
+    return {"id": result.id, "operation": result.operation}
+
+
+# ---------------------------------------------------------------------------
+# Tool: memory_search
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def memory_search(
+    query: str,
+    wing: str | None = None,
+    hall: str | None = None,
+    room: str | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    """Search memories by semantic similarity.
+
+    Applies query_sanitizer before embedding to strip system-prompt prefixes (D-14/MUPL-05).
+    """
+    _validate_str("query", query)
+    sanitized = query_sanitizer.sanitize(query)
+    if sanitized.was_sanitized:
+        logger.debug(
+            "query_sanitized method=%s original_len=%d clean_len=%d",
+            sanitized.method,
+            len(query),
+            len(sanitized.clean_query),
+        )
+    results = _get_mp().search(
+        sanitized.clean_query, wing=wing, hall=hall, room=room, limit=limit
+    )
+    return [
+        {
+            "id": r.id,
+            "content": r.content,
+            "score": r.salience_score,
+            "wing": r.wing,
+            "hall": r.hall,
+            "room": r.room,
+        }
+        for r in results
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Tool: memory_list_locations
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def memory_list_locations() -> dict:
+    """List all wings in the memupalace."""
+    locations = _get_mp().list_locations()
+    return {"wings": locations}
+
+
+# ---------------------------------------------------------------------------
+# Tool: memory_delete
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def memory_delete(memory_id: str) -> dict:
+    """Delete a memory by its ChromaDB ID."""
+    _validate_str("memory_id", memory_id)
+    _get_mp().delete(memory_id)
+    return {"deleted": memory_id}
+
+
+# ---------------------------------------------------------------------------
+# Tool: memory_embed
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def memory_embed(text: str) -> list[float]:
+    """Return the embedding vector for a text (for debugging/similarity)."""
+    _validate_str("text", text)
+    mp = _get_mp()
+    return mp._embedder.embed(text)
+
+
+# ---------------------------------------------------------------------------
+# Tool: memory_invalidate
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def memory_invalidate(rust_belief_id: str) -> dict:
+    """Invalidate embedding + KG nodes for a revoked Rust belief (D-03).
+
+    Called by the Rust core when a belief's weight drops to 0 (contestation/revocation).
+    Removes the ChromaDB embedding and marks KG entities valid_to = now.
+    """
+    _validate_str("rust_belief_id", rust_belief_id)
+    mp = _get_mp()
+    chroma_id = mp._store.invalidate(rust_belief_id)
+    kg_entities: list[str] = []
+    if hasattr(mp._kg, "invalidate_by_memory"):
+        kg_entities = mp._kg.invalidate_by_memory(rust_belief_id)
+    return {
+        "invalidated_chroma_id": chroma_id,
+        "invalidated_kg_entities": kg_entities,
+        "rust_belief_id": rust_belief_id,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    port = int(os.getenv("MEMUPALACE_PORT", "8001"))
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)

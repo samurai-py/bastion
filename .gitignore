@@ -210,9 +210,15 @@ __marimo__/
 # Bastion — Project-specific
 # ═══════════════════════════════════════
 
+# Internal planning & strategy (dev-only, never public)
+.planning/
+
 # Environment files (contains secrets)
 .env
 .env.local
+
+# MCP servers config — URL real pode conter endpoint/secret. Trackear só o .example
+.bastion/mcp-servers.json
 
 # Runtime data (generated at startup)
 config/
@@ -220,6 +226,13 @@ personas/
 tmp/
 models/
 db/
+
+# Bastion runtime DB + logs (local state — muda a cada run, pode ter dados privados)
+.bastion/sessions.db
+.bastion/*.log
+
+# Playwright MCP artifacts (snapshots/console/screenshots de QA)
+.playwright-mcp/
 
 # IDE / AI tools
 .vscode/
@@ -237,6 +250,10 @@ testsprite_tests/
 # Openclaw ecossystem cache
 .clawhub/
 skills/sonoscli/
+
+# Flutter mobile app — unignore lib/ (overrides Python virtualenv lib/ rule)
+!mobile/lib/
+!mobile/lib/**
 
 # TypeScript / Node
 bastion/mobile-connect/node_modules/

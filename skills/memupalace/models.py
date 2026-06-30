@@ -52,12 +52,27 @@ class SearchResult(BaseModel):
     last_reinforced_at: datetime
 
 
+class CorrelationId(BaseModel):
+    """Links a Rust SQLite belief to its ChromaDB embedding and KG entities (D-03).
+
+    Stored as ChromaDB metadata field 'rust_belief_id' on the embedding.
+    Used to propagate revocation from the Rust core to memupalace (D-03).
+    """
+
+    rust_belief_id: str  # UUID from Rust SQLite (source of truth)
+    chroma_id: str  # ChromaDB UUID returned by store.add()
+    kg_entity_ids: list[str] = []  # 0..N KG entity IDs (populated when KG is active)
+
+
 class MemupalaceSettings(BaseModel):
     chroma_path: str = "db/memupalace/chroma"
     sqlite_path: str = "db/memupalace/knowledge.db"
     onnx_model_path: str = "models/embedder.onnx"
     recency_decay_days: int = 30
     duplicate_threshold: float = 0.95
+    tokenizer_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    core_gateway_url: str = "http://core:3000/api/infer"
+    insight_cache_ttl: int = 3600
 
     @field_validator("duplicate_threshold")
     @classmethod
@@ -88,4 +103,10 @@ class MemupalaceSettings(BaseModel):
             onnx_model_path=os.getenv("MEMUPALACE_ONNX_MODEL_PATH", "models/embedder.onnx"),
             recency_decay_days=int(os.getenv("MEMUPALACE_RECENCY_DECAY_DAYS", "30")),
             duplicate_threshold=float(os.getenv("MEMUPALACE_DUPLICATE_THRESHOLD", "0.95")),
+            tokenizer_name=os.getenv(
+                "MEMUPALACE_TOKENIZER_NAME",
+                "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            ),
+            core_gateway_url=os.getenv("CORE_GATEWAY_URL", "http://core:3000/api/infer"),
+            insight_cache_ttl=int(os.getenv("MEMUPALACE_INSIGHT_CACHE_TTL", "3600")),
         )

@@ -78,6 +78,16 @@ bash <(curl -fsSL https://bastion.run/install)
 - **Bastion Cloud**: managed deployment for non-technical users. Single binary + Docker-first architecture already enables this. Keep the path open.
 - **APK/IPA**: Telegram covers the mobile use case for v3. A native app is Phase 5+ and optional. Webhook channel is the integration point when the time comes.
 
+### Capability Registry — uniform invocation surface *(principle adopted 2026-06-04; detailed design pending)*
+
+Direction: every system capability and every skill is a **canonical capability** with one schema-described definition (name + typed I/O + `invoke`). The ways to call it — direct function call (incl. tests), MCP tool, natural language / command router — are **thin adapters** over the same registry. One capability, many frontends.
+
+Two non-negotiable constraints (these keep it from becoming over-abstraction, per CLAUDE.md "no unnecessary abstractions"):
+1. **Agentic skill ≠ pure function.** A SKILL.md is a declarative/agentic behaviour (non-deterministic LLM output). The registry guarantees a uniform *interface* (typed I/O + `invoke`), NOT implementation purity. Deterministic capabilities (tools, system fns, commands) are pure; agentic skills are wrapped (args in → agent output out) but internally call the LLM.
+2. **Guardrails live at the registry boundary.** All frontends (direct / MCP / NL) pass through ONE policy middleware (privacy tier, owner, needs-approval). No "direct call" god-path may bypass the Phase 2 fail-closed egress or the Phase 3 approval queue — otherwise the privacy wedge breaks.
+
+Status: principle only. Detailed design is a dedicated pass (validate with Architect — it's a core system). Phase 3 decisions (inference gateway D-08, skill reload D-06) are compatible and must not contradict this. Today the pieces exist separately, not yet unified: `ToolRegistry`, command router, `McpClient`, `SkillsLoader`.
+
 ---
 
 ## Personas / Users

@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════
-# BASTION v2 — Makefile
+# BASTION v3 — Makefile
 # ═══════════════════════════════════════════════════════════════
 
 .PHONY: help up down restart logs pull update test test-skills clean
@@ -10,7 +10,7 @@ help: ## Mostra este menu
 
 # ── Operação ──────────────────────────────────────────────────
 
-up: ## Sobe o Bastion (openclaw + caddy)
+up: ## Sobe o Bastion (core daemon + skills)
 	docker compose up -d
 
 down: ## Para o Bastion
@@ -20,7 +20,7 @@ restart: ## Reinicia sem recriar containers
 	docker compose restart
 
 logs: ## Acompanha os logs em tempo real
-	docker compose logs -f openclaw
+	docker compose logs -f core
 
 # ── Atualização ───────────────────────────────────────────────
 

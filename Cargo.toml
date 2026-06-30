@@ -1,0 +1,82 @@
+[package]
+name    = "bastion"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bastion"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+tokio              = { version = "1",    features = ["full"] }
+async-openai       = { version = "0.38", features = ["chat-completion"] }
+reqwest            = { version = "0.13", features = ["json", "stream"] }
+rusqlite           = { version = "0.39", features = ["bundled"] }
+rmcp               = { version = "1.6",  features = [
+                         "client",
+                         "transport-child-process",
+                         "transport-streamable-http-client-reqwest",
+                       ] }
+serde              = { version = "1",    features = ["derive"] }
+serde_json         = "1"
+clap               = { version = "4",    features = ["derive"] }
+thiserror          = "2"
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3",  features = ["env-filter", "json"] }
+async-trait        = "0.1"
+futures-util       = "0.3"
+dotenvy            = "0.15"
+config             = "0.14"
+serde_norway = "0.9.42"
+schemars = "0.8"
+frankenstein = { version = "0.50.0", features = ["client-reqwest"] }
+axum = "0.8.9"
+# Phase 6 — mesh connectivity layer (plan 06-01)
+age              = "0.11"
+jsonwebtoken     = "9"
+tokio-stream     = { version = "0.1", features = ["sync"] }
+# 06-07: SEC-01 TOML injection hardening (toml_edit) + SEC-02 SSRF validation (url)
+toml_edit        = "0.22"
+url              = "2"
+regex            = "1"
+# 06-08: CSPRNG for /connect-app one-time codes (CR-02 OTC generation)
+rand             = "0.8"
+# SEAM #4 — OTel GenAI observability (plan 05-05)
+opentelemetry        = { version = "0.32", features = ["trace"] }
+opentelemetry_sdk    = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp   = { version = "0.32", features = ["grpc-tonic"] }
+opentelemetry-stdout = { version = "0.32" }
+tracing-opentelemetry = { version = "0.33" }
+
+[dev-dependencies]
+tokio-test   = "0.4"
+tracing-test = "0.2"
+tempfile     = "3"
+tower = { version = "0.5.3", features = ["util"] }
+http = "1.4.1"
+insta        = { version = "1", features = ["json"] }
+rstest       = "0.25"
+
+[[test]]
+name = "evals"
+path = "tests/evals/mod.rs"
+
+[profile.release]
+opt-level     = "z"   # size-optimize (not speed)
+lto           = true  # link-time optimization (fat LTO — best size)
+codegen-units = 1     # single codegen unit — slower build, better LTO
+# CR-03: panic = "unwind" (the default) is REQUIRED. Bastion is a long-running
+# daemon serving multiple owners; spawned cabinet/runner JoinSet tasks recover
+# from a panicking provider via their Err(join_err) arms (cabinet/orchestrator.rs,
+# persona/runner.rs). "abort" would kill the whole process on one provider panic,
+# making that recovery dead code in release. The ~10% binary-size saving is not
+# worth losing daemon resilience.
+panic         = "unwind"
+strip         = true  # strip symbols from final binary

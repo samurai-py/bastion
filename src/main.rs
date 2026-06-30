@@ -1,0 +1,503 @@
+use clap::{Parser, Subcommand};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
+use tracing_subscriber::fmt;
+
+use bastion::agent::handle;
+use bastion::agent::loop_::AgentLoop;
+use bastion::channel::OwnerMap;
+use bastion::goal::{GoalEngine, ScoringConfig};
+use bastion::mcp::McpClient;
+use bastion::memory::sqlite::SqliteMemory;
+use bastion::persona::PersonaRegistry;
+use bastion::proactive::CronService;
+use bastion::provider::registry::resolve_provider;
+use bastion::session::SessionManager;
+
+/// Inicializa o OTel TracerProvider.
+///
+/// stdout exporter é opt-in via `BASTION_OTEL_STDOUT=true` (off por padrão — não polui o REPL).
+/// Se `OTEL_EXPORTER_OTLP_ENDPOINT` estiver setado, adiciona OTLP/gRPC exporter.
+///
+/// SECURITY: não emite conteúdo de conversa por padrão —
+/// `gen_ai.input.messages` só é adicionado se `BASTION_OTEL_CONTENT_EVENTS=true`.
+///
+/// PITFALL 6: deve ser chamado ANTES de AgentLoop::new() para que spans criados
+/// dentro do AgentLoop não sejam descartados em silêncio (no-op tracer).
+fn init_otel_provider() -> anyhow::Result<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+
+    let mut provider_builder = SdkTracerProvider::builder();
+
+    // stdout exporter opt-in — off por padrão p/ não afogar o REPL do daemon.
+    // ponytail: era sempre-ligado; agora atrás de BASTION_OTEL_STDOUT=true.
+    if std::env::var("BASTION_OTEL_STDOUT").as_deref() == Ok("true") {
+        provider_builder =
+            provider_builder.with_batch_exporter(opentelemetry_stdout::SpanExporter::default());
+    }
+
+    // OTLP exporter opcional — só se endpoint configurado
+    let provider = if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+        let otlp_exporter = SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&endpoint)
+            .build()?;
+        provider_builder.with_batch_exporter(otlp_exporter).build()
+    } else {
+        provider_builder.build()
+    };
+
+    Ok(provider)
+}
+
+#[derive(Parser)]
+#[command(name = "bastion", about = "Bastion AI agent runtime", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Execute a single-turn agent call and exit
+    Agent {
+        #[arg(short = 'm', long, help = "Message to send to the agent")]
+        message: String,
+    },
+    /// Start long-running REPL daemon (reads stdin, responds, loops)
+    Daemon,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Load .env (if present) before any std::env::var read. Real shell env wins.
+    dotenvy::dotenv().ok();
+
+    // Load bastion.toml config (non-secret config only; secrets stay in .env)
+    let config_path = std::env::var("BASTION_CONFIG").unwrap_or_else(|_| "bastion.toml".to_owned());
+    let cfg = bastion::config::load_config(&config_path)?;
+
+    // Init structured JSON logging
+    std::fs::create_dir_all(
+        std::path::Path::new(&cfg.logging.log_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".bastion")),
+    )?;
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&cfg.logging.log_path)?;
+
+    fmt()
+        .json()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(log_file)
+        .init();
+
+    let cli = Cli::parse();
+
+    // Init SessionManager
+    let db_path = cfg.session.db_path.clone();
+    let session = SessionManager::new(&db_path);
+    session.init_schema().await?;
+
+    // D-02: auto-resume most recent session, or create new one
+    let session_id = match session.load_most_recent_id().await? {
+        Some(id) => {
+            tracing::info!(event = "session_resumed", session_id = %id);
+            id
+        }
+        None => {
+            let id = session.create_session().await?;
+            tracing::info!(event = "session_created", session_id = %id);
+            id
+        }
+    };
+
+    // Init MCP client from bastion.toml [mcp.servers] (D-09). connect_from_config handles
+    // failed servers gracefully: logs tracing::warn per failed server and continues.
+    // (Previously this used the legacy .bastion/mcp-servers.json path, which isn't mounted
+    // in the FROM-scratch container — so memupalace/skill-writer tools were silently absent.)
+    let mcp_client = McpClient::connect_from_config(&cfg.mcp.servers).await?;
+
+    // Init provider from config (default_model from bastion.toml, overridable via env BASTION__AGENT__DEFAULT_MODEL)
+    let default_model = cfg.agent.default_model.clone();
+    let provider: bastion::provider::SharedProvider =
+        Arc::new(RwLock::new(resolve_provider(&default_model)?));
+
+    let daily_budget = cfg.agent.daily_budget_usd;
+
+    // Init persona registry (load from "./personas/" directory; empty if missing — PERS-07)
+    let registry = PersonaRegistry::load_dir(".").await?;
+
+    // Init shared memory
+    let memory: bastion::memory::SharedMemory = Arc::new(RwLock::new(Box::new(SqliteMemory::new(
+        &db_path,
+    ))
+        as Box<dyn bastion::memory::Memory>));
+
+    // Init goal engine
+    let goals = GoalEngine::new(&db_path, ScoringConfig::default());
+
+    // SEAM #4: inicializar OTel TracerProvider ANTES de AgentLoop::new()
+    // (Pitfall 6: se chamado depois, spans no AgentLoop usariam no-op tracer)
+    // OTel 0.32: SdkTracerProvider shuts down on drop — keep _otel_provider alive until end of main().
+    let _otel_provider = init_otel_provider()
+        .unwrap_or_else(|e| {
+            tracing::warn!(event = "otel_init_failed", error = %e, "OTel init falhou — usando no-op tracer");
+            opentelemetry_sdk::trace::SdkTracerProvider::builder().build()
+        });
+    opentelemetry::global::set_tracer_provider(_otel_provider.clone());
+
+    let mut agent = AgentLoop::new(
+        provider.clone(),
+        session,
+        mcp_client,
+        session_id,
+        daily_budget,
+        registry,
+        memory.clone(),
+        goals,
+    );
+
+    match cli.command {
+        Command::Agent { message } => {
+            let response = agent.run_turn(&message).await?;
+            println!("{}", response);
+        }
+        Command::Daemon => {
+            daemon_loop(&mut agent, &cfg).await?;
+        }
+    }
+
+    // SEAM #4: flush e shutdown do OTel para não perder spans buffered.
+    // OTel 0.32: SdkTracerProvider::shutdown() flushes all batch processors.
+    // _otel_provider is still alive (owns the processors) — explicit shutdown before drop.
+    let _ = _otel_provider.shutdown();
+
+    Ok(())
+}
+
+/// REPL daemon loop: stdin line by line, slash commands, graceful shutdown (D-01).
+/// Five select arms: stdin, pending_rx (proactive), inbound_rx (channel), SIGTERM, Ctrl-C.
+/// All arms serialize through ONE `&mut agent` — single-turn invariant holds (CR-07).
+async fn daemon_loop(
+    agent: &mut AgentLoop,
+    cfg: &bastion::config::BastionConfig,
+) -> anyhow::Result<()> {
+    use bastion::agent::command::CommandResult;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::signal::unix::{signal, SignalKind};
+
+    // PROACT-05: take pending_rx out of the agent so we own it in the select! loop.
+    // Because select! processes ONE branch per iteration and run_turn fully awaits,
+    // a pending message is only picked up BETWEEN turns — this IS the structural guarantee.
+    let mut pending_rx = agent
+        .pending_rx
+        .take()
+        .expect("pending_rx must be available at daemon start");
+
+    // CR-07: create AgentHandle + inbound receiver BEFORE the select! loop.
+    // Channels (Telegram, webhook) hold clones of `handle` and send messages into `inbound_rx`.
+    // The select! arm below serializes all channel turns through the SAME agent as stdin/proactive.
+    let (agent_handle, mut inbound_rx) = handle::channel();
+
+    // Build OwnerMap from environment (mirrors how the provider is built above).
+    // Format: BASTION_WEBHOOK_OWNERS=token1:owner1,token2:owner2
+    //         BASTION_TELEGRAM_OWNERS=chat_id1:owner1,chat_id2:owner2
+    let webhook_owner_map = parse_owner_map_env("BASTION_WEBHOOK_OWNERS");
+    let telegram_owner_map = parse_owner_map_env("BASTION_TELEGRAM_OWNERS");
+
+    // Spawn webhook channel if BASTION_WEBHOOK_ADDR is set.
+    if let Ok(addr) = std::env::var("BASTION_WEBHOOK_ADDR") {
+        let h = agent_handle.clone();
+        let owner_map = webhook_owner_map;
+        // Phase 6: mesh connectivity — load peers from config, create broadcast channel for SSE.
+        let (events_tx, _) = tokio::sync::broadcast::channel::<String>(128);
+        let peer_map_initial = bastion::config::load_mesh_peers(cfg);
+        let mesh_peer_map = Arc::new(RwLock::new(peer_map_initial));
+        // WR-01: APP_JWT_SECRET must be set — no insecure fallback.
+        // serve_with_mesh will also fail-closed, but reading it here gives a clearer startup error.
+        let jwt_secret = std::env::var("APP_JWT_SECRET")
+            .unwrap_or_else(|_| "change-me-in-production".to_string()); // webhook channel enforces this
+
+        // Phase 6 Wave 2: P2PTransport + MeshSliceProvider when MESH_IDENTITY_KEY is set.
+        let (mesh_transport, mesh_slice_store) =
+            if let Ok(identity_key) = std::env::var("MESH_IDENTITY_KEY") {
+                let local_owner = std::env::var("BASTION_OWNER_ID")
+                    .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+                let transport = bastion::mesh::p2p::P2PTransport::new(
+                    local_owner.clone(),
+                    identity_key,
+                    mesh_peer_map.clone(),
+                    events_tx.clone(),
+                );
+                let shared: bastion::mesh::SharedMeshTransport = Arc::new(transport);
+
+                // MeshSliceProvider::new returns (provider, store); add_mesh_slice_provider
+                // constructs from the store — so we use from_store path via add_mesh_slice_provider.
+                let (_, store) =
+                    bastion::mesh::context_provider::MeshSliceProvider::new(local_owner.clone());
+                agent.add_mesh_slice_provider(store.clone());
+
+                // Periodic mesh sync (mesh.sync_interval minutes, default 15; 0 = disable)
+                let sync_interval = cfg.mesh.sync_interval;
+                let _mesh_sync_handle = bastion::scheduler::cron::spawn_mesh_sync_job(
+                    shared.clone(),
+                    mesh_peer_map.clone(),
+                    agent.memory.clone(),
+                    local_owner,
+                    sync_interval,
+                );
+                tracing::info!(
+                    event = "mesh_transport_enabled",
+                    sync_interval_minutes = sync_interval
+                );
+
+                (Some(shared), Some(store))
+            } else {
+                tracing::info!(
+                    event = "mesh_transport_disabled",
+                    "MESH_IDENTITY_KEY not set — mesh disabled"
+                );
+                (None, None)
+            };
+
+        // CR-02: create an OtcStore and pass it to serve_with_mesh so skill commands
+        // can insert BAST-XXXX codes for /auth/exchange and /mesh/pair.
+        // The same Arc is injected into the agent so the /connect-app REPL command
+        // writes codes the webhook server reads (06-08 OTC-writer wiring).
+        let otc_store = bastion::channel::webhook::new_otc_store();
+        agent.set_otc_store(otc_store.clone());
+        tokio::spawn(async move {
+            if let Err(e) = bastion::channel::webhook::serve_with_mesh(
+                h,
+                &addr,
+                owner_map,
+                events_tx,
+                mesh_peer_map,
+                jwt_secret,
+                mesh_transport,
+                mesh_slice_store,
+                otc_store,
+            )
+            .await
+            {
+                tracing::error!(event = "webhook_error", error = %e, "webhook channel terminated");
+            }
+        });
+        tracing::info!(event = "webhook_started", addr = %std::env::var("BASTION_WEBHOOK_ADDR").unwrap_or_default());
+    }
+
+    // Spawn Telegram channel if TELEGRAM_BOT_TOKEN is set.
+    if std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
+        match bastion::channel::telegram::TelegramChannel::from_env() {
+            Ok(tg) => {
+                let tg = tg.with_owner_map(telegram_owner_map);
+                let h = agent_handle.clone();
+                tokio::spawn(async move {
+                    use bastion::channel::Channel;
+                    if let Err(e) = Box::new(tg).run(h).await {
+                        tracing::error!(event = "telegram_error", error = %e, "telegram channel terminated");
+                    }
+                });
+                tracing::info!(event = "telegram_started");
+            }
+            Err(e) => {
+                tracing::warn!(event = "telegram_start_failed", error = %e);
+            }
+        }
+    }
+
+    // Spawn /api/infer gateway for Python MCP containers (D-08 / D-09).
+    // Port: BASTION_INFER_ADDR env var, default "127.0.0.1:3000" (loopback).
+    // Python containers call this endpoint; they never hold raw API keys.
+    //
+    // SEC (unauthenticated token-minting): this endpoint proxies inference using
+    // Bastion's provider credentials, so it MUST NOT be reachable unauthenticated.
+    // Defense in depth:
+    //   1. Default bind is loopback; widening requires explicit BASTION_INFER_ADDR.
+    //   2. BASTION_INFER_TOKEN enforces `Authorization: Bearer <token>` per request.
+    //   3. Fail closed: refuse to bind a non-loopback interface without a token.
+    // In Docker, the token is injected and the port stays on a private, unpublished
+    // network (see plan 03-06).
+    {
+        let infer_token = std::env::var("BASTION_INFER_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        let infer_addr =
+            std::env::var("BASTION_INFER_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
+        let host = infer_addr
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(&infer_addr);
+        let is_loopback =
+            host == "127.0.0.1" || host == "::1" || host == "[::1]" || host == "localhost";
+
+        if infer_token.is_none() && !is_loopback {
+            tracing::error!(
+                event = "infer_gateway_refused",
+                addr = %infer_addr,
+                "refusing to expose /api/infer on a non-loopback interface without BASTION_INFER_TOKEN (SEC: unauthenticated token-minting)"
+            );
+        } else {
+            if infer_token.is_none() {
+                tracing::warn!(
+                    event = "infer_gateway_no_auth",
+                    addr = %infer_addr,
+                    "/api/infer running without BASTION_INFER_TOKEN — loopback-only dev mode"
+                );
+            }
+            let infer_router = bastion::api::infer::router(agent.provider.clone(), infer_token);
+            tokio::spawn(async move {
+                match tokio::net::TcpListener::bind(&infer_addr).await {
+                    Ok(listener) => {
+                        tracing::info!(event = "infer_gateway_started", addr = %infer_addr);
+                        if let Err(e) = axum::serve(listener, infer_router).await {
+                            tracing::error!(event = "infer_gateway_error", error = %e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(event = "infer_gateway_bind_failed", addr = %infer_addr, error = %e);
+                    }
+                }
+            });
+        }
+    }
+
+    // Spawn CronService heartbeat into the pending queue (PROACT-01 / PROACT-02).
+    // It feeds goal-drift nudges into pending_tx. On tick the daemon will pick them up
+    // between turns via the pending_rx arm.
+    {
+        let cron = CronService::new(agent.pending_tx.clone(), agent.goals.clone());
+        let owner = bastion::agent::loop_::DEFAULT_OWNER.to_string();
+        // Only spawn heartbeat if there are goals to nudge (fire-and-forget task)
+        tokio::spawn(async move {
+            cron.run_heartbeat(std::time::Duration::from_secs(86_400), &owner)
+                .await;
+        });
+    }
+
+    // CONC-1: session mutex per owner — serializes turns from the same owner so a
+    // double-tap (two Telegram messages in quick succession) never starts a concurrent
+    // turn for that owner. Different owners are NOT blocked by each other.
+    // Arc<Mutex<()>> is cheap: lock body is just the run_turn_for call.
+    // HashMap grows per unique owner but never shrinks — acceptable for personal use
+    // with a small fixed set of owners (T-05-02-03 accepted risk).
+    let mut session_locks: HashMap<String, Arc<Mutex<()>>> = HashMap::new();
+
+    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+    // In a detached container (`docker compose up -d`) stdin is closed and returns EOF
+    // immediately. The daemon must keep running to serve channels (Telegram), so we track
+    // whether stdin is still live and disable that select arm on EOF instead of exiting.
+    let mut stdin_open = true;
+    let mut sigterm = signal(SignalKind::terminate())?;
+
+    println!("Bastion daemon started. Type a message or /help for commands.");
+
+    loop {
+        tokio::select! {
+            line = stdin.next_line(), if stdin_open => {
+                match line? {
+                    None => {
+                        tracing::info!(event = "stdin_eof");
+                        // Non-interactive / detached: stop polling the (now-dead) stdin arm but
+                        // keep serving channels, proactive nudges, and signals. The daemon exits
+                        // only on SIGTERM/Ctrl-C — NOT on stdin EOF (D-01 long-running invariant).
+                        stdin_open = false;
+                    }
+                    Some(s) if s.trim().is_empty() => continue,
+                    Some(s) if s.trim().starts_with('/') => {
+                        match agent.handle_command(s.trim()).await? {
+                            CommandResult::Stop    => break,
+                            CommandResult::Handled => {}
+                            CommandResult::Unknown(cmd) => {
+                                println!("Unknown command: {}. Type /help.", cmd);
+                            }
+                        }
+                    }
+                    Some(s) => {
+                        match agent.run_turn(&s).await {
+                            Ok(response) => {
+                                println!("{}", response);
+                            }
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                                tracing::error!(event = "turn_error", error = %e);
+                            }
+                        }
+                    }
+                }
+            }
+            // PROACT-05: proactive messages delivered ONLY between turns.
+            Some(msg) = pending_rx.recv() => {
+                tracing::info!(event = "proactive_turn", msg_len = msg.len());
+                match agent.run_turn(&msg).await {
+                    Ok(r) => println!("{r}"),
+                    Err(e) => tracing::error!(event = "proactive_turn_error", error = %e),
+                }
+            }
+            // CR-07: channel inbound arm — serializes Telegram/webhook turns through the SAME
+            // agent as stdin/proactive. The trusted owner was resolved by the channel layer.
+            // Typed Result propagated back through the oneshot (WR-10).
+            Some(req) = inbound_rx.recv() => {
+                // CONC-1: acquire per-owner lock before processing turn.
+                // Two turns from the same owner cannot run concurrently (double-tap protection).
+                // Different owners are independent — their locks do not contend.
+                let lock = session_locks
+                    .entry(req.owner.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone();
+                let _guard = lock.lock().await;
+                let res = agent.run_turn_for(&req.text, &req.owner).await;
+                if let Err(ref e) = res {
+                    tracing::warn!(
+                        event = "channel_turn_error",
+                        owner = %req.owner,
+                        error = %e,
+                        "channel turn failed"
+                    );
+                }
+                let _ = req.reply.send(res);
+            }
+            _ = sigterm.recv() => {
+                tracing::info!(event = "sigterm_received");
+                println!("Shutting down (SIGTERM).");
+                break;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!(event = "ctrl_c_received");
+                println!("\nShutting down (Ctrl-C).");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse a `KEY=val1:owner1,val2:owner2` env var into an [`OwnerMap`].
+/// Returns an empty map if the variable is absent or empty.
+/// Mirrors the CSV-pair format used by other Bastion env config (e.g. MCP servers).
+fn parse_owner_map_env(var: &str) -> OwnerMap {
+    let raw = match std::env::var(var) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return OwnerMap::default(),
+    };
+    let pairs: Vec<(&str, &str)> = raw
+        .split(',')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, ':');
+            let key = parts.next()?.trim();
+            let val = parts.next()?.trim();
+            if key.is_empty() || val.is_empty() {
+                // IN-08: log malformed pairs instead of silently dropping them.
+                tracing::warn!(event = "owner_map_malformed_pair", pair = pair.trim());
+                return None;
+            }
+            Some((key, val))
+        })
+        .collect();
+    OwnerMap::from_pairs(&pairs)
+}

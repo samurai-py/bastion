@@ -11,20 +11,29 @@ if TYPE_CHECKING:
 
 
 class ONNXEmbedder:
-    """Generates text embeddings using a local ONNX model (all-MiniLM-L6-v2).
+    """Generates text embeddings using a local ONNX model.
 
     The model is loaded once at initialization and reused for all subsequent
     calls — no external API calls are made.
     """
 
-    def __init__(self, model_path: str) -> None:
+    def __init__(self, model_path: str, tokenizer_name: str | None = None) -> None:
         """Load the ONNX model from *model_path*.
+
+        Args:
+            model_path: Path to the ONNX model file.
+            tokenizer_name: HuggingFace tokenizer name. If None, reads from
+                ``MEMUPALACE_TOKENIZER_NAME`` env var, falling back to
+                ``sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2``
+                (multilingual model with pt-BR support).
 
         Raises:
             FileNotFoundError: If the model file does not exist at *model_path*.
             ImportError: If ``onnxruntime`` is not installed.
             ImportError: If ``transformers`` is not installed.
         """
+        import os
+
         path = Path(model_path)
         if not path.exists():
             raise FileNotFoundError(
@@ -51,9 +60,11 @@ class ONNXEmbedder:
             str(path),
             providers=["CPUExecutionProvider"],
         )
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            "sentence-transformers/all-MiniLM-L6-v2"
+        _tokenizer_name = tokenizer_name or os.getenv(
+            "MEMUPALACE_TOKENIZER_NAME",
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         )
+        self._tokenizer = AutoTokenizer.from_pretrained(_tokenizer_name)
 
     # ------------------------------------------------------------------
     # Public API

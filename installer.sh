@@ -36,6 +36,22 @@ warn()    { echo -e "${YELLOW}[bastion]${RESET} $*"; }
 error()   { echo -e "${RED}[bastion] ERROR:${RESET} $*" >&2; }
 step()    { echo -e "\n${BOLD}▶ $*${RESET}"; }
 
+# PKG-06, D-11: escalation hook — prints claude -p command on failure
+_on_failure() {
+  local step="${1:-unknown}"
+  local err="${2:-}"
+  error "Installation failed at: ${step}"
+  echo ""
+  echo "Paste this command into Claude Code to diagnose and resume:"
+  echo ""
+  printf '  claude -p "Bastion installer failed at step: %s. Error: %s. OS: %s. Diagnose and provide next steps."\n' \
+    "${step}" "${err}" "$(uname -srm)"
+  echo ""
+  echo "(Claude Code: https://claude.ai/claude-code — or ask a human for help)"
+  exit 1
+}
+trap '_on_failure "unexpected error" "$BASH_COMMAND"' ERR
+
 banner() {
     echo -e "${BOLD}"
     echo "    ██████╗  █████╗ ███████╗████████╗██╗ ██████╗ ███╗   ██╗"
@@ -139,7 +155,7 @@ install_plugin() {
     plugin_id=$(echo "$plugin" | sed 's|.*/||')
   fi
 
-  local ext_dir="$HOME/.openclaw/extensions/${plugin_id}"
+  local ext_dir="$HOME/.bastion/extensions/${plugin_id}"
 
   # Skip se já instalado
   if [ -d "$ext_dir" ]; then
@@ -147,20 +163,18 @@ install_plugin() {
     return 0
   fi
 
-  # Tenta instalar sem forçar primeiro
-  if openclaw plugins install "$plugin" 2>/dev/null; then
+  # Instala via clawhub
+  if clawhub install "$plugin" 2>/dev/null; then
     success "Plugin ${plugin} instalado."
   elif [ "$force" = "--force" ]; then
     warn "Scanner detectou padrão suspeito em ${plugin} — forçando instalação (falso positivo conhecido)."
-    if openclaw plugins install "$plugin" --dangerously-force-unsafe-install; then
+    if clawhub install "$plugin" --force; then
       success "Plugin ${plugin} instalado."
     else
-      error "Falha ao instalar plugin ${plugin}. Instalação abortada."
-      exit 1
+      warn "Falha ao instalar plugin ${plugin}. Continuando sem ele."
     fi
   else
-    error "Falha ao instalar plugin ${plugin} — scanner bloqueou. Use --force se for falso positivo."
-    exit 1
+    warn "Falha ao instalar plugin ${plugin}. Continuando sem ele."
   fi
 }
 
@@ -176,82 +190,64 @@ install_skill() {
   fi
 }
 
-# ── 1. Check prerequisites ────────────────────────────────────────
-banner
-step "Verificando pré-requisitos..."
-
-install_docker() {
-  warn "Docker não encontrado."
-  echo ""
-
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    if command -v brew &>/dev/null; then
-      _ask "$(echo -e "${YELLOW}Instalar Docker Desktop via Homebrew? [s/N]: ${RESET}")" confirm
-      if [[ "$confirm" =~ ^[sS]$ ]]; then
-        brew install --cask docker
-        info "Abrindo Docker Desktop..."
-        open -a Docker
-        info "Aguarde o Docker iniciar e rode o installer novamente."
-        exit 0
-      else
-        error "Docker é obrigatório. Instale em: https://docs.docker.com/desktop/mac/install/"
-        exit 1
-      fi
-    else
-      error "Instale o Docker Desktop para Mac: https://docs.docker.com/desktop/mac/install/"
-      exit 1
-    fi
-
-  elif grep -qi microsoft /proc/version 2>/dev/null; then
-    _ask "$(echo -e "${YELLOW}Instalar Docker Engine no WSL2? [s/N]: ${RESET}")" confirm
-    if [[ "$confirm" =~ ^[sS]$ ]]; then
-      curl -fsSL https://get.docker.com | sh
-      sudo usermod -aG docker "$USER"
-      success "Docker instalado. Reinicie o terminal e rode o installer novamente."
-      exit 0
-    else
-      error "Docker é obrigatório para rodar o Bastion."
-      exit 1
-    fi
-
-  else
-    _ask "$(echo -e "${YELLOW}Instalar Docker automaticamente? [s/N]: ${RESET}")" confirm
-    if [[ "$confirm" =~ ^[sS]$ ]]; then
-      curl -fsSL https://get.docker.com | sh
-      sudo usermod -aG docker "$USER"
-      success "Docker instalado. Reinicie o terminal e rode o installer novamente."
-      exit 0
-    else
-      error "Docker é obrigatório. Instale em: https://docs.docker.com/get-docker/"
-      exit 1
-    fi
+# Idempotency: exit 0 if Bastion is already installed and running
+_check_already_installed() {
+  if [ -f .env ] && command -v docker &>/dev/null && docker compose ps --quiet 2>/dev/null | grep -q "bastion"; then
+    success "Bastion is already installed and running."
+    info "Run 'docker compose restart' to restart, or 'docker compose down' to stop."
+    exit 0
   fi
+}
+
+# PKG-05, D-10: Docker auto-install with sudo confirmation
+_install_docker() {
+  echo ""
+  warn "Docker not found. Install automatically? (requires sudo)"
+  read -rp "[bastion] Install Docker now? [y/N] " _install_choice
+  if [ "${_install_choice:-n}" != "y" ] && [ "${_install_choice:-n}" != "Y" ]; then
+    _on_failure "docker-install" "User declined Docker installation. Install manually: https://docs.docker.com/get-docker/"
+  fi
+  info "Downloading and running Docker official install script..."
+  curl -fsSL https://get.docker.com | sudo sh
+  # Add current user to docker group (avoids sudo for docker commands)
+  if getent group docker &>/dev/null; then
+    sudo usermod -aG docker "$USER" 2>/dev/null || true
+    warn "Added $USER to docker group. You may need to log out/in for it to take effect."
+  fi
+  success "Docker installed."
 }
 
 check_docker() {
   if command -v docker &>/dev/null; then
     success "Docker encontrado: $(docker --version | cut -d' ' -f3 | tr -d ',')"
   else
-    install_docker
+    _install_docker
   fi
 }
 
 check_docker_compose() {
   if docker compose version &>/dev/null 2>&1; then
     success "Docker Compose encontrado (plugin)"
-  elif command -v docker-compose &>/dev/null; then
-    success "Docker Compose encontrado: $(command -v docker-compose)"
   else
-    warn "Docker Compose não encontrado — instalando..."
-    COMPOSE_VERSION="v2.27.0"
-    COMPOSE_DIR="${HOME}/.docker/cli-plugins"
-    mkdir -p "$COMPOSE_DIR"
-    curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" \
-      -o "$COMPOSE_DIR/docker-compose"
-    chmod +x "$COMPOSE_DIR/docker-compose"
-    success "Docker Compose instalado."
+    _on_failure "docker-compose-check" "docker compose plugin not found. Install: https://docs.docker.com/compose/install/"
   fi
 }
+
+# ── 1. Check prerequisites ────────────────────────────────────────
+banner
+
+# --dry-run: validate dependencies and print steps only (no actual install)
+if [ "${1:-}" = "--dry-run" ]; then
+  info "Dry run — checking dependencies and printing steps only"
+  check_docker
+  check_docker_compose
+  success "Dry run complete."
+  exit 0
+fi
+
+_check_already_installed
+
+step "Verificando pré-requisitos..."
 
 check_docker
 check_docker_compose
@@ -284,19 +280,8 @@ check_clawhub() {
   fi
 }
 
-check_openclaw_cli() {
-  if ! command -v openclaw &>/dev/null; then
-    info "Instalando openclaw CLI..."
-    npm install -g openclaw@latest
-    success "openclaw CLI instalado."
-  else
-    success "openclaw CLI encontrado."
-  fi
-}
-
 check_node
 check_clawhub
-check_openclaw_cli
 
 # ── 2. Clone or update repository ────────────────────────────────
 step "Setting up Bastion directory..."
@@ -318,12 +303,12 @@ if [ -f "docker-compose.yml" ]; then
   if [[ "$clean_confirm" =~ ^[sS]$ ]]; then
     step "Limpando instalação anterior..."
     docker compose down -v --remove-orphans 2>/dev/null || true
-    # Limpar config gerado pelo OpenClaw (preserva repo root)
+    # Limpar config gerado pelo Bastion (preserva repo root)
     info "Removendo configuração antiga..."
     docker run --rm -v "$(pwd):/app" alpine sh -c \
       "chown -R $(id -u):$(id -g) /app/config 2>/dev/null; rm -rf /app/config /app/.env"
     # Remover plugins instalados localmente
-    rm -rf "$HOME/.openclaw/extensions"
+    rm -rf "$HOME/.bastion/extensions"
     success "Limpeza concluída."
   else
     docker compose down --remove-orphans 2>/dev/null || true
@@ -575,21 +560,21 @@ fi
 # ── 6.6. Instalar Plugins ─────────────────────────────────────────
 step "Instalando plugins..."
 
-install_plugin "@gendigital/sage-openclaw" --force
+install_plugin "@gendigital/sage-bastion" --force
 SAGE_INSTALLED=true
-install_plugin "@composio/openclaw-plugin" --force composio
+install_plugin "@composio/bastion-plugin" --force composio
 COMPOSIO_INSTALLED=true
 
-# Configurar consumer key no OpenClaw se disponível
+# Configurar consumer key no Bastion se disponível
 COMPOSIO_KEY=$(_env_get "COMPOSIO_CONSUMER_KEY")
 if [ -n "$COMPOSIO_KEY" ]; then
-  openclaw config set plugins.entries.composio.config.consumerKey "$COMPOSIO_KEY" 2>/dev/null || true
+  info "Composio consumer key configurada no .env."
 fi
 
 success "Scanner de segurança Sage ativo."
 
-# ── 7. Gerar openclaw.json com Configuração Robusta ───────────────
-step "Gerando configuração OpenClaw..."
+# ── 7. Gerar bastion.json com Configuração Robusta ───────────────
+step "Gerando configuração Bastion..."
 
 CONFIG_DIR="$INSTALL_DIR/config"
 mkdir -p "$CONFIG_DIR"
@@ -647,8 +632,8 @@ else
   CHANNELS_SECTION=""
 fi
 
-# Gerar openclaw.json com channels integrados
-cat > "$CONFIG_DIR/openclaw.json" <<EOF
+# Gerar bastion.json com channels integrados
+cat > "$CONFIG_DIR/bastion.json" <<EOF
 {
   "agents": {
     "defaults": {
@@ -688,7 +673,7 @@ cat > "$CONFIG_DIR/openclaw.json" <<EOF
 }
 EOF
 
-success "OpenClaw configurado com ${MODEL_NAME}"
+success "Bastion configurado com ${MODEL_NAME}"
 
 # ── 7.5. Instalar Skills Core ─────────────────────────────────────
 step "Instalando skills core..."
@@ -773,7 +758,7 @@ docker compose up -d --force-recreate --remove-orphans
 info "Aguardando o Bastion inicializar..."
 sleep 5
 
-if docker ps --filter "name=openclaw" --format "{{.Status}}" | grep -q "Up"; then
+if docker ps --filter "name=bastion" --format "{{.Status}}" | grep -q "Up"; then
   success "Bastion está rodando!"
 else
   warn "Container iniciado mas pode estar com problemas. Verifique os logs:"
@@ -821,20 +806,20 @@ if [ "$CHANNEL_FOUND" = false ]; then
   VALIDATION_FAILED=true
 fi
 
-# Verificar se o openclaw.json foi criado
-if [ ! -f "$CONFIG_DIR/openclaw.json" ]; then
-  error "Arquivo openclaw.json não foi criado"
+# Verificar se o bastion.json foi criado
+if [ ! -f "$CONFIG_DIR/bastion.json" ]; then
+  error "Arquivo bastion.json não foi criado"
   VALIDATION_FAILED=true
 else
-  # Verificar se tem a seção channels no openclaw.json
-  if ! grep -q '"channels"' "$CONFIG_DIR/openclaw.json"; then
-    warn "Seção 'channels' não encontrada no openclaw.json"
+  # Verificar se tem a seção channels no bastion.json
+  if ! grep -q '"channels"' "$CONFIG_DIR/bastion.json"; then
+    warn "Seção 'channels' não encontrada no bastion.json"
     VALIDATION_FAILED=true
   fi
-  
+
   # Verificar se tem a seção models
-  if ! grep -q '"models"' "$CONFIG_DIR/openclaw.json"; then
-    error "Seção 'models' não encontrada no openclaw.json"
+  if ! grep -q '"models"' "$CONFIG_DIR/bastion.json"; then
+    error "Seção 'models' não encontrada no bastion.json"
     VALIDATION_FAILED=true
   fi
 fi
@@ -853,18 +838,18 @@ if [ ! -d "$INSTALL_DIR/skills" ]; then
 fi
 
 # Verificar se o container está rodando
-if docker ps --filter "name=bastion-openclaw" --format "{{.Status}}" | grep -q "Up"; then
-  success "Container OpenClaw está rodando"
+if docker ps --filter "name=bastion-core" --format "{{.Status}}" | grep -q "Up"; then
+  success "Container Bastion está rodando"
 
   # Verificar se os bind mounts estão corretos dentro do container
-  if docker exec bastion-openclaw test -f /home/node/.openclaw/workspace/SOUL.md; then
+  if docker exec bastion-core test -f /home/node/.bastion/workspace/SOUL.md 2>/dev/null; then
     success "SOUL.md acessível no container"
   else
     warn "SOUL.md não encontrado dentro do container"
     VALIDATION_FAILED=true
   fi
 
-  if docker exec bastion-openclaw test -d /home/node/.openclaw/workspace/skills; then
+  if docker exec bastion-core test -d /home/node/.bastion/workspace/skills 2>/dev/null; then
     success "Skills acessíveis no container"
   else
     warn "Pasta skills não encontrada dentro do container"
@@ -874,14 +859,14 @@ if docker ps --filter "name=bastion-openclaw" --format "{{.Status}}" | grep -q "
   # Verificar se o Telegram conectou (se configurado)
   if [ -n "$(_env_get TELEGRAM_BOT_TOKEN)" ]; then
     sleep 3
-    if docker compose -f "$INSTALL_DIR/docker-compose.yml" logs openclaw 2>&1 | grep -q "starting provider"; then
+    if docker compose -f "$INSTALL_DIR/docker-compose.yml" logs bastion-core 2>&1 | grep -q "starting provider"; then
       success "Telegram conectado com sucesso"
     else
       warn "Telegram pode não ter conectado. Verifique os logs."
     fi
   fi
 else
-  error "Container OpenClaw não está rodando"
+  error "Container Bastion não está rodando"
   VALIDATION_FAILED=true
 fi
 

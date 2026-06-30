@@ -52,6 +52,7 @@ class MemoryStore:
         wing: str,
         hall: str | None,
         room: str | None,
+        rust_belief_id: str | None = None,
     ) -> str:
         """Persist a new memory and return its UUID."""
         memory_id = str(uuid.uuid4())
@@ -68,6 +69,7 @@ class MemoryStore:
                     "created_at": now,
                     "reinforcement_count": 0,
                     "last_reinforced_at": now,
+                    "rust_belief_id": rust_belief_id if rust_belief_id is not None else "",
                 }
             ],
         )
@@ -89,6 +91,26 @@ class MemoryStore:
         if not result["ids"]:
             raise KeyError(memory_id)
         self._col.delete(ids=[memory_id])
+
+    def invalidate(self, rust_belief_id: str) -> str | None:
+        """Find and delete the ChromaDB embedding for a revoked Rust belief (D-03).
+
+        Returns the chroma_id deleted, or None if no embedding found for this belief.
+        Called by memupalace MCP tool 'memory_invalidate' when Rust revokes a belief.
+
+        Guard: empty rust_belief_id returns None immediately (T-03-01-02).
+        """
+        if not rust_belief_id:
+            return None
+        result = self._col.get(
+            where={"rust_belief_id": {"$eq": rust_belief_id}},
+            include=["metadatas"],
+        )
+        if not result["ids"]:
+            return None
+        chroma_id = result["ids"][0]
+        self._col.delete(ids=[chroma_id])
+        return chroma_id
 
     # ------------------------------------------------------------------
     # Read operations
