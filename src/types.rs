@@ -106,6 +106,7 @@ impl Default for CallConfig {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BastionError {
     #[error("Provider error: {0}")]
     Provider(String),
