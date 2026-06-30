@@ -21,7 +21,7 @@
 //! 7. Ana's Cabinet can deliberate with Mario's synthesis as context input.
 //!
 //! This is an ASYNC exchange — no blocking, no unified Cabinet across instances.
-//! Rich governance (sync, HITL, RBAC) = closed/Fabric. OSS = neutral mechanism only.
+//! Rich governance (sync, HITL, RBAC) lives in a separate closed layer. OSS = neutral mechanism only.
 
 use std::collections::HashMap;
 use std::sync::Arc;

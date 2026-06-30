@@ -4,8 +4,8 @@
 //! cada provider é consultado e seus blocos são concatenados ao system prompt.
 //!
 //! **Regra de fronteira (LOCKED):** o core NÃO interpreta o conteúdo dos blocos.
-//! O provider decide o formato; o core só inclui. Isso permite que a Fabric injete
-//! `<active_object>...</active_object>` sem que o core conheça o schema.
+//! O provider decide o formato; o core só inclui. Isso permite que uma integração externa
+//! injete `<active_object>...</active_object>` sem que o core conheça o schema.
 
 use crate::memory::PrivacyTier;
 
@@ -30,7 +30,7 @@ pub struct ContextBlock {
 /// Exemplos de uso:
 /// - `IdentityProvider`: injeta o bloco de identidade (M1) para o owner.
 /// - `MemoryRagProvider`: busca beliefs relevantes e injeta como contexto RAG.
-/// - Fabric: injeta `<active_object>` sem que o core conheça o schema.
+/// - Integração externa: injeta `<active_object>` sem que o core conheça o schema.
 #[async_trait::async_trait]
 pub trait TurnContextProvider: Send + Sync {
     /// Retorna blocos de contexto opacos para o turn atual.

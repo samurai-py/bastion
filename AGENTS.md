@@ -1,6 +1,6 @@
 # Bastion — Rust agent runtime
 
-Bastion is the **OSS Rust runtime** that hosts AI agents: an async (tokio) daemon running the agent tool-loop, serving channels (Telegram / webhook / HTTP via axum), connecting MCP servers (rmcp), calling LLM providers, and persisting sessions in SQLite. It is the **open substrate** of Katsui OS — only Bastion + Alchemist are open. It **replaced the old OpenClaw/Python v2**: there is no Python, Node, OpenClaw, ClawHub, gateway, or `skills/*/manifest.json` here. Ignore any doc that says otherwise — current intel lives in `.planning/codebase/` (re-mapped to Rust 2026-06-30).
+Bastion is the **OSS Rust runtime** that hosts AI agents: an async (tokio) daemon running the agent tool-loop, serving channels (Telegram / webhook / HTTP via axum), connecting MCP servers (rmcp), calling LLM providers, and persisting sessions in SQLite. It is a **self-hosted, open** agent runtime. It **replaced the old OpenClaw/Python v2**: there is no Python, Node, OpenClaw, ClawHub, gateway, or `skills/*/manifest.json` here. Ignore any doc that says otherwise — current intel lives in `.planning/codebase/` (re-mapped to Rust 2026-06-30).
 
 ## How to work here
 - **Standard = the `rust-standards` skill.** Errors: typed `BastionError` (thiserror, `#[non_exhaustive]`, `src/types.rs`) carried via `anyhow` and matched at boundaries with `downcast_ref::<BastionError>()`; `anyhow` only at the binary boundary (`main.rs` / handlers) — do **not** churn the user-implementable trait `Result`s into per-module enums. No `unwrap`/`expect` in non-test paths except proven-invariant / fail-fast. `tracing` structured fields, never `println!`. English rustdoc.
@@ -13,8 +13,8 @@ Bastion is the **OSS Rust runtime** that hosts AI agents: an async (tokio) daemo
 - **One tool surface:** everything goes through `CapabilityRegistry::invoke` (`src/capability/registry.rs`) — the single policy boundary. **Agents never get raw SQL.** Locality keys on the typed `Capability::is_local()`, not on a `cmd:` name string (forged `cmd:` names are rejected).
 - **Concurrency:** SQLite WAL + `busy_timeout=5000` (`src/session/sqlite.rs`) + per-owner `Arc<Mutex<()>>` (`src/main.rs`). (Entity-level OCC + Redlock are not here yet — see `.planning/todos/pending/house-standards-alignment.md`.)
 - **`<active_object>` via the `TurnContextProvider` seam** (`src/agent/context.rs`): opaque blocks the core concatenates **without interpreting**; per-block egress checked at system-prompt build.
-- **Observability:** OpenTelemetry GenAI spans/events, pluggable sinks (stdout / OTLP), content-events opt-in. Control Tower is "just another sink".
-- **Agent-Dojo / Track-B contract surface:** `src/session/sqlite.rs` + `src/agent/loop_.rs` + `src/capability/registry.rs` — keep these stable; they are what the closed Fabric consumes.
+- **Observability:** OpenTelemetry GenAI spans/events, pluggable sinks (stdout / OTLP), content-events opt-in. Any external dashboard is "just another sink".
+- **Stable contract surface:** `src/session/sqlite.rs` + `src/agent/loop_.rs` + `src/capability/registry.rs` — keep these stable; external integrations depend on them as a contract.
 
 ## Runtime guardrails enforced in code (don't regress) — `src/hooks/` + mesh + cabinet/privacy spec
 - **Financial / irreversible actions** need explicit user confirmation; never autonomous.

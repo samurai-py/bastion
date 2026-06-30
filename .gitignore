@@ -211,7 +211,9 @@ __marimo__/
 # ═══════════════════════════════════════
 
 # Internal planning & strategy (dev-only, never public)
+# Lives in the private solutions repo; a symlink here keeps tooling resolving ./.planning.
 .planning/
+.planning
 
 # Environment files (contains secrets)
 .env

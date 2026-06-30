@@ -125,7 +125,7 @@ The `/mesh/pair` endpoint validates:
 |----------|-------|
 | Same LAN | Direct IP/hostname — no extra config needed |
 | Cross-network (home + work) | Tailscale recommended; assign stable hostnames via MagicDNS |
-| Remote managed | Bastion Cloud (closed relay) — see `docs/bastion-cloud-architecture.md` |
+| Remote managed | Bastion Cloud (closed relay) |
 
 Bastion Cloud acts as a blind relay: it forwards encrypted `MeshEnvelope.ciphertext` without
 holding any private key. Neither party needs to expose a public IP.
