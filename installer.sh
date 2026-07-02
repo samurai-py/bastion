@@ -748,8 +748,12 @@ cd "$INSTALL_DIR"
 
 # Diretórios já criados com ownership correto via mkdir-p acima — nenhum chown necessário
 
-# Pull da imagem mais recente para evitar cache corrompido
-docker compose pull --quiet
+# Pull da imagem mais recente para evitar cache corrompido.
+# --ignore-buildable: os 4 serviços bastion-* têm `build:` (sem imagem em registry
+# nenhum) — sem essa flag, `pull` tenta baixá-los e falha, e o `set -e` aborta antes
+# de chegar no `up` (que é quem builda). Só `busybox:stable` (volume-init) é pull de
+# verdade; o resto é construído localmente pelo `up` logo abaixo.
+docker compose pull --quiet --ignore-buildable
 
 # Força recreação para aplicar novas configurações
 docker compose up -d --force-recreate --remove-orphans
