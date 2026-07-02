@@ -3,8 +3,27 @@ use crate::persona::PersonaRegistry;
 use crate::provider::registry::resolve_provider;
 use crate::provider::SharedProvider;
 
+/// Every real Bastion slash command — single source of truth so callers (e.g.
+/// main.rs's inbound_rx arm, WEB-CMD-01) can tell "known command that's
+/// console-only" apart from "not a Bastion command at all" (a Claude-Code-style
+/// `/usage` typed out of habit should fall through to the normal Unknown-command
+/// message, not be mislabeled "console-only" as if it would work at the console).
+pub const KNOWN_COMMANDS: &[&str] = &[
+    "/connect-app",
+    "/model",
+    "/stop",
+    "/as",
+    "/cabinet",
+    "/contest",
+    "/logs",
+    "/help",
+];
+
 pub enum CommandResult {
-    Handled,
+    /// Carries the user-facing text — the stdin console prints it, the webhook
+    /// channel (WEB-CMD-01) puts it straight in the JSON reply. Neither path
+    /// duplicates formatting logic; this function is the only place that builds it.
+    Handled(String),
     Stop,
     Unknown(String),
 }
@@ -24,11 +43,15 @@ fn generate_otc() -> String {
     format!("BAST-{}-{}", g1, g2)
 }
 
-/// Route slash commands from stdin.
+/// Route slash commands from stdin OR a channel (WEB-CMD-01 — webhook/Telegram
+/// reuse this exact router via main.rs's inbound_rx arm; `/stop` is refused there
+/// for channel-sourced requests before it ever reaches here).
 /// Acquires write lock on provider for /model (safe — called only between turns).
 ///
 /// Widened signature (plan 08): also accepts registry + memory for /as, /cabinet, /contest.
 /// CR-02 (plan 06-08): also accepts the shared OTC store for /connect-app.
+/// `owner` scopes owner-sensitive commands (e.g. /contest) — IDOR guard now that
+/// this router is reachable from multi-owner channels, not just the local console.
 pub async fn handle_command(
     input: &str,
     provider: &SharedProvider,
@@ -36,6 +59,7 @@ pub async fn handle_command(
     memory: &SharedMemory,
     forced_persona: &mut Option<String>,
     otc_store: Option<&crate::channel::webhook::OtcStore>,
+    owner: &str,
 ) -> anyhow::Result<CommandResult> {
     let trimmed = input.trim();
     let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
@@ -56,16 +80,17 @@ pub async fn handle_command(
                         code.clone(),
                         (device.to_string(), std::time::Instant::now()),
                     );
-                    println!("One-time pairing code for '{}': {}", device, code);
-                    println!("Enter it in the app within 5 minutes (POST /auth/exchange).");
                     tracing::info!(event = "connect_app_otc_issued", device = %device);
-                    Ok(CommandResult::Handled)
+                    Ok(CommandResult::Handled(format!(
+                        "One-time pairing code for '{device}': {code}\n\
+                         Enter it in the app within 5 minutes (POST /auth/exchange)."
+                    )))
                 }
-                None => {
-                    println!("/connect-app unavailable — the webhook channel is not running.");
-                    println!("Start the daemon with BASTION_WEBHOOK_ADDR set, then retry.");
-                    Ok(CommandResult::Handled)
-                }
+                None => Ok(CommandResult::Handled(
+                    "/connect-app unavailable — the webhook channel is not running.\n\
+                     Start the daemon with BASTION_WEBHOOK_ADDR set, then retry."
+                        .to_string(),
+                )),
             }
         }
 
@@ -80,9 +105,10 @@ pub async fn handle_command(
             let new_provider = resolve_provider(model)?;
             // Acquire WRITE lock between turns — blocks until any active stream releases READ lock
             *provider.write().await = new_provider;
-            println!("Switched to model: {}", model);
             tracing::info!(event = "provider_swapped", model = %model);
-            Ok(CommandResult::Handled)
+            Ok(CommandResult::Handled(format!(
+                "Switched to model: {model}"
+            )))
         }
 
         "/stop" => {
@@ -99,29 +125,31 @@ pub async fn handle_command(
                 .ok_or_else(|| anyhow::anyhow!("/as requires a persona name (e.g. /as Aria)"))?;
 
             if registry.get(persona_name).is_none() {
-                println!(
+                return Ok(CommandResult::Handled(format!(
                     "Unknown persona '{}'. Available: {}",
                     persona_name,
                     registry.names().join(", ")
-                );
-                return Ok(CommandResult::Handled);
+                )));
             }
 
             *forced_persona = Some(persona_name.to_string());
-            println!("Next turn will use persona: {}", persona_name);
             tracing::info!(event = "persona_forced", persona = %persona_name);
-            Ok(CommandResult::Handled)
+            Ok(CommandResult::Handled(format!(
+                "Next turn will use persona: {persona_name}"
+            )))
         }
 
         "/cabinet" => {
             // CAB-04: convene Cabinet with named personas on the next turn.
-            // For now: print the personas that would be convened (deliberation on next turn
+            // For now: report the personas that would be convened (deliberation on next turn
             // is triggered by the router returning Cabinet mode, which the user can force
             // by listing the intent in their message; full /cabinet override is Phase 3+).
             let personas_arg = parts.get(1).map(|s| s.trim()).unwrap_or("").trim();
-            if personas_arg.is_empty() {
-                println!("Usage: /cabinet <persona1> [persona2 ...]");
-                println!("Available personas: {}", registry.names().join(", "));
+            let msg = if personas_arg.is_empty() {
+                format!(
+                    "Usage: /cabinet <persona1> [persona2 ...]\nAvailable personas: {}",
+                    registry.names().join(", ")
+                )
             } else {
                 let names: Vec<&str> = personas_arg.split_whitespace().collect();
                 let unknown: Vec<&str> = names
@@ -130,18 +158,21 @@ pub async fn handle_command(
                     .copied()
                     .collect();
                 if !unknown.is_empty() {
-                    println!(
+                    format!(
                         "Unknown personas: {}. Available: {}",
                         unknown.join(", "),
                         registry.names().join(", ")
-                    );
+                    )
                 } else {
-                    println!("Cabinet convened with: {}", names.join(", "));
-                    println!("(Cabinet deliberation will run on next message that triggers Cabinet mode)");
                     tracing::info!(event = "cabinet_convene_request", personas = %names.join(","));
+                    format!(
+                        "Cabinet convened with: {}\n\
+                         (Cabinet deliberation will run on next message that triggers Cabinet mode)",
+                        names.join(", ")
+                    )
                 }
-            }
-            Ok(CommandResult::Handled)
+            };
+            Ok(CommandResult::Handled(msg))
         }
 
         "/contest" => {
@@ -162,20 +193,18 @@ pub async fn handle_command(
                 )
             })?;
 
-            // Owner-scoped revoke (IDOR guard): uses DEFAULT_OWNER for the stdin/daemon path
-            let owner = crate::agent::loop_::DEFAULT_OWNER;
+            // Owner-scoped revoke (IDOR guard): the caller's real owner, not a hardcoded
+            // constant — this router is reachable from multi-owner channels now (WEB-CMD-01).
             {
                 let mem = memory.write().await;
                 mem.revoke_belief(owner, id).await.map_err(|e| {
                     anyhow::anyhow!("/contest: could not revoke belief {}: {}", id, e)
                 })?;
             }
-            println!(
-                "Belief {} revoked (soft-revoke — audit trail preserved).",
-                id
-            );
             tracing::info!(event = "belief_revoked", belief_id = id, owner = owner);
-            Ok(CommandResult::Handled)
+            Ok(CommandResult::Handled(format!(
+                "Belief {id} revoked (soft-revoke — audit trail preserved)."
+            )))
         }
 
         "/logs" => {
@@ -188,29 +217,25 @@ pub async fn handle_command(
                 .or_else(|_| std::env::var("BASTION__LOGGING__LOG_PATH"))
                 .unwrap_or_else(|_| "bastion.log".to_string());
             let entries = read_recent_log_errors(&log_path, 10);
-            if entries.is_empty() {
-                println!("Nenhum erro recente nos logs.");
+            let msg = if entries.is_empty() {
+                "Nenhum erro recente nos logs.".to_string()
             } else {
-                for entry in &entries {
-                    println!("{}", entry);
-                }
-            }
-            Ok(CommandResult::Handled)
+                entries.join("\n")
+            };
+            Ok(CommandResult::Handled(msg))
         }
 
-        "/help" => {
-            println!("Available commands:");
-            println!(
-                "  /model <name>         Switch LLM provider+model (e.g. /model claude-opus-4-7)"
-            );
-            println!("  /stop                 Shut down daemon");
-            println!("  /as <persona>         Force persona for next turn (PERS-05)");
-            println!("  /cabinet [personas..] Convene Cabinet with named personas (CAB-04)");
-            println!("  /contest <id>         Revoke a belief by ID (D-14 explicit escape hatch)");
-            println!("  /logs                 Show recent ERROR/WARN log entries (M3)");
-            println!("  /help                 Show this help");
-            Ok(CommandResult::Handled)
-        }
+        "/help" => Ok(CommandResult::Handled(
+            "Available commands:\n\
+             \x20 /model <name>         Switch LLM provider+model (console only — daemon-wide state)\n\
+             \x20 /stop                 Shut down daemon (console only)\n\
+             \x20 /as <persona>         Force persona for next turn (console only — daemon-wide state)\n\
+             \x20 /cabinet [personas..] Convene Cabinet with named personas (console only)\n\
+             \x20 /contest <id>         Revoke a belief by ID (D-14 — also over webhook/Telegram)\n\
+             \x20 /logs                 Show recent ERROR/WARN log entries (console only)\n\
+             \x20 /help                 Show this help (also over webhook/Telegram)"
+                .to_string(),
+        )),
 
         _ => Ok(CommandResult::Unknown(trimmed.to_owned())),
     }
@@ -379,11 +404,12 @@ mod tests {
             &mem,
             &mut forced,
             None,
+            "_local",
         )
         .await
         .expect("handle_command");
 
-        assert!(matches!(result, CommandResult::Handled));
+        assert!(matches!(result, CommandResult::Handled(_)));
 
         // Belief should be gone from retrieve_tagged
         let beliefs = {
@@ -409,6 +435,7 @@ mod tests {
             &mem,
             &mut forced,
             None,
+            "_local",
         )
         .await
         .expect("cmd");
@@ -428,10 +455,18 @@ mod tests {
         let provider = make_provider();
         let mut forced = None;
 
-        let result = handle_command("/as Aria", &provider, &registry, &mem, &mut forced, None)
-            .await
-            .expect("cmd");
-        assert!(matches!(result, CommandResult::Handled));
+        let result = handle_command(
+            "/as Aria",
+            &provider,
+            &registry,
+            &mem,
+            &mut forced,
+            None,
+            "_local",
+        )
+        .await
+        .expect("cmd");
+        assert!(matches!(result, CommandResult::Handled(_)));
         assert_eq!(
             forced.as_deref(),
             Some("Aria"),
@@ -521,10 +556,18 @@ mod tests {
 
         // Point RUST_LOG_PATH to a non-existent file — /logs should still return Handled.
         std::env::set_var("RUST_LOG_PATH", "/tmp/bastion_no_log_for_test.log");
-        let result = handle_command("/logs", &provider, &registry, &mem, &mut forced, None)
-            .await
-            .expect("cmd");
-        assert!(matches!(result, CommandResult::Handled));
+        let result = handle_command(
+            "/logs",
+            &provider,
+            &registry,
+            &mem,
+            &mut forced,
+            None,
+            "_local",
+        )
+        .await
+        .expect("cmd");
+        assert!(matches!(result, CommandResult::Handled(_)));
     }
 
     #[test]
@@ -558,10 +601,11 @@ mod tests {
             &mem,
             &mut forced,
             Some(&store),
+            "_local",
         )
         .await
         .expect("cmd");
-        assert!(matches!(result, CommandResult::Handled));
+        assert!(matches!(result, CommandResult::Handled(_)));
 
         // Exactly one code, mapped to the supplied device name, freshly issued.
         let guard = store.read().await;
@@ -598,9 +642,10 @@ mod tests {
             &mem,
             &mut forced,
             None,
+            "_local",
         )
         .await
         .expect("cmd");
-        assert!(matches!(result, CommandResult::Handled));
+        assert!(matches!(result, CommandResult::Handled(_)));
     }
 }

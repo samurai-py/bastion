@@ -35,6 +35,15 @@ label = "skill-writer"
 url   = "http://self-improving:8003/mcp"
 label = "self-improving"
 
+# Content-validation tools (post length, feed fold preview) — shared with the Claude Code
+# plugins in ../social-skills via the same content-mcp server. Local dev only: run
+# `npm run start:http` in content-mcp before starting the daemon. If content-mcp is ever
+# containerized into docker-compose.yml, change this to the container hostname (like the
+# servers above), not localhost.
+[mcp.servers.content]
+url   = "http://localhost:8010/mcp"
+label = "content"
+
 [channels.telegram]
 enabled = true
 

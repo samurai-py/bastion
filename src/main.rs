@@ -410,9 +410,12 @@ async fn daemon_loop(
                     }
                     Some(s) if s.trim().is_empty() => continue,
                     Some(s) if s.trim().starts_with('/') => {
-                        match agent.handle_command(s.trim()).await? {
-                            CommandResult::Stop    => break,
-                            CommandResult::Handled => {}
+                        match agent
+                            .handle_command(s.trim(), bastion::agent::loop_::DEFAULT_OWNER)
+                            .await?
+                        {
+                            CommandResult::Stop => break,
+                            CommandResult::Handled(msg) => println!("{msg}"),
                             CommandResult::Unknown(cmd) => {
                                 println!("Unknown command: {}. Type /help.", cmd);
                             }
@@ -442,7 +445,20 @@ async fn daemon_loop(
             // CR-07: channel inbound arm — serializes Telegram/webhook turns through the SAME
             // agent as stdin/proactive. The trusted owner was resolved by the channel layer.
             // Typed Result propagated back through the oneshot (WR-10).
+            //
+            // WEB-CMD-01: slash commands reuse the same router the stdin console uses
+            // (agent.handle_command), but ALLOWLISTED, not blocklisted — commands are
+            // console-only by default. `provider` and `forced_persona` are single fields
+            // shared by the whole daemon (not per-owner), so /model and /as let one remote
+            // owner affect every other owner's turns; /logs exposes daemon-wide (not
+            // owner-scoped) WARN/ERROR entries; /connect-app mints a JWT whose `sub` is the
+            // caller-chosen device name verbatim — remotely reachable, that's an
+            // authentication bypass (mint a code naming ANY owner, then impersonate them).
+            // Only /help (stateless) and /contest (owner-scoped, see command.rs) are safe
+            // for a remote channel caller today. Extend this list only after confirming a
+            // new command is properly owner-scoped — do not default new commands to open.
             Some(req) = inbound_rx.recv() => {
+                const REMOTE_ALLOWED_COMMANDS: &[&str] = &["/help", "/contest"];
                 // CONC-1: acquire per-owner lock before processing turn.
                 // Two turns from the same owner cannot run concurrently (double-tap protection).
                 // Different owners are independent — their locks do not contend.
@@ -451,7 +467,32 @@ async fn daemon_loop(
                     .or_insert_with(|| Arc::new(Mutex::new(())))
                     .clone();
                 let _guard = lock.lock().await;
-                let res = agent.run_turn_for(&req.text, &req.owner).await;
+                let trimmed = req.text.trim();
+                let command_token = trimmed.split_whitespace().next().filter(|s| s.starts_with('/'));
+                // A token can look like a command but not be one (e.g. a Claude-Code-style
+                // `/usage` typed out of habit, or a plain typo) — only KNOWN_COMMANDS get the
+                // "console-only" verdict; anything else falls through to handle_command's own
+                // Unknown-command message, exactly matching what the console would say.
+                let is_known_command = command_token
+                    .is_some_and(|c| bastion::agent::command::KNOWN_COMMANDS.contains(&c));
+                let res = if let Some(cmd) =
+                    command_token.filter(|c| is_known_command && !REMOTE_ALLOWED_COMMANDS.contains(c))
+                {
+                    Ok(format!("{cmd} is console-only — not allowed remotely."))
+                } else if command_token.is_some() {
+                    match agent.handle_command(trimmed, &req.owner).await {
+                        Ok(CommandResult::Handled(msg)) => Ok(msg),
+                        Ok(CommandResult::Unknown(cmd)) => {
+                            Ok(format!("Unknown command: {cmd}. Type /help."))
+                        }
+                        Ok(CommandResult::Stop) => {
+                            Ok("/stop is console-only — not allowed remotely.".to_string())
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    agent.run_turn_for(&req.text, &req.owner).await
+                };
                 if let Err(ref e) = res {
                     tracing::warn!(
                         event = "channel_turn_error",

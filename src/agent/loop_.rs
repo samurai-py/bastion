@@ -1072,7 +1072,11 @@ impl AgentLoop {
         self.otc_store = Some(store);
     }
 
-    pub async fn handle_command(&mut self, input: &str) -> anyhow::Result<CommandResult> {
+    pub async fn handle_command(
+        &mut self,
+        input: &str,
+        owner: &str,
+    ) -> anyhow::Result<CommandResult> {
         handle_command(
             input,
             &self.provider,
@@ -1080,6 +1084,7 @@ impl AgentLoop {
             &self.memory,
             &mut self.forced_persona,
             self.otc_store.as_ref(),
+            owner,
         )
         .await
     }

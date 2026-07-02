@@ -1,11 +1,18 @@
 [package]
-name    = "bastion"
-version = "0.1.0"
-edition = "2021"
+name        = "bastion"
+version     = "0.1.0"
+edition     = "2021"
+default-run = "bastion"
 
 [[bin]]
 name = "bastion"
 path = "src/main.rs"
+
+# Minimal terminal client for the webhook+SSE API (same surface the mobile
+# companion pairs with) — no daemon code touched, no new dependencies.
+[[bin]]
+name = "pokedev-cli"
+path = "src/bin/pokedev_cli.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -25,7 +32,7 @@ rmcp               = { version = "1.6",  features = [
                        ] }
 serde              = { version = "1",    features = ["derive"] }
 serde_json         = "1"
-clap               = { version = "4",    features = ["derive"] }
+clap               = { version = "4",    features = ["derive", "env"] }
 thiserror          = "2"
 anyhow             = "1"
 tracing            = "0.1"
@@ -54,6 +61,9 @@ opentelemetry_sdk    = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp   = { version = "0.32", features = ["grpc-tonic"] }
 opentelemetry-stdout = { version = "0.32" }
 tracing-opentelemetry = { version = "0.33" }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 tokio-test   = "0.4"
