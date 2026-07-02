@@ -696,6 +696,18 @@ BASTION_GID=$(id -g)
 _env_set "BASTION_UID" "$BASTION_UID"
 _env_set "BASTION_GID" "$BASTION_GID"
 
+# Gerar APP_JWT_SECRET se ausente — necessário pro canal webhook/cockpit (WR-01:
+# o daemon recusa subir o webhook sem isso). Idempotente: não sobrescreve valor existente.
+if [ -z "$(_env_get APP_JWT_SECRET)" ]; then
+  _env_set "APP_JWT_SECRET" "$(openssl rand -hex 32)"
+  info "APP_JWT_SECRET gerado."
+fi
+
+# Bind address do webhook/cockpit dentro do container — só define se ausente.
+if [ -z "$(_env_get BASTION_WEBHOOK_ADDR)" ]; then
+  _env_set "BASTION_WEBHOOK_ADDR" "0.0.0.0:8080"
+fi
+
 # Detectar timezone do sistema
 SYSTEM_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null \
   || cat /etc/timezone 2>/dev/null \

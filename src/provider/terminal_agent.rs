@@ -35,6 +35,25 @@ impl TerminalAgentProvider {
                 .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_owned());
             args.push("--model".to_owned());
             args.push(model);
+            // PROV-09 tool inversion: this provider returns tool_calls: None by design —
+            // a terminal agent runs its OWN tool-loop, so Bastion-side function-calling
+            // (MCP tools offered to the model) never fires. The documented mitigation is
+            // to point the CC itself at the same MCP servers: pass a Claude Code MCP
+            // config file here and memory/skills become CC-native tools.
+            if let Ok(mcp_cfg) = std::env::var("BASTION_TERMINAL_AGENT_MCP_CONFIG") {
+                if !mcp_cfg.is_empty() {
+                    args.push("--mcp-config".to_owned());
+                    args.push(mcp_cfg);
+                }
+            }
+            // Headless `-p` runs cannot answer permission prompts — MCP tools must be
+            // pre-allowed (e.g. "mcp__memupalace mcp__skill-writer") or CC declines them.
+            if let Ok(allowed) = std::env::var("BASTION_TERMINAL_AGENT_ALLOWED_TOOLS") {
+                if !allowed.is_empty() {
+                    args.push("--allowedTools".to_owned());
+                    args.push(allowed);
+                }
+            }
         }
         let out = tokio::process::Command::new(&self.bin)
             .args(&args)

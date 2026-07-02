@@ -17,6 +17,11 @@ BASTION__AGENT__DEFAULT_MODEL=claude_code  bastion daemon   # ou =opencode
 `registry.rs` resolve `claude_code` → bin `claude`, `opencode` → bin `opencode`. O host do daemon precisa
 ter o CLI **instalado e autenticado** (`claude` logado) — o provider usa essa auth, sem API key.
 
+> ⚠️ **Incompatível com o deploy Docker padrão (installer.sh).** O container `core` é `FROM scratch` —
+> só o binário do Bastion, sem `claude`, sem node, sem shell: o spawn falha por construção. Este provider
+> exige o daemon rodando **no host**. O binário é musl estático — dá pra extrair da imagem já buildada,
+> sem toolchain: `docker create --name x bastion-core:latest && docker cp x:/bastion ./bastion-host && docker rm x`.
+
 Rodando local (sem docker), passe paths graváveis senão dá os-error-13 nos paths `/bastion-data`:
 
 ```bash
@@ -47,7 +52,21 @@ servers do daemon. Ele chama no loop dele, gravando na **mesma** memupalace → 
 > As URLs do `bastion.toml` (`http://memupalace:8001/...`) são hostnames do docker network. O CC roda no
 > HOST → use `localhost:800X` se publicar as portas no compose, ou rode o CC na mesma rede docker.
 
-**Claude Code** (`.mcp.json` no projeto, ou `claude mcp add ... -s user` p/ global):
+**Por daemon (recomendado p/ multi-instância)** — o provider repassa um MCP config e a allowlist de
+tools direto pro `claude -p`, sem tocar config global do usuário. Ideal quando cada daemon aponta pra
+servers diferentes (ex.: um companion com memupalace, um executor com o MCP de um board externo):
+
+```bash
+BASTION_TERMINAL_AGENT_MCP_CONFIG=$PWD/cc-mcp.json \
+BASTION_TERMINAL_AGENT_ALLOWED_TOOLS="mcp__memupalace mcp__skill-writer" \
+BASTION__AGENT__DEFAULT_MODEL=claude_code  bastion daemon
+```
+
+`BASTION_TERMINAL_AGENT_MCP_CONFIG` = path de um MCP config do Claude Code (formato abaixo).
+`BASTION_TERMINAL_AGENT_ALLOWED_TOOLS` é **necessário** no headless: `-p` não tem como responder prompt
+de permissão — tool MCP não pré-aprovada é recusada silenciosamente.
+
+**Claude Code global** (`.mcp.json` no projeto, ou `claude mcp add ... -s user`):
 
 ```json
 {
