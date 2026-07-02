@@ -109,6 +109,11 @@ weight-system, life-log, e os canais (stdin, **Telegram**, webhook, app mobile).
 - **Store de memória** depende do CC decidir chamar `memory_add` (o system prompt instrui; o CC obedece
   bem). Se notar que não persiste, o plano B é store determinístico pós-turn (não implementado, YAGNI).
 
+**Recall sem tool-calling (`BASTION_MEMORY_RAG=1`):** o `MemoryRagProvider` (SEAM #2) injeta os beliefs
+locais relevantes direto no system prompt — recall funciona mesmo com o CC nunca emitindo `tool_calls`,
+e respeita privacy tiers (blocos separados por tier; o egress derruba só o LocalOnly em provider cloud).
+Opt-in; complementa (não substitui) o memupalace semântico via MCP acima.
+
 ## Telemetria no REPL
 
 Os spans OTel não vão mais pro stdout por padrão (poluíam o REPL). Pra ver: `BASTION_OTEL_STDOUT=true`.

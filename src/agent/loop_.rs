@@ -109,6 +109,21 @@ impl AgentLoop {
             .context_providers
             .push(Box::new(IdentityProvider::new(agent.memory.clone())));
 
+        // SEAM #2 — MemoryRagProvider: recall de beliefs por injeção (perna "RAG" do
+        // BIG-1, decisão de híbrido ainda pendente → opt-in). Funciona com qualquer
+        // provider — incluindo terminal-agents (PROV-09) que nunca emitem tool_calls —
+        // e é egress-safe: blocos separados por tier, build_system_prompt derruba
+        // por bloco. Default-off porque providers com function-calling já recebem as
+        // tools de memória (injetar também duplicaria exposição e cresce o prompt).
+        let memory_rag_on = std::env::var("BASTION_MEMORY_RAG")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if memory_rag_on {
+            agent.context_providers.push(Box::new(
+                crate::agent::memory_rag::MemoryRagProvider::new(agent.memory.clone()),
+            ));
+            tracing::info!(event = "memory_rag_enabled");
+        }
+
         // BIG-1 (Gap 2): populate the capability_registry from every connected MCP tool.
         // Without this the registry stays empty, list_tool_defs() returns [] (so the normal
         // persona path offers ZERO tools to the LLM), and the is_empty() fast-path in
