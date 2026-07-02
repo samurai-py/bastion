@@ -75,8 +75,17 @@ class TestONNXEmbedderInit:
 # ---------------------------------------------------------------------------
 
 
-def _make_embedder_with_mock(dim: int = _EMBED_DIM) -> Any:
-    """Construct ONNXEmbedder bypassing file check and real session."""
+def _make_embedder_with_mock(
+    dim: int = _EMBED_DIM,
+    *,
+    tokenizer_emits_token_type_ids: bool = True,
+    model_declares_token_type_ids: bool = True,
+) -> Any:
+    """Construct ONNXEmbedder bypassing file check and real session.
+
+    The two keyword flags simulate the tokenizer↔ONNX-export mismatches seen in
+    the wild (XLM-R tokenizer emits no token_type_ids; some exports declare it).
+    """
     import numpy as np
     from embedder import ONNXEmbedder
 
@@ -86,16 +95,30 @@ def _make_embedder_with_mock(dim: int = _EMBED_DIM) -> Any:
 
     def _tokenize(texts: list[str], **kwargs: Any) -> dict[str, Any]:
         n = len(texts)
-        return {
+        out = {
             "input_ids": np.ones((n, 5), dtype=np.int64),
             "attention_mask": np.ones((n, 5), dtype=np.int64),
-            "token_type_ids": np.zeros((n, 5), dtype=np.int64),
         }
+        if tokenizer_emits_token_type_ids:
+            out["token_type_ids"] = np.zeros((n, 5), dtype=np.int64)
+        return out
 
     tokenizer.side_effect = _tokenize
     embedder._tokenizer = tokenizer  # type: ignore[attr-defined]
 
     session = MagicMock()
+
+    # NOTE: MagicMock(name=...) sets the mock's own name, NOT a .name attribute —
+    # build the input specs with explicit attribute assignment.
+    declared = ["input_ids", "attention_mask"]
+    if model_declares_token_type_ids:
+        declared.append("token_type_ids")
+    input_specs = []
+    for input_name in declared:
+        spec = MagicMock()
+        spec.name = input_name
+        input_specs.append(spec)
+    session.get_inputs.return_value = input_specs
 
     def _run(output_names: Any, feed: Any) -> list[Any]:
         batch = feed["input_ids"].shape[0]
@@ -147,6 +170,57 @@ def test_embed_is_l2_normalised() -> None:
     vec = embedder.embed("normalisation test")
     norm = math.sqrt(sum(x * x for x in vec))
     assert abs(norm - 1.0) < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# Regression: tokenizer ↔ ONNX-export input mismatch (token_type_ids)
+# Bug found live 2026-07-02: XLM-R tokenizer emits no token_type_ids but the
+# deployed ONNX export declared it as required → "required inputs are missing".
+# ---------------------------------------------------------------------------
+
+
+def _capture_feed(embedder: Any) -> dict[str, Any]:
+    """Wrap the mock session.run to record the feed dict it receives."""
+    captured: dict[str, Any] = {}
+    original_run = embedder._session.run.side_effect
+
+    def _capturing_run(output_names: Any, feed: Any) -> Any:
+        captured.update(feed)
+        return original_run(output_names, feed)
+
+    embedder._session.run.side_effect = _capturing_run
+    return captured
+
+
+@requires_numpy
+def test_token_type_ids_synthesized_when_model_requires_but_tokenizer_omits() -> None:
+    """Model declares token_type_ids, tokenizer omits it → zeros are fed."""
+    import numpy as np
+
+    embedder = _make_embedder_with_mock(
+        tokenizer_emits_token_type_ids=False,
+        model_declares_token_type_ids=True,
+    )
+    captured = _capture_feed(embedder)
+    embedder.embed("rex")
+
+    assert "token_type_ids" in captured, "required model input must be fed"
+    assert np.all(captured["token_type_ids"] == 0), "single segment → all zeros"
+    assert captured["token_type_ids"].shape == captured["input_ids"].shape
+
+
+@requires_numpy
+def test_token_type_ids_dropped_when_model_does_not_declare_it() -> None:
+    """Tokenizer emits token_type_ids, model doesn't declare it → not fed."""
+    embedder = _make_embedder_with_mock(
+        tokenizer_emits_token_type_ids=True,
+        model_declares_token_type_ids=False,
+    )
+    captured = _capture_feed(embedder)
+    embedder.embed("rex")
+
+    assert "token_type_ids" not in captured, "undeclared graph input must not be fed"
+    assert set(captured) == {"input_ids", "attention_mask"}
 
 
 # ---------------------------------------------------------------------------
