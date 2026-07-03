@@ -569,15 +569,34 @@ impl AgentLoop {
         //    The Cabinet path also produces its own text.
         //    Only the truly empty case (no persona matched) reaches run_provider_fallback.
         let final_text = if route_text.is_empty() {
-            self.run_provider_fallback(
-                &mut history,
-                &session_id,
-                owner,
-                user_input,
-                turn_tier,
-                turn_persona.as_deref(),
-            )
-            .await?
+            match self
+                .run_provider_fallback(
+                    &mut history,
+                    &session_id,
+                    owner,
+                    user_input,
+                    turn_tier,
+                    turn_persona.as_deref(),
+                )
+                .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    // EVAL-01: grow the regression set from a concrete production
+                    // failure signal (egress rejection) — tier-gated, structural-only.
+                    if matches!(
+                        e.downcast_ref::<BastionError>(),
+                        Some(BastionError::PrivacyEgressBlocked)
+                    ) {
+                        crate::eval::capture::record_failure(
+                            crate::eval::capture::FailureKind::EgressReject,
+                            turn_tier,
+                            "localonly_belief_blocked_from_cloud_provider",
+                        );
+                    }
+                    return Err(e);
+                }
+            }
         } else {
             route_text
         };

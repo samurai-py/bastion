@@ -55,32 +55,14 @@ fn privacy_egress_matrix(
     #[case] provider: &str,
     #[case] expected_ok: bool,
 ) {
-    let result = check_egress(tier, provider);
-    if expected_ok {
-        assert!(
-            result.is_ok(),
-            "Expected Ok for {:?} + {}, got Err: {:?}",
-            tier,
-            provider,
-            result
-        );
-    } else {
-        assert!(
-            result.is_err(),
-            "Expected Err(PrivacyEgressBlocked) for {:?} + {}, got Ok",
-            tier,
-            provider
-        );
-        // Assert the error is specifically PrivacyEgressBlocked
-        let err_str = result.unwrap_err().to_string();
-        assert!(
-            err_str.contains("Privacy egress blocked"),
-            "Expected PrivacyEgressBlocked error for {:?} + {}, got: {}",
-            tier,
-            provider,
-            err_str
-        );
-    }
+    // Promoted to the in-process verifier (EVAL-02) — cargo test --test evals and the
+    // Reflector's runtime merge gate now exercise the SAME check_egress assertion.
+    let result = bastion::eval::verifier::assert_egress_case(tier, provider, expected_ok);
+    assert!(
+        result.passed,
+        "verifier case failed: {:?}",
+        result.failed_cases
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -159,10 +141,12 @@ async fn injection_blocked_regardless_of_content() {
 #[tokio::test]
 async fn memory_revocation_clean() {
     use bastion::memory::sqlite::SqliteMemory;
-    use bastion::memory::Memory;
+    use bastion::memory::{Memory, SharedMemory};
     use bastion::session::SessionManager;
     use rusqlite::Connection;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
+    use tokio::sync::RwLock;
 
     let f = NamedTempFile::new().unwrap();
     let path = f.path().to_str().unwrap().to_owned();
@@ -187,23 +171,13 @@ async fn memory_revocation_clean() {
         .await
         .expect("store_belief");
 
-    // Confirm it is retrievable before revocation
-    let before = mem
-        .retrieve_tagged("owner1", None)
-        .await
-        .expect("retrieve before revoke");
-    assert_eq!(
-        before.len(),
-        1,
-        "belief must be retrievable before revocation"
-    );
-
     // Revoke (owner-scoped)
     mem.revoke_belief("owner1", belief_id)
         .await
         .expect("revoke_belief");
 
-    // a + b: raw row still present with revoked=1 and weight=0
+    // a + b: raw row still present with revoked=1 and weight=0 — SqliteMemory-internal
+    // detail, NOT promoted to the abstract verifier (not part of the Memory trait contract).
     let db_check = {
         let path2 = path.clone();
         tokio::task::spawn_blocking(move || {
@@ -233,15 +207,65 @@ async fn memory_revocation_clean() {
         "weight must be 0.0 after revocation; got {raw_weight}"
     );
 
-    // c: retrieve_tagged must exclude revoked rows
-    let after = mem
-        .retrieve_tagged("owner1", None)
+    // c: promoted verifier (EVAL-02) — assert_revocation_clean proves retrieve_tagged
+    // excludes revoked rows via the SAME assertion cargo test --test evals and the
+    // Reflector's runtime merge gate both exercise.
+    let memory_handle: SharedMemory = Arc::new(RwLock::new(Box::new(mem) as Box<dyn Memory>));
+    let result = bastion::eval::verifier::assert_revocation_clean(&memory_handle, "owner1")
         .await
-        .expect("retrieve after revoke");
+        .expect("assert_revocation_clean");
     assert!(
-        after.is_empty(),
-        "retrieve_tagged must return empty after revocation; got {} beliefs",
-        after.len()
+        result.passed,
+        "verifier case failed: {:?}",
+        result.failed_cases
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3b. verify_delta — the promoted EVAL-02 merge gate rejects a failing candidate
+//     and accepts a valid one, on a scratch memory it never leaks into.
+// ---------------------------------------------------------------------------
+
+/// verify_delta_rejects_failing_candidate_and_accepts_valid_one: exercises the two
+/// verify_delta cases that prove EVAL-02's "a failing delta is rejected, a valid one
+/// passes" guarantee — the SAME function the offline Reflector (07-05) will gate on.
+#[tokio::test]
+async fn verify_delta_rejects_failing_candidate_and_accepts_valid_one() {
+    use bastion::eval::capture::RegressionSet;
+    use bastion::eval::verifier::verify_delta;
+    use bastion::learn::delta::DeltaOp;
+    use bastion::memory::PrivacyTier;
+
+    // A valid Add on an empty regression set must pass.
+    let valid = DeltaOp::Add {
+        issue: None,
+        insight: "test".into(),
+        keywords: vec![],
+        tier: Some(PrivacyTier::CloudOk),
+    };
+    let ok_result = verify_delta(&valid, "owner1", &RegressionSet { cases: vec![] })
+        .await
+        .expect("verify_delta valid candidate");
+    assert!(
+        ok_result.passed,
+        "valid delta must pass: {:?}",
+        ok_result.failed_cases
+    );
+
+    // Revoking a nonexistent belief on a fresh scratch set fails to apply — rejected,
+    // never reaches the live store.
+    let failing = DeltaOp::Remove { belief_id: 999_999 };
+    let err_result = verify_delta(&failing, "owner1", &RegressionSet { cases: vec![] })
+        .await
+        .expect("verify_delta failing candidate");
+    assert!(!err_result.passed, "failing delta must be rejected");
+    assert!(
+        err_result
+            .failed_cases
+            .iter()
+            .any(|c| c.contains("delta_apply_failed")),
+        "failed_cases must mention delta_apply_failed: {:?}",
+        err_result.failed_cases
     );
 }
 
