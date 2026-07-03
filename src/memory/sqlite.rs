@@ -619,6 +619,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_procedural_kind_tier_persists_and_survives_filter_for_mesh() {
+        use crate::memory::{BeliefDraft, BeliefKind};
+        use crate::mesh::allowlist::{filter_for_mesh, OwnerAllowlist};
+
+        let (_f, mem) = make_db().await;
+
+        // Store a CloudOk procedural belief with a tag in the allowlist
+        mem.store_procedural_belief(BeliefDraft {
+            owner_id: "owner1".to_string(),
+            persona_tag: Some("mercado".to_string()),
+            issue: Some("Overspending on groceries".to_string()),
+            insight: "Alice spends 2k/month on groceries".to_string(),
+            keywords: vec!["budget".to_string()],
+            session_id: "sess1".to_string(),
+            source: "reflector".to_string(),
+            tier: Some(PrivacyTier::CloudOk),
+        })
+        .await
+        .expect("store cloud-ok procedural belief");
+
+        // Store a LocalOnly procedural belief — should be stripped
+        mem.store_procedural_belief(BeliefDraft {
+            owner_id: "owner1".to_string(),
+            persona_tag: Some("mercado".to_string()),
+            issue: Some("Sensitive info".to_string()),
+            insight: "Alice's bank password".to_string(),
+            keywords: vec!["secret".to_string()],
+            session_id: "sess2".to_string(),
+            source: "reflector".to_string(),
+            tier: Some(PrivacyTier::LocalOnly),
+        })
+        .await
+        .expect("store local-only procedural belief");
+
+        // Retrieve from real DB (not hand-built Beliefs)
+        let beliefs = mem
+            .retrieve_tagged("owner1", Some("mercado"))
+            .await
+            .expect("retrieve");
+        assert_eq!(beliefs.len(), 2, "both beliefs should be retrieved");
+        assert!(
+            beliefs.iter().all(|b| b.kind == BeliefKind::Procedural),
+            "both retrieved beliefs must decode as Procedural"
+        );
+
+        // filter_for_mesh with allowlist that includes 'mercado'
+        let allowlist = OwnerAllowlist {
+            owner_id: "owner1".to_string(),
+            allowed_tags: vec!["mercado".to_string()],
+        };
+        let passed = filter_for_mesh(beliefs, &allowlist);
+
+        // Only CloudOk belief survives
+        assert_eq!(
+            passed.len(),
+            1,
+            "only CloudOk procedural belief must survive filter_for_mesh"
+        );
+        assert_eq!(passed[0].content, "Alice spends 2k/month on groceries");
+        assert_eq!(passed[0].tier, Some(PrivacyTier::CloudOk));
+        assert_eq!(
+            passed[0].kind,
+            BeliefKind::Procedural,
+            "kind must survive retrieve_tagged -> filter_for_mesh unchanged"
+        );
+    }
+
+    #[tokio::test]
     async fn test_store_procedural_belief_round_trip() {
         use crate::memory::{BeliefDraft, BeliefKind};
 
