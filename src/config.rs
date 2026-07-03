@@ -35,6 +35,44 @@ fn default_sync_interval() -> u64 {
     15
 }
 
+/// Config section for the offline Reflector (LEARN-02/LEARN-05).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReflectorConfig {
+    /// Hard cost cap per Reflector tick (ADR D-4 "budget duro"). Default: $0.10.
+    #[serde(default = "default_reflector_budget_usd")]
+    pub budget_usd: f64,
+    /// Hours between offline Reflector runs. 0 = disabled (no periodic run). Default: 24.
+    #[serde(default = "default_reflector_interval_hours")]
+    pub interval_hours: u64,
+    /// Cheap/local model id for reflection. None = fall back to `[agent].default_model`
+    /// (never silently default to a fixed paid tier — RESEARCH Assumption A5).
+    pub model: Option<String>,
+    /// Run semantic dedup every N accepted deltas. Default: 10.
+    #[serde(default = "default_dedup_every_n")]
+    pub dedup_every_n: u32,
+}
+
+impl Default for ReflectorConfig {
+    fn default() -> Self {
+        Self {
+            budget_usd: default_reflector_budget_usd(),
+            interval_hours: default_reflector_interval_hours(),
+            model: None,
+            dedup_every_n: default_dedup_every_n(),
+        }
+    }
+}
+
+fn default_reflector_budget_usd() -> f64 {
+    0.10
+}
+fn default_reflector_interval_hours() -> u64 {
+    24
+}
+fn default_dedup_every_n() -> u32 {
+    10
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct BastionConfig {
     pub agent: AgentConfig,
@@ -44,6 +82,8 @@ pub struct BastionConfig {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub mesh: MeshConfig,
+    #[serde(default)]
+    pub reflector: ReflectorConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]

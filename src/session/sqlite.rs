@@ -97,6 +97,12 @@ impl SessionManager {
                     created_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_pending_corrections_owner ON pending_corrections(owner_id);
+
+                CREATE TABLE IF NOT EXISTS reflector_state (
+                    owner_id       TEXT    PRIMARY KEY,
+                    last_watermark INTEGER NOT NULL DEFAULT 0,
+                    updated_at     INTEGER NOT NULL
+                );
             ",
             )?;
             // Additive migration for pre-existing single-user DBs (idempotent —
