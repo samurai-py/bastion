@@ -74,10 +74,19 @@ fn render_block(beliefs: &[&Belief]) -> String {
 
 #[async_trait::async_trait]
 impl TurnContextProvider for MemoryRagProvider {
-    async fn context_for_turn(&self, owner: &str, turn_msg: &str) -> Vec<ContextBlock> {
+    async fn context_for_turn(
+        &self,
+        owner: &str,
+        turn_msg: &str,
+        persona: Option<&str>,
+    ) -> Vec<ContextBlock> {
         let beliefs = {
             let mem = self.memory.read().await;
-            match mem.retrieve_tagged(owner, None).await {
+            // Recall ESCOPADO pela persona ativa: `retrieve_tagged(owner, Some(persona))`
+            // traz os beliefs desta persona OU globais (untagged) — nunca os de outra
+            // persona (o SQL é `persona_tag = ?2 OR persona_tag IS NULL`). `None` (nenhuma
+            // persona casou) mantém o recall global-only, que é o fail-safe correto.
+            match mem.retrieve_tagged(owner, persona).await {
                 Ok(b) => b,
                 Err(e) => {
                     // Recall é enriquecimento, nunca bloqueia o turn (fail-open aqui é
@@ -88,7 +97,9 @@ impl TurnContextProvider for MemoryRagProvider {
             }
         };
 
-        // Identidade já é injetada pelo IdentityProvider — não duplicar.
+        // Identidade já é injetada pelo IdentityProvider — não duplicar. Com recall
+        // persona-scoped, um belief "identity" só chega aqui quando a persona ativa
+        // for a própria "identity"; este filtro garante que nunca duplique.
         let mut candidates: Vec<&Belief> = beliefs
             .iter()
             .filter(|b| b.persona_tag.as_deref() != Some("identity"))
@@ -174,7 +185,7 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         let mem = make_memory(f.path().to_str().unwrap()).await;
         let provider = MemoryRagProvider::new(mem);
-        let blocks = provider.context_for_turn("_local", "hello").await;
+        let blocks = provider.context_for_turn("_local", "hello", None).await;
         assert!(blocks.is_empty());
     }
 
@@ -201,7 +212,7 @@ mod tests {
         store(&mem, "_local", "untagged legacy belief", None, None).await;
 
         let provider = MemoryRagProvider::new(mem);
-        let blocks = provider.context_for_turn("_local", "hello").await;
+        let blocks = provider.context_for_turn("_local", "hello", None).await;
 
         assert_eq!(blocks.len(), 2, "one CloudOk block + one LocalOnly block");
         let cloud = blocks
@@ -235,7 +246,7 @@ mod tests {
             .await;
         }
         let provider = MemoryRagProvider::with_max(mem, 5);
-        let blocks = provider.context_for_turn("_local", "hello").await;
+        let blocks = provider.context_for_turn("_local", "hello", None).await;
         assert_eq!(blocks.len(), 1);
         let bullets = blocks[0].content.matches("- [id ").count();
         assert_eq!(bullets, 5, "must inject at most max_beliefs");
@@ -267,7 +278,7 @@ mod tests {
         }
         let provider = MemoryRagProvider::with_max(mem, 3);
         let blocks = provider
-            .context_for_turn("_local", "what is my dog called?")
+            .context_for_turn("_local", "what is my dog called?", None)
             .await;
         assert_eq!(blocks.len(), 1);
         assert!(
@@ -289,11 +300,16 @@ mod tests {
             Some(PrivacyTier::CloudOk),
         )
         .await;
+        // Passa persona=Some("identity") DE PROPÓSITO: assim o `retrieve_tagged` de fato
+        // devolve o belief tagged "identity" e o teste exercita o FILTRO (antes passava
+        // vazio só porque o SQL não retornava beliefs tagged — verde pelo motivo errado).
         let provider = MemoryRagProvider::new(mem);
-        let blocks = provider.context_for_turn("_local", "hello").await;
+        let blocks = provider
+            .context_for_turn("_local", "hello", Some("identity"))
+            .await;
         assert!(
             blocks.is_empty(),
-            "identity is IdentityProvider's job — no duplication"
+            "identity is IdentityProvider's job — the filter must drop it even when recalled"
         );
     }
 
@@ -310,7 +326,60 @@ mod tests {
         )
         .await;
         let provider = MemoryRagProvider::new(mem);
-        let blocks = provider.context_for_turn("bob", "hello").await;
+        let blocks = provider.context_for_turn("bob", "hello", None).await;
         assert!(blocks.is_empty(), "bob must never see alice's beliefs");
+    }
+
+    #[tokio::test]
+    async fn recall_is_scoped_to_active_persona_plus_global() {
+        let f = NamedTempFile::new().unwrap();
+        let mem = make_memory(f.path().to_str().unwrap()).await;
+        // A belief for persona "work", one for persona "home", and one global (untagged).
+        store(
+            &mem,
+            "_local",
+            "the office wifi password is hunter2",
+            Some("work"),
+            Some(PrivacyTier::CloudOk),
+        )
+        .await;
+        store(
+            &mem,
+            "_local",
+            "the kids go to bed at 8pm",
+            Some("home"),
+            Some(PrivacyTier::CloudOk),
+        )
+        .await;
+        store(
+            &mem,
+            "_local",
+            "the owner prefers concise answers",
+            None,
+            Some(PrivacyTier::CloudOk),
+        )
+        .await;
+
+        let provider = MemoryRagProvider::new(mem);
+        let blocks = provider
+            .context_for_turn("_local", "hello", Some("work"))
+            .await;
+
+        assert_eq!(blocks.len(), 1);
+        let content = &blocks[0].content;
+        // This persona's belief + the global one are recalled…
+        assert!(
+            content.contains("office wifi"),
+            "work belief must be recalled"
+        );
+        assert!(
+            content.contains("concise answers"),
+            "global (untagged) belief must always be recalled"
+        );
+        // …but the OTHER persona's belief must never leak across the boundary.
+        assert!(
+            !content.contains("kids go to bed"),
+            "home-persona belief must not leak into a work-persona turn"
+        );
     }
 }

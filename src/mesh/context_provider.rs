@@ -69,7 +69,12 @@ impl TurnContextProvider for MeshSliceProvider {
     /// Inject all received mesh slices as opaque ContextBlocks.
     /// Non-fatal: on error → warn + return vec![] (never block the turn).
     /// Content is formatted for human readability but OPAQUE to AgentLoop logic.
-    async fn context_for_turn(&self, _owner: &str, _turn_msg: &str) -> Vec<ContextBlock> {
+    async fn context_for_turn(
+        &self,
+        _owner: &str,
+        _turn_msg: &str,
+        _persona: Option<&str>,
+    ) -> Vec<ContextBlock> {
         let store = self.slice_store.read().await;
         if store.is_empty() {
             return vec![];
