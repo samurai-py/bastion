@@ -124,6 +124,16 @@ impl AgentLoop {
             tracing::info!(event = "memory_rag_enabled");
         }
 
+        // LEARN-03 — ProceduralBeliefProvider: recall de beliefs PROCEDURAIS (kind=
+        // 'procedural') por injeção de contexto, mesma mecânica de MemoryRagProvider
+        // (tier-split, egress-safe por bloco). Always-on (não gated por env, ao
+        // contrário do BASTION_MEMORY_RAG acima): procedural é entregável de primeira
+        // classe da Fase 7, não uma perna experimental do RAG híbrido do BIG-1.
+        agent.context_providers.push(Box::new(
+            crate::agent::procedural::ProceduralBeliefProvider::new(agent.memory.clone()),
+        ));
+        tracing::info!(event = "procedural_belief_provider_enabled");
+
         // BIG-1 (Gap 2): populate the capability_registry from every connected MCP tool.
         // Without this the registry stays empty, list_tool_defs() returns [] (so the normal
         // persona path offers ZERO tools to the LLM), and the is_empty() fast-path in
