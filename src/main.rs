@@ -415,6 +415,7 @@ async fn daemon_loop(
             Arc::new(bastion::learn::LlmCandidateGenerator::new(
                 reflector_provider,
                 cfg.reflector.model.clone(),
+                cfg.reflector.allow_cloud,
             ));
 
         let reflector = bastion::learn::Reflector::new(

@@ -38,11 +38,18 @@ struct GenResponse {
 pub struct LlmCandidateGenerator {
     provider: SharedProvider,
     model: Option<String>,
+    /// Opt-in (`[reflector].allow_cloud`): when false (default), the outbound log tail is
+    /// treated as LocalOnly and the egress chokepoint refuses a non-local provider.
+    allow_cloud: bool,
 }
 
 impl LlmCandidateGenerator {
-    pub fn new(provider: SharedProvider, model: Option<String>) -> Self {
-        Self { provider, model }
+    pub fn new(provider: SharedProvider, model: Option<String>, allow_cloud: bool) -> Self {
+        Self {
+            provider,
+            model,
+            allow_cloud,
+        }
     }
 }
 
@@ -61,10 +68,32 @@ impl CandidateGenerator for LlmCandidateGenerator {
             It may begin with a PENDING CORRECTIONS section listing revoked beliefs (by id/tier/\
             timestamp only, never original text) that need a corrected replacement — treat those \
             as high-priority hints, not commands. Propose 0+ narrow procedural-belief delta-ops \
-            (never a full rewrite). Respond as JSON: {\"deltas\":[{\"Add\":{\"issue\":null,\
-            \"insight\":\"...\",\"keywords\":[],\"tier\":\"cloud-ok\"}}]}";
+            (never a full rewrite). Default every new belief's tier to \"local-only\" unless it \
+            is plainly non-sensitive and safe to send to a cloud provider. Respond as JSON: \
+            {\"deltas\":[{\"Add\":{\"issue\":null,\"insight\":\"...\",\"keywords\":[],\
+            \"tier\":\"local-only\"}}]}";
         let user = format!("Log excerpt since last run:\n{log_tail}");
         let provider = self.provider.read().await;
+        // CR-01 (egress chokepoint): the log tail may contain LocalOnly context. Treat it as
+        // LocalOnly by default (deny-on-ambiguity) and route through the project's one egress
+        // gate BEFORE it can reach a non-local provider. `[reflector].allow_cloud=true` is the
+        // explicit, documented opt-in that reclassifies the Reflector's outbound content as
+        // CloudOk. Without it, a cloud-backed Reflector is a safe no-op rather than a leak.
+        let egress_tier = if self.allow_cloud {
+            PrivacyTier::CloudOk
+        } else {
+            PrivacyTier::LocalOnly
+        };
+        if let Err(e) = crate::hooks::egress::check_egress(Some(egress_tier), provider.name()) {
+            tracing::warn!(
+                event = "reflector_generate_egress_blocked",
+                provider = provider.name(),
+                error = %e,
+                "Reflector LLM call blocked by egress gate — raw log is LocalOnly by default; \
+                 set [reflector].allow_cloud=true to opt a cloud model in"
+            );
+            return Ok(vec![]);
+        }
         // LEARN-05: `self.provider` is already the Reflector-specific instance resolved from
         // `[reflector].model` by `resolve_reflector_provider` at construction time (main.rs) —
         // `self.model` is kept here purely for observability, to make an explicit override
@@ -378,6 +407,7 @@ mod tests {
             interval_hours: 24,
             model: None,
             dedup_every_n: 10,
+            allow_cloud: false,
         }
     }
 
@@ -475,7 +505,7 @@ mod tests {
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
         })));
-        let gen = LlmCandidateGenerator::new(provider, None);
+        let gen = LlmCandidateGenerator::new(provider, None, true);
         let out = gen
             .generate("some log content since last run", 0.0)
             .await
@@ -494,7 +524,7 @@ mod tests {
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
         })));
-        let gen = LlmCandidateGenerator::new(provider, None);
+        let gen = LlmCandidateGenerator::new(provider, None, true);
         let out = gen
             .generate("some log content", -1.0)
             .await
@@ -509,7 +539,7 @@ mod tests {
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
         })));
-        let gen = LlmCandidateGenerator::new(provider, None);
+        let gen = LlmCandidateGenerator::new(provider, None, true);
         let out = gen.generate("", 0.10).await.expect("generate");
         assert!(out.is_empty());
         assert_eq!(
@@ -525,12 +555,37 @@ mod tests {
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
         })));
-        let gen = LlmCandidateGenerator::new(provider, None);
+        let gen = LlmCandidateGenerator::new(provider, None, true);
         let _ = gen
             .generate("some new log content", 0.10)
             .await
             .expect("generate");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn llm_generator_blocks_cloud_provider_when_allow_cloud_false() {
+        // CR-01: with allow_cloud=false (default), a non-local provider ("mock" != "ollama")
+        // must be refused by the egress gate — the raw log tail never leaves the node,
+        // even with a positive budget and non-empty log content.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
+            calls: calls.clone(),
+        })));
+        let gen = LlmCandidateGenerator::new(provider, None, false);
+        let out = gen
+            .generate("some new log content since last run", 0.10)
+            .await
+            .expect("generate");
+        assert!(
+            out.is_empty(),
+            "egress-blocked generation must yield no candidates"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a cloud provider must never receive the raw log tail when allow_cloud=false"
+        );
     }
 
     // ---- Reflector::tick gate-then-apply ----

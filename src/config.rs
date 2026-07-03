@@ -50,6 +50,13 @@ pub struct ReflectorConfig {
     /// Run semantic dedup every N accepted deltas. Default: 10.
     #[serde(default = "default_dedup_every_n")]
     pub dedup_every_n: u32,
+    /// Opt-in: allow the Reflector's LLM candidate generation to send the raw daemon
+    /// log tail to a NON-local (cloud) provider. Default: false (deny-on-ambiguity —
+    /// the log tail is treated as LocalOnly, so a cloud Reflector provider is refused
+    /// by the egress chokepoint). Set true ONLY after accepting that log content
+    /// (which may contain LocalOnly context) leaves the node to the configured cloud model.
+    #[serde(default)]
+    pub allow_cloud: bool,
 }
 
 impl Default for ReflectorConfig {
@@ -59,6 +66,7 @@ impl Default for ReflectorConfig {
             interval_hours: default_reflector_interval_hours(),
             model: None,
             dedup_every_n: default_dedup_every_n(),
+            allow_cloud: false,
         }
     }
 }
