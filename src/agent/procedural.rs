@@ -414,4 +414,55 @@ mod tests {
             "home-persona belief must not leak into a work-persona turn"
         );
     }
+
+    /// LEARN-03's concrete end-to-end proof: a `LocalOnly` procedural belief's
+    /// `ContextBlock` is dropped by `check_egress` when the active provider is a
+    /// cloud provider, while a co-existing `CloudOk` procedural belief's content
+    /// still makes it through — the same mechanism `build_system_prompt` (SEAM #2)
+    /// already applies per-block, unchanged by this plan.
+    #[tokio::test]
+    async fn a_local_only_procedural_belief_never_reaches_cloud_prompt() {
+        let f = NamedTempFile::new().unwrap();
+        let mem = make_memory(f.path().to_str().unwrap()).await;
+        store_procedural(
+            &mem,
+            "_local",
+            "safe cloud-shareable git workflow tip",
+            None,
+            Some(PrivacyTier::CloudOk),
+        )
+        .await;
+        store_procedural(
+            &mem,
+            "_local",
+            "internal-only production credential rotation steps",
+            None,
+            Some(PrivacyTier::LocalOnly),
+        )
+        .await;
+
+        let provider = ProceduralBeliefProvider::new(mem);
+        let blocks = provider.context_for_turn("_local", "hello", None).await;
+        assert_eq!(blocks.len(), 2, "one CloudOk block + one LocalOnly block");
+
+        // Simulate build_system_prompt's per-block egress check for a cloud provider.
+        let cloud_provider_name = "openrouter";
+        let mut prompt_parts: Vec<String> = vec![];
+        for block in &blocks {
+            if crate::hooks::egress::check_egress(Some(block.max_tier), cloud_provider_name).is_ok()
+            {
+                prompt_parts.push(block.content.clone());
+            }
+        }
+        let system_prompt = prompt_parts.join("\n\n");
+
+        assert!(
+            system_prompt.contains("safe cloud-shareable git workflow tip"),
+            "CloudOk procedural belief must reach the cloud-provider system prompt"
+        );
+        assert!(
+            !system_prompt.contains("internal-only production credential rotation steps"),
+            "LocalOnly procedural belief must NEVER reach a cloud-provider system prompt"
+        );
+    }
 }
