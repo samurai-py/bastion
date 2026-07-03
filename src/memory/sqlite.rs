@@ -2,7 +2,7 @@ use crate::memory::{
     Belief, BeliefDraft, BeliefKind, Memory, Outcome, PendingCorrection, PrivacyTier,
 };
 use async_trait::async_trait;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task;
 
@@ -67,7 +67,7 @@ impl Memory for SqliteMemory {
         });
         task::spawn_blocking(move || {
             let mut conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             let now = now_nanos();
             // Atomic: belief + its provenance row commit together or not at all
             // (audit-trail integrity — no orphan belief without provenance).
@@ -98,7 +98,7 @@ impl Memory for SqliteMemory {
         let persona_tag = persona_tag.map(|s| s.to_owned());
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             let mut stmt = conn.prepare(
                 "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier, \
                         kind, keywords, issue, helpful_count, harmful_count, neutral_count \
@@ -140,7 +140,7 @@ impl Memory for SqliteMemory {
         let owner_id = owner_id.to_owned();
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             let now = now_nanos();
             // Owner-scoped UPDATE (IDOR guard): a belief can only be revoked by its owner.
             let changed = conn.execute(
@@ -161,7 +161,7 @@ impl Memory for SqliteMemory {
         let owner_id = owner_id.to_owned();
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             let mut stmt = conn.prepare(
                 "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier, \
                         kind, keywords, issue, helpful_count, harmful_count, neutral_count \
@@ -207,7 +207,7 @@ impl Memory for SqliteMemory {
         let owner_id = owner_id.to_owned();
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             // Owner-scoped JOIN (IDOR guard): only return provenance when the
             // belief belongs to the caller; cross-owner probes get an empty vec.
             let mut stmt = conn.prepare(
@@ -240,7 +240,7 @@ impl Memory for SqliteMemory {
         });
         task::spawn_blocking(move || {
             let mut conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             let now = now_nanos();
             // Atomic: belief + its provenance row commit together or not at all —
             // mirrors store_belief's exact transaction shape.
@@ -287,7 +287,7 @@ impl Memory for SqliteMemory {
         };
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             // Owner-scoped UPDATE (IDOR guard): same discipline as revoke_belief.
             let sql = format!(
                 "UPDATE beliefs SET {column} = {column} + 1 WHERE id = ?1 AND owner_id = ?2"
@@ -315,7 +315,21 @@ impl Memory for SqliteMemory {
         });
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+            // Owner-scoped IDOR guard (WR-01): a correction may only be queued against a
+            // belief the caller actually owns. Matches revoke_belief/record_belief_outcome —
+            // bail rather than silently insert a row pointing at another owner's belief.
+            let owns: bool = conn
+                .query_row(
+                    "SELECT 1 FROM beliefs WHERE id = ?1 AND owner_id = ?2",
+                    rusqlite::params![belief_id, owner_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !owns {
+                anyhow::bail!("belief {belief_id} not found for owner (no pending correction queued)");
+            }
             let now = now_nanos();
             conn.execute(
                 "INSERT INTO pending_corrections (belief_id, owner_id, tier, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -334,7 +348,7 @@ impl Memory for SqliteMemory {
         let owner_id = owner_id.to_owned();
         task::spawn_blocking(move || {
             let mut conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             let tx = conn.transaction()?;
             let mut stmt = tx.prepare(
                 "SELECT id, belief_id, owner_id, tier, created_at FROM pending_corrections WHERE owner_id = ?1",
@@ -974,5 +988,41 @@ mod tests {
             "owner1's pending correction must survive an unrelated owner2 take"
         );
         assert_eq!(taken_by_owner1[0].belief_id, id);
+    }
+
+    #[tokio::test]
+    async fn record_pending_correction_rejects_cross_owner_belief() {
+        use crate::memory::BeliefDraft;
+        let (_f, mem) = make_db().await;
+        // alice owns a procedural belief.
+        let alice_belief = mem
+            .store_procedural_belief(BeliefDraft {
+                owner_id: "alice".to_string(),
+                persona_tag: None,
+                issue: None,
+                insight: "alice-only strategy".to_string(),
+                keywords: vec![],
+                session_id: "s".to_string(),
+                source: "test".to_string(),
+                tier: Some(PrivacyTier::CloudOk),
+            })
+            .await
+            .expect("store");
+
+        // bob must NOT be able to queue a correction against alice's belief (WR-01 IDOR guard).
+        let res = mem
+            .record_pending_correction("bob", alice_belief, Some(PrivacyTier::CloudOk))
+            .await;
+        assert!(
+            res.is_err(),
+            "record_pending_correction must reject a belief_id the caller does not own"
+        );
+
+        // and no row must have been queued for bob.
+        let bob_pending = mem.take_pending_corrections("bob").await.expect("drain");
+        assert!(
+            bob_pending.is_empty(),
+            "no cross-owner correction row must be inserted"
+        );
     }
 }
