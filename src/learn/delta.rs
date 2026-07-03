@@ -29,9 +29,74 @@ impl DeltaOp {
     /// Apply this delta to `memory` for `owner`. Returns the new belief id for
     /// Add/Update (None for Tag/Remove). MUST NOT be called until the caller has
     /// gated this candidate through `eval::verifier::verify_delta` (EVAL-02).
-    pub async fn apply(&self, _memory: &SharedMemory, _owner: &str) -> anyhow::Result<Option<i64>> {
-        // RED: not implemented yet — every variant must fail until Task 1's GREEN step.
-        todo!("DeltaOp::apply not implemented yet (RED phase)")
+    ///
+    /// Lock discipline: `revoke_belief`/`record_belief_outcome` take `memory.write()`;
+    /// `store_procedural_belief` only needs `memory.read()` (matches the existing
+    /// `store_belief` call pattern elsewhere in the crate) — the `RwLock` here only
+    /// guards the `Box<dyn Memory>` swap, not the SQLite connection (SqliteMemory
+    /// does its own internal locking via `spawn_blocking`).
+    pub async fn apply(&self, memory: &SharedMemory, owner: &str) -> anyhow::Result<Option<i64>> {
+        match self {
+            DeltaOp::Add {
+                issue,
+                insight,
+                keywords,
+                tier,
+            } => {
+                let mem = memory.read().await;
+                let id = mem
+                    .store_procedural_belief(BeliefDraft {
+                        owner_id: owner.to_owned(),
+                        persona_tag: None,
+                        issue: issue.clone(),
+                        insight: insight.clone(),
+                        keywords: keywords.clone(),
+                        session_id: "reflector".to_owned(),
+                        source: "reflector".to_owned(),
+                        tier: *tier,
+                    })
+                    .await?;
+                Ok(Some(id))
+            }
+            DeltaOp::Update {
+                supersedes,
+                issue,
+                insight,
+                keywords,
+            } => {
+                // Revoke FIRST — if this errors (e.g. `supersedes` belongs to another
+                // owner), bail out here and NEVER store the new belief (no orphan).
+                {
+                    let mem = memory.write().await;
+                    mem.revoke_belief(owner, *supersedes).await?;
+                }
+                let mem = memory.read().await;
+                let id = mem
+                    .store_procedural_belief(BeliefDraft {
+                        owner_id: owner.to_owned(),
+                        persona_tag: None,
+                        issue: issue.clone(),
+                        insight: insight.clone(),
+                        keywords: keywords.clone(),
+                        session_id: "reflector".to_owned(),
+                        source: "reflector".to_owned(),
+                        tier: None,
+                    })
+                    .await?;
+                Ok(Some(id))
+            }
+            DeltaOp::Tag { belief_id, outcome } => {
+                let mem = memory.write().await;
+                mem.record_belief_outcome(owner, *belief_id, *outcome)
+                    .await?;
+                Ok(None)
+            }
+            DeltaOp::Remove { belief_id } => {
+                let mem = memory.write().await;
+                mem.revoke_belief(owner, *belief_id).await?;
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -105,7 +170,10 @@ mod tests {
             keywords: vec![],
         };
         let new_id = op.apply(&mem, "owner1").await.expect("apply").expect("id");
-        assert_ne!(new_id, old_id, "Update must mint a NEW belief id, never reuse the old one");
+        assert_ne!(
+            new_id, old_id,
+            "Update must mint a NEW belief id, never reuse the old one"
+        );
 
         let m = mem.read().await;
         let beliefs = m.retrieve_tagged("owner1", None).await.expect("retrieve");
