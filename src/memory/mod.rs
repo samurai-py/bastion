@@ -16,6 +16,47 @@ pub enum PrivacyTier {
     CloudOk,
 }
 
+/// Belief kind — factual (default, Phase 1-6 behavior) or procedural (LEARN-01).
+/// Defaults to `Factual` so every pre-Phase-7 row (DB default `'factual'`) decodes
+/// identically to before this column existed — zero behavior change for existing data.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BeliefKind {
+    Factual,
+    Procedural,
+}
+
+impl Default for BeliefKind {
+    fn default() -> Self {
+        BeliefKind::Factual
+    }
+}
+
+/// Outcome signal for a procedural belief's helpful/harmful/neutral counters.
+/// Maps 1:1 onto `record_belief_outcome`'s counter-increment column choice.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Outcome {
+    Helpful,
+    Harmful,
+    Neutral,
+}
+
+/// Builder-style draft for a new procedural belief. Used by `store_procedural_belief`
+/// instead of widening `store_belief`'s already-7-argument signature (Pitfall 5).
+/// `insight` maps onto the existing `content` column (ACE terminology overlay) —
+/// there is no parallel content field.
+pub struct BeliefDraft {
+    pub owner_id: String,
+    pub persona_tag: Option<String>,
+    pub issue: Option<String>,
+    pub insight: String,
+    pub keywords: Vec<String>,
+    pub session_id: String,
+    pub source: String,
+    pub tier: Option<PrivacyTier>,
+}
+
 /// A retrieved belief (read-only view of the beliefs table row).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Belief {
@@ -27,6 +68,16 @@ pub struct Belief {
     pub is_core: bool,
     /// Privacy tier — None if column absent or unset in DB (treated as LocalOnly by egress gate).
     pub tier: Option<PrivacyTier>,
+    /// Factual (default) or procedural (LEARN-01). Never `Option` — decodes to
+    /// `Factual` on NULL/unrecognized column value, matching the SQL `DEFAULT 'factual'`.
+    pub kind: BeliefKind,
+    /// Procedural skill-matching tags. Empty vec on NULL or malformed JSON — never panics.
+    pub keywords: Vec<String>,
+    /// The problem/context a procedural belief addresses (ACE "issue" terminology).
+    pub issue: Option<String>,
+    pub helpful_count: i64,
+    pub harmful_count: i64,
+    pub neutral_count: i64,
 }
 
 /// Core memory abstraction. Every subsystem reads/writes beliefs through this trait.
@@ -72,6 +123,21 @@ pub trait Memory: Send + Sync {
         owner_id: &str,
         belief_id: i64,
     ) -> anyhow::Result<Vec<(String, String)>>;
+
+    /// Store a procedural belief (kind='procedural') + its provenance row. Mirrors
+    /// store_belief's atomic belief+provenance transaction; does NOT widen
+    /// store_belief (Pitfall 5).
+    async fn store_procedural_belief(&self, draft: BeliefDraft) -> anyhow::Result<i64>;
+
+    /// Increment exactly one counter (helpful/harmful/neutral) on an existing belief.
+    /// Content untouched. Owner-scoped (IDOR guard) — errors on cross-owner no-op,
+    /// same discipline as revoke_belief.
+    async fn record_belief_outcome(
+        &self,
+        owner_id: &str,
+        id: i64,
+        outcome: Outcome,
+    ) -> anyhow::Result<()>;
 }
 
 /// Clonable shared-handle alias — mirrors SharedProvider from provider/mod.rs.

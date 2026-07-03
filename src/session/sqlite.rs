@@ -100,6 +100,27 @@ impl SessionManager {
             // NULL = deny-on-ambiguity (safe default — existing rows treated as LocalOnly by egress gate).
             // Ignores "duplicate column name" error on DBs that already have this column (safe re-run).
             let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN privacy_tier TEXT", []);
+            // Additive migration (LEARN-01): procedural belief columns. DEFAULT 'factual'
+            // guarantees every pre-Phase-7 row keeps behaving exactly as before this
+            // migration — no backfill of existing rows required.
+            let _ = conn.execute(
+                "ALTER TABLE beliefs ADD COLUMN kind TEXT NOT NULL DEFAULT 'factual'",
+                [],
+            );
+            let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN keywords TEXT", []);
+            let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN issue TEXT", []);
+            let _ = conn.execute(
+                "ALTER TABLE beliefs ADD COLUMN helpful_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
+            let _ = conn.execute(
+                "ALTER TABLE beliefs ADD COLUMN harmful_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
+            let _ = conn.execute(
+                "ALTER TABLE beliefs ADD COLUMN neutral_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
             Ok::<_, anyhow::Error>(())
         })
         .await?
