@@ -1,4 +1,6 @@
-use crate::memory::{Belief, BeliefDraft, BeliefKind, Memory, Outcome, PrivacyTier};
+use crate::memory::{
+    Belief, BeliefDraft, BeliefKind, Memory, Outcome, PendingCorrection, PrivacyTier,
+};
 use async_trait::async_trait;
 use rusqlite::Connection;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -295,6 +297,74 @@ impl Memory for SqliteMemory {
                 anyhow::bail!("belief {id} not found for owner (no outcome recorded)");
             }
             Ok::<(), anyhow::Error>(())
+        })
+        .await?
+    }
+
+    async fn record_pending_correction(
+        &self,
+        owner_id: &str,
+        belief_id: i64,
+        tier: Option<PrivacyTier>,
+    ) -> anyhow::Result<i64> {
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        let tier_str: Option<String> = tier.map(|t| match t {
+            PrivacyTier::CloudOk => "cloud-ok".to_string(),
+            PrivacyTier::LocalOnly => "local-only".to_string(),
+        });
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let now = now_nanos();
+            conn.execute(
+                "INSERT INTO pending_corrections (belief_id, owner_id, tier, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![belief_id, owner_id, tier_str, now],
+            )?;
+            Ok::<i64, anyhow::Error>(conn.last_insert_rowid())
+        })
+        .await?
+    }
+
+    async fn take_pending_corrections(
+        &self,
+        owner_id: &str,
+    ) -> anyhow::Result<Vec<PendingCorrection>> {
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        task::spawn_blocking(move || {
+            let mut conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let tx = conn.transaction()?;
+            let mut stmt = tx.prepare(
+                "SELECT id, belief_id, owner_id, tier, created_at FROM pending_corrections WHERE owner_id = ?1",
+            )?;
+            let rows: Vec<PendingCorrection> = stmt
+                .query_map(rusqlite::params![owner_id], |row| {
+                    let tier_str: Option<String> = row.get(3)?;
+                    let tier = tier_str.as_deref().and_then(|s| match s {
+                        "cloud-ok" => Some(PrivacyTier::CloudOk),
+                        "local-only" => Some(PrivacyTier::LocalOnly),
+                        _ => None,
+                    });
+                    Ok(PendingCorrection {
+                        id: row.get(0)?,
+                        belief_id: row.get(1)?,
+                        owner_id: row.get(2)?,
+                        tier,
+                        created_at: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            // Owner-scoped delete (IDOR guard) — dequeue exactly the rows just read,
+            // same owner.
+            tx.execute(
+                "DELETE FROM pending_corrections WHERE owner_id = ?1",
+                rusqlite::params![owner_id],
+            )?;
+            tx.commit()?;
+            Ok::<Vec<PendingCorrection>, anyhow::Error>(rows)
         })
         .await?
     }
@@ -829,5 +899,80 @@ mod tests {
         assert_eq!(beliefs[0].helpful_count, 0);
         assert_eq!(beliefs[0].harmful_count, 0);
         assert_eq!(beliefs[0].neutral_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_pending_correction_round_trip() {
+        let (_f, mem) = make_db().await;
+        let id = mem
+            .store_belief("owner1", None, "Some belief", "sess1", "user", false, None)
+            .await
+            .expect("store");
+
+        mem.record_pending_correction("owner1", id, Some(PrivacyTier::CloudOk))
+            .await
+            .expect("record_pending_correction");
+
+        let taken = mem
+            .take_pending_corrections("owner1")
+            .await
+            .expect("take_pending_corrections");
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].belief_id, id);
+        assert_eq!(taken[0].owner_id, "owner1");
+        assert_eq!(taken[0].tier, Some(PrivacyTier::CloudOk));
+
+        // Dequeue-on-read: a second immediate take must return empty.
+        let taken_again = mem
+            .take_pending_corrections("owner1")
+            .await
+            .expect("take_pending_corrections second call");
+        assert!(
+            taken_again.is_empty(),
+            "second immediate take must return empty (dequeue-on-read)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pending_correction_owner_scoped() {
+        let (_f, mem) = make_db().await;
+        let id = mem
+            .store_belief(
+                "owner1",
+                None,
+                "Owner1 belief",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store");
+
+        mem.record_pending_correction("owner1", id, None)
+            .await
+            .expect("record_pending_correction");
+
+        // owner2's take must not see owner1's row, and must not consume it.
+        let taken_by_owner2 = mem
+            .take_pending_corrections("owner2")
+            .await
+            .expect("take by owner2");
+        assert!(
+            taken_by_owner2.is_empty(),
+            "cross-owner take must return empty (IDOR guard)"
+        );
+
+        // owner1's row must still be there — owner2's take must not have dropped it.
+        let taken_by_owner1 = mem
+            .take_pending_corrections("owner1")
+            .await
+            .expect("take by owner1");
+        assert_eq!(
+            taken_by_owner1.len(),
+            1,
+            "owner1's pending correction must survive an unrelated owner2 take"
+        );
+        assert_eq!(taken_by_owner1[0].belief_id, id);
     }
 }

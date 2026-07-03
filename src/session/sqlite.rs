@@ -88,6 +88,15 @@ impl SessionManager {
                     last_confirmed   INTEGER,
                     created_at       INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS pending_corrections (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    belief_id  INTEGER NOT NULL,
+                    owner_id   TEXT    NOT NULL,
+                    tier       TEXT,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_pending_corrections_owner ON pending_corrections(owner_id);
             ",
             )?;
             // Additive migration for pre-existing single-user DBs (idempotent —

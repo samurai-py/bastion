@@ -219,6 +219,9 @@ __marimo__/
 .env
 .env.local
 
+# EVAL-01 Pitfall 1: LocalOnly-tier regression captures — never committed, never exported
+.bastion-local/
+
 # MCP servers config — URL real pode conter endpoint/secret. Trackear só o .example
 .bastion/mcp-servers.json
 

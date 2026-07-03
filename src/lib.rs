@@ -4,6 +4,7 @@ pub mod cabinet;
 pub mod capability;
 pub mod channel;
 pub mod config;
+pub mod eval;
 pub mod goal;
 pub mod hooks;
 pub mod learn;

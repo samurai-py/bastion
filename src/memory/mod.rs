@@ -52,6 +52,19 @@ pub struct BeliefDraft {
     pub tier: Option<PrivacyTier>,
 }
 
+/// A queued, metadata-only "this belief needs a corrected re-learn" signal (LEARN-04
+/// edit half). NEVER carries raw correction text — content lives only in the
+/// tier-gated life-log/OTel stream the Reflector (07-05) already reads; this row
+/// only points at WHICH belief and WHAT tier.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PendingCorrection {
+    pub id: i64,
+    pub belief_id: i64,
+    pub owner_id: String,
+    pub tier: Option<PrivacyTier>,
+    pub created_at: i64,
+}
+
 /// A retrieved belief (read-only view of the beliefs table row).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Belief {
@@ -133,6 +146,24 @@ pub trait Memory: Send + Sync {
         id: i64,
         outcome: Outcome,
     ) -> anyhow::Result<()>;
+
+    /// Enqueue a metadata-only pending-correction signal for `belief_id` (LEARN-04
+    /// edit half). Called synchronously right after a contestation revoke — never
+    /// carries raw text. Drained by the offline Reflector (07-05) via
+    /// `take_pending_corrections`.
+    async fn record_pending_correction(
+        &self,
+        owner_id: &str,
+        belief_id: i64,
+        tier: Option<PrivacyTier>,
+    ) -> anyhow::Result<i64>;
+
+    /// Dequeue (read + delete, one transaction) all pending corrections for
+    /// `owner_id`. Owner-scoped (IDOR guard) — a caller can only drain its own queue.
+    async fn take_pending_corrections(
+        &self,
+        owner_id: &str,
+    ) -> anyhow::Result<Vec<PendingCorrection>>;
 }
 
 /// Clonable shared-handle alias — mirrors SharedProvider from provider/mod.rs.
