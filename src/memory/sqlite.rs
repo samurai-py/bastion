@@ -617,4 +617,149 @@ mod tests {
         assert_eq!(passed[0].content, "Alice spends 2k/month on groceries");
         assert_eq!(passed[0].tier, Some(PrivacyTier::CloudOk));
     }
+
+    #[tokio::test]
+    async fn test_store_procedural_belief_round_trip() {
+        use crate::memory::{BeliefDraft, BeliefKind};
+
+        let (_f, mem) = make_db().await;
+        let draft = BeliefDraft {
+            owner_id: "owner1".to_string(),
+            persona_tag: Some("coding".to_string()),
+            issue: Some("Merge conflicts on rebase".to_string()),
+            insight: "Always rebase onto origin/main before pushing".to_string(),
+            keywords: vec!["git".to_string(), "rebase".to_string()],
+            session_id: "sess1".to_string(),
+            source: "reflector".to_string(),
+            tier: Some(PrivacyTier::CloudOk),
+        };
+        let id = mem
+            .store_procedural_belief(draft)
+            .await
+            .expect("store procedural belief");
+        assert!(id > 0);
+
+        let beliefs = mem
+            .retrieve_tagged("owner1", Some("coding"))
+            .await
+            .expect("retrieve");
+        assert_eq!(beliefs.len(), 1);
+        let belief = &beliefs[0];
+        assert_eq!(belief.kind, BeliefKind::Procedural);
+        assert_eq!(belief.issue.as_deref(), Some("Merge conflicts on rebase"));
+        assert_eq!(
+            belief.keywords,
+            vec!["git".to_string(), "rebase".to_string()]
+        );
+        assert_eq!(
+            belief.content,
+            "Always rebase onto origin/main before pushing"
+        );
+        assert_eq!(belief.tier, Some(PrivacyTier::CloudOk));
+        assert_eq!(belief.helpful_count, 0);
+        assert_eq!(belief.harmful_count, 0);
+        assert_eq!(belief.neutral_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_store_belief_defaults_kind_factual() {
+        use crate::memory::BeliefKind;
+
+        // OLD store_belief call shape (unchanged signature, Phase 1-6 behavior) —
+        // proves the additive migration is invisible to existing callers.
+        let (_f, mem) = make_db().await;
+        mem.store_belief(
+            "owner1",
+            Some("health"),
+            "Mario exercises daily",
+            "sess1",
+            "user",
+            false,
+            None,
+        )
+        .await
+        .expect("store");
+
+        let beliefs = mem
+            .retrieve_tagged("owner1", Some("health"))
+            .await
+            .expect("retrieve");
+        assert_eq!(beliefs.len(), 1);
+        let belief = &beliefs[0];
+        assert_eq!(belief.kind, BeliefKind::Factual);
+        assert!(belief.keywords.is_empty());
+        assert!(belief.issue.is_none());
+        assert_eq!(belief.helpful_count, 0);
+        assert_eq!(belief.harmful_count, 0);
+        assert_eq!(belief.neutral_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_record_belief_outcome_increments_exactly_one_counter() {
+        use crate::memory::Outcome;
+
+        let (_f, mem) = make_db().await;
+        let id = mem
+            .store_belief(
+                "owner1",
+                Some("coding"),
+                "Some procedural-ish content",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store");
+
+        mem.record_belief_outcome("owner1", id, Outcome::Helpful)
+            .await
+            .expect("first outcome");
+        mem.record_belief_outcome("owner1", id, Outcome::Helpful)
+            .await
+            .expect("second outcome");
+
+        let beliefs = mem
+            .retrieve_tagged("owner1", Some("coding"))
+            .await
+            .expect("retrieve");
+        assert_eq!(beliefs.len(), 1);
+        let belief = &beliefs[0];
+        assert_eq!(belief.helpful_count, 2);
+        assert_eq!(belief.harmful_count, 0);
+        assert_eq!(belief.neutral_count, 0);
+        assert_eq!(belief.content, "Some procedural-ish content");
+    }
+
+    #[tokio::test]
+    async fn test_record_belief_outcome_cross_owner_errors() {
+        use crate::memory::Outcome;
+
+        // IDOR guard: owner2 cannot record an outcome on owner1's belief.
+        let (_f, mem) = make_db().await;
+        let id = mem
+            .store_belief(
+                "owner1",
+                None,
+                "Owner1 procedural belief",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store");
+
+        let result = mem
+            .record_belief_outcome("owner2", id, Outcome::Harmful)
+            .await;
+        assert!(result.is_err(), "cross-owner outcome must error");
+
+        // Real owner's counters are unaffected by the failed cross-owner attempt.
+        let beliefs = mem.retrieve_tagged("owner1", None).await.expect("retrieve");
+        assert_eq!(beliefs.len(), 1);
+        assert_eq!(beliefs[0].helpful_count, 0);
+        assert_eq!(beliefs[0].harmful_count, 0);
+        assert_eq!(beliefs[0].neutral_count, 0);
+    }
 }
