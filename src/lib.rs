@@ -6,6 +6,7 @@ pub mod channel;
 pub mod config;
 pub mod goal;
 pub mod hooks;
+pub mod learn;
 pub mod mcp;
 pub mod memory;
 pub mod mesh;
