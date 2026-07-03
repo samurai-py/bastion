@@ -402,9 +402,18 @@ async fn daemon_loop(
             tracing::warn!(event = "reflector_registry_register_failed", error = %e);
         }
 
+        // LEARN-05 gap fix: an explicit [reflector].model must actually select the
+        // Reflector's provider, not just be threaded through inertly. Unset/empty falls
+        // back to the exact same default-agent provider instance (safe pre-fix behavior).
+        let reflector_provider = bastion::provider::registry::resolve_reflector_provider(
+            cfg.reflector.model.as_deref(),
+            &cfg.agent.default_model,
+            agent.provider.clone(),
+        )?;
+
         let generator: Arc<dyn bastion::learn::CandidateGenerator> =
             Arc::new(bastion::learn::LlmCandidateGenerator::new(
-                agent.provider.clone(),
+                reflector_provider,
                 cfg.reflector.model.clone(),
             ));
 
