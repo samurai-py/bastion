@@ -44,17 +44,54 @@ fn cosine(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
+/// Calls the `memory_embed` capability (memupalace MCP tool) via the one sanctioned
+/// tool surface (`CapabilityRegistry::invoke`, AGENTS.md "one tool surface" law) and
+/// parses the returned JSON array as an embedding vector.
+async fn embed(
+    registry: &CapabilityRegistry,
+    ctx: &InvokeCtx,
+    text: &str,
+) -> anyhow::Result<Vec<f64>> {
+    let val = registry
+        .invoke("memory_embed", serde_json::json!({ "text": text }), ctx)
+        .await?;
+    serde_json::from_value(val)
+        .map_err(|e| anyhow::anyhow!("memory_embed returned non-vector: {e}"))
+}
+
 /// True if `candidate` is a semantic near-duplicate of any string in `existing`.
 ///
-/// RED (Task 2): not implemented yet — must fail every behavior test until GREEN.
+/// Tries memupalace's `memory_embed` capability FIRST (via `CapabilityRegistry::invoke`,
+/// AGENTS.md "one tool surface" law); falls back to lexical overlap when the capability
+/// call fails (memupalace down, tool missing) — this is enrichment, so it fails OPEN
+/// (never blocks the Reflector tick, matches `memory_rag.rs`'s fail-open retrieve
+/// discipline) and never panics.
 pub async fn is_duplicate(
-    _registry: &CapabilityRegistry,
-    _ctx: &InvokeCtx,
-    _candidate: &str,
-    _existing: &[String],
-    _threshold: Option<f64>,
+    registry: &CapabilityRegistry,
+    ctx: &InvokeCtx,
+    candidate: &str,
+    existing: &[String],
+    threshold: Option<f64>,
 ) -> bool {
-    todo!("is_duplicate not implemented yet (RED phase)")
+    let threshold = threshold.unwrap_or(DEFAULT_SIMILARITY_THRESHOLD);
+    match embed(registry, ctx, candidate).await {
+        Ok(cand_vec) => {
+            for e in existing {
+                if let Ok(e_vec) = embed(registry, ctx, e).await {
+                    if cosine(&cand_vec, &e_vec) >= threshold {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        Err(e) => {
+            tracing::warn!(event = "dedup_embed_unavailable_fallback_lexical", error = %e);
+            existing
+                .iter()
+                .any(|e| lexical_similarity(candidate, e) >= threshold)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -73,21 +110,23 @@ mod tests {
     /// [0.0, 1.0]; anything else embeds to [0.5, 0.5] (neither cluster).
     fn registry_with_mock_embed() -> CapabilityRegistry {
         let mut registry = CapabilityRegistry::new();
-        let func = Arc::new(|args: serde_json::Value| -> anyhow::Result<serde_json::Value> {
-            let text = args
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_lowercase();
-            let vec = if text.contains("concise") || text.contains("short") {
-                vec![1.0, 0.0]
-            } else if text.contains("pizza") {
-                vec![0.0, 1.0]
-            } else {
-                vec![0.5, 0.5]
-            };
-            Ok(serde_json::json!(vec))
-        });
+        let func = Arc::new(
+            |args: serde_json::Value| -> anyhow::Result<serde_json::Value> {
+                let text = args
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let vec = if text.contains("concise") || text.contains("short") {
+                    vec![1.0, 0.0]
+                } else if text.contains("pizza") {
+                    vec![0.0, 1.0]
+                } else {
+                    vec![0.5, 0.5]
+                };
+                Ok(serde_json::json!(vec))
+            },
+        );
         registry
             .register(Arc::new(DirectFnAdapter {
                 cap_name: "memory_embed".to_owned(),
@@ -120,7 +159,10 @@ mod tests {
             None,
         )
         .await;
-        assert!(is_dup, "near-identical embeddings must be flagged as duplicate");
+        assert!(
+            is_dup,
+            "near-identical embeddings must be flagged as duplicate"
+        );
     }
 
     #[tokio::test]
@@ -129,7 +171,10 @@ mod tests {
         let ctx = cloud_ok_ctx();
         let existing = vec!["Mario prefers concise replies".to_owned()];
         let is_dup = is_duplicate(&registry, &ctx, "I like pizza", &existing, None).await;
-        assert!(!is_dup, "dissimilar embeddings must not be flagged as duplicate");
+        assert!(
+            !is_dup,
+            "dissimilar embeddings must not be flagged as duplicate"
+        );
     }
 
     #[tokio::test]
