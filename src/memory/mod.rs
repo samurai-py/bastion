@@ -19,17 +19,12 @@ pub enum PrivacyTier {
 /// Belief kind — factual (default, Phase 1-6 behavior) or procedural (LEARN-01).
 /// Defaults to `Factual` so every pre-Phase-7 row (DB default `'factual'`) decodes
 /// identically to before this column existed — zero behavior change for existing data.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BeliefKind {
+    #[default]
     Factual,
     Procedural,
-}
-
-impl Default for BeliefKind {
-    fn default() -> Self {
-        BeliefKind::Factual
-    }
 }
 
 /// Outcome signal for a procedural belief's helpful/harmful/neutral counters.

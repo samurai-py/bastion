@@ -1,8 +1,26 @@
-use crate::memory::{Belief, Memory, PrivacyTier};
+use crate::memory::{Belief, BeliefDraft, BeliefKind, Memory, Outcome, PrivacyTier};
 use async_trait::async_trait;
 use rusqlite::Connection;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task;
+
+/// Decode the `kind` TEXT column into `BeliefKind`. Fallback to `Factual` on
+/// NULL/unrecognized values — never `Option`, matches the SQL `DEFAULT 'factual'`.
+fn decode_kind(kind_str: Option<String>) -> BeliefKind {
+    match kind_str.as_deref() {
+        Some("procedural") => BeliefKind::Procedural,
+        _ => BeliefKind::Factual,
+    }
+}
+
+/// Decode the `keywords` JSON-array-in-TEXT column into `Vec<String>`. Empty vec
+/// on NULL or malformed JSON — never panics (T-07-01-04).
+fn decode_keywords(keywords_str: Option<String>) -> Vec<String> {
+    keywords_str
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
 
 pub struct SqliteMemory {
     db_path: String,
@@ -80,7 +98,8 @@ impl Memory for SqliteMemory {
             let conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             let mut stmt = conn.prepare(
-                "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier \
+                "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier, \
+                        kind, keywords, issue, helpful_count, harmful_count, neutral_count \
                  FROM beliefs \
                  WHERE owner_id = ?1 AND (persona_tag = ?2 OR persona_tag IS NULL) AND revoked = 0 AND weight > 0",
             )?;
@@ -100,6 +119,12 @@ impl Memory for SqliteMemory {
                         weight: row.get(4)?,
                         is_core: row.get::<_, i32>(5)? != 0,
                         tier,
+                        kind: decode_kind(row.get(7)?),
+                        keywords: decode_keywords(row.get(8)?),
+                        issue: row.get(9)?,
+                        helpful_count: row.get(10)?,
+                        harmful_count: row.get(11)?,
+                        neutral_count: row.get(12)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -136,7 +161,8 @@ impl Memory for SqliteMemory {
             let conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             let mut stmt = conn.prepare(
-                "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier \
+                "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier, \
+                        kind, keywords, issue, helpful_count, harmful_count, neutral_count \
                  FROM beliefs \
                  WHERE owner_id = ?1 AND is_core = 1 AND revoked = 0",
             )?;
@@ -156,6 +182,12 @@ impl Memory for SqliteMemory {
                         weight: row.get(4)?,
                         is_core: row.get::<_, i32>(5)? != 0,
                         tier,
+                        kind: decode_kind(row.get(7)?),
+                        keywords: decode_keywords(row.get(8)?),
+                        issue: row.get(9)?,
+                        helpful_count: row.get(10)?,
+                        harmful_count: row.get(11)?,
+                        neutral_count: row.get(12)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -187,6 +219,82 @@ impl Memory for SqliteMemory {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok::<Vec<(String, String)>, anyhow::Error>(rows)
+        })
+        .await?
+    }
+
+    async fn store_procedural_belief(&self, draft: BeliefDraft) -> anyhow::Result<i64> {
+        let path = self.db_path.clone();
+        let owner_id = draft.owner_id;
+        let persona_tag = draft.persona_tag;
+        let content = draft.insight;
+        let session_id = draft.session_id;
+        let source = draft.source;
+        let issue = draft.issue;
+        let keywords_json = serde_json::to_string(&draft.keywords)?;
+        let tier_str: Option<String> = draft.tier.map(|t| match t {
+            PrivacyTier::CloudOk => "cloud-ok".to_string(),
+            PrivacyTier::LocalOnly => "local-only".to_string(),
+        });
+        task::spawn_blocking(move || {
+            let mut conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let now = now_nanos();
+            // Atomic: belief + its provenance row commit together or not at all —
+            // mirrors store_belief's exact transaction shape.
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT INTO beliefs (owner_id, persona_tag, content, weight, revoked, is_core, \
+                                       created_at, privacy_tier, kind, keywords, issue) \
+                 VALUES (?1, ?2, ?3, 1.0, 0, 0, ?4, ?5, 'procedural', ?6, ?7)",
+                rusqlite::params![
+                    owner_id,
+                    persona_tag,
+                    content,
+                    now,
+                    tier_str,
+                    keywords_json,
+                    issue
+                ],
+            )?;
+            let belief_id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO provenance (belief_id, session_id, source, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![belief_id, session_id, source, now],
+            )?;
+            tx.commit()?;
+            Ok::<i64, anyhow::Error>(belief_id)
+        })
+        .await?
+    }
+
+    async fn record_belief_outcome(
+        &self,
+        owner_id: &str,
+        id: i64,
+        outcome: Outcome,
+    ) -> anyhow::Result<()> {
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        // Column name is a fixed 3-way match, never string-interpolated from user
+        // input — no injection surface.
+        let column = match outcome {
+            Outcome::Helpful => "helpful_count",
+            Outcome::Harmful => "harmful_count",
+            Outcome::Neutral => "neutral_count",
+        };
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            // Owner-scoped UPDATE (IDOR guard): same discipline as revoke_belief.
+            let sql = format!(
+                "UPDATE beliefs SET {column} = {column} + 1 WHERE id = ?1 AND owner_id = ?2"
+            );
+            let changed = conn.execute(&sql, rusqlite::params![id, owner_id])?;
+            if changed == 0 {
+                anyhow::bail!("belief {id} not found for owner (no outcome recorded)");
+            }
+            Ok::<(), anyhow::Error>(())
         })
         .await?
     }

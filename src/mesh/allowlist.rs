@@ -42,7 +42,7 @@ pub fn filter_for_mesh(beliefs: Vec<Belief>, allowlist: &OwnerAllowlist) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{Belief, PrivacyTier};
+    use crate::memory::{Belief, BeliefKind, PrivacyTier};
 
     fn make_belief(tag: Option<&str>, tier: Option<PrivacyTier>) -> Belief {
         Belief {
@@ -53,6 +53,12 @@ mod tests {
             weight: 1.0,
             is_core: false,
             tier,
+            kind: BeliefKind::Factual,
+            keywords: vec![],
+            issue: None,
+            helpful_count: 0,
+            harmful_count: 0,
+            neutral_count: 0,
         }
     }
 
