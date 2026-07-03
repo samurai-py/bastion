@@ -274,9 +274,14 @@ impl Reflector {
                 }
             }
         };
+        // CR-02: only CloudOk-tier procedural beliefs may have their content sent to the
+        // non-local `memory_embed` capability for semantic dedup. LocalOnly/None beliefs are
+        // excluded here (deny-on-ambiguity) so their text NEVER leaves the node through the
+        // embedder — the `ctx.privacy_tier` below is therefore honestly CloudOk for every
+        // belief in the loop, not a forged upgrade that would defeat the egress gate.
         let procedural: Vec<_> = beliefs
             .into_iter()
-            .filter(|b| b.kind == BeliefKind::Procedural)
+            .filter(|b| b.kind == BeliefKind::Procedural && b.tier == Some(PrivacyTier::CloudOk))
             .collect();
         let ctx = InvokeCtx {
             owner: owner.to_owned(),
@@ -770,6 +775,90 @@ mod tests {
         assert!(
             remaining.is_empty(),
             "pending_corrections must be drained exactly once by the first tick"
+        );
+    }
+
+    // ---- CR-02: dedup never leaks LocalOnly belief content to the embedder ----
+
+    #[tokio::test]
+    async fn dedup_never_sends_local_only_belief_content_to_the_embedder() {
+        use crate::capability::DirectFnAdapter;
+        let (_f, mem) = make_memory().await;
+        let db = NamedTempFile::new().expect("tempfile");
+        let db_path = db.path().to_str().unwrap().to_owned();
+        crate::session::SessionManager::new(&db_path)
+            .init_schema()
+            .await
+            .expect("init_schema");
+
+        // 2 CloudOk + 1 LocalOnly procedural beliefs for the same owner.
+        {
+            let m = mem.read().await;
+            for (insight, tier) in [
+                ("cloud safe strategy one", Some(PrivacyTier::CloudOk)),
+                ("cloud safe strategy two", Some(PrivacyTier::CloudOk)),
+                (
+                    "SECRET local only credential rotation steps",
+                    Some(PrivacyTier::LocalOnly),
+                ),
+            ] {
+                m.store_procedural_belief(crate::memory::BeliefDraft {
+                    owner_id: "owner1".to_owned(),
+                    persona_tag: None,
+                    issue: None,
+                    insight: insight.to_owned(),
+                    keywords: vec![],
+                    session_id: "s".into(),
+                    source: "test".into(),
+                    tier,
+                })
+                .await
+                .expect("seed procedural belief");
+            }
+        }
+
+        // Recording mock `memory_embed`: captures every text it is asked to embed.
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let seen_c = seen.clone();
+        let mut registry = CapabilityRegistry::new();
+        let func = Arc::new(
+            move |args: serde_json::Value| -> anyhow::Result<serde_json::Value> {
+                if let Some(t) = args.get("text").and_then(|v| v.as_str()) {
+                    seen_c
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(t.to_owned());
+                }
+                Ok(serde_json::json!([0.5, 0.5]))
+            },
+        );
+        registry
+            .register(Arc::new(DirectFnAdapter {
+                cap_name: "memory_embed".to_owned(),
+                cap_description: "recording mock embed".to_owned(),
+                schema: serde_json::json!({}),
+                func,
+            }))
+            .expect("register mock memory_embed");
+
+        let reflector = Reflector::new(
+            mem.clone(),
+            Arc::new(NoOpGenerator),
+            Arc::new(registry),
+            test_config(),
+            db_path,
+            "/nonexistent/reflector-test.log".to_owned(),
+        );
+        reflector.dedup_pass("owner1").await;
+
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            !seen.iter().any(|t| t.contains("SECRET local only")),
+            "a LocalOnly belief's content must NEVER reach the embedder during dedup: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("cloud safe")),
+            "CloudOk procedural beliefs must still be dedup-eligible: {seen:?}"
         );
     }
 }
