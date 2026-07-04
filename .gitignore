@@ -272,3 +272,5 @@ docs/BLUEPRINT.md
 USER.md
 CLAUDE.md
 GEMINI.md
+# Bastion host-dev local state (bastion.local.toml / run-local.sh)
+.local-data/

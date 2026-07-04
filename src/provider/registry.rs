@@ -1,7 +1,7 @@
 use super::{
-    anthropic::AnthropicProvider, gemini::GeminiProvider, ollama::OllamaProvider,
-    openai::OpenAIProvider, openrouter::OpenRouterProvider, terminal_agent::TerminalAgentProvider,
-    Provider, SharedProvider,
+    anthropic::AnthropicProvider, gemini::GeminiProvider, groq::GroqProvider,
+    ollama::OllamaProvider, openai::OpenAIProvider, openrouter::OpenRouterProvider,
+    terminal_agent::TerminalAgentProvider, Provider, SharedProvider,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -24,6 +24,11 @@ pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
         Ok(Box::new(OpenAIProvider::new(model_name)))
     } else if model_name.starts_with("gemini") {
         Ok(Box::new(GeminiProvider::new(model_name)))
+    } else if let Some(groq_model) = model_name.strip_prefix("groq/") {
+        // `groq/<model>` — checked BEFORE the generic `/` (OpenRouter) branch. The prefix is
+        // stripped so the bare Groq id is sent upstream (it may itself contain a `/`, e.g.
+        // `groq/qwen/qwen3-32b` → `qwen/qwen3-32b`).
+        Ok(Box::new(GroqProvider::new(groq_model)))
     } else if model_name.contains('/') {
         // OpenRouter slugs are namespaced: `vendor/model[:tag]` (e.g. `:free`).
         Ok(Box::new(OpenRouterProvider::new(model_name)))
@@ -71,6 +76,8 @@ pub fn resolve_provider_kind(model_name: &str) -> &'static str {
         "openai"
     } else if model_name.starts_with("gemini") {
         "gemini"
+    } else if model_name.starts_with("groq/") {
+        "groq"
     } else if model_name.contains('/') {
         "openrouter"
     } else {
@@ -111,6 +118,16 @@ mod tests {
     fn resolve_provider_kind_terminal_agent() {
         assert_eq!(resolve_provider_kind("claude_code"), "terminal_agent"); // not "anthropic"
         assert_eq!(resolve_provider_kind("opencode"), "terminal_agent");
+    }
+
+    #[test]
+    fn resolve_provider_kind_groq() {
+        // `groq/` prefix wins over the generic `/` OpenRouter branch, even when the
+        // bare Groq id itself contains a `/` (e.g. qwen/qwen3-32b).
+        assert_eq!(resolve_provider_kind("groq/llama-3.1-8b-instant"), "groq");
+        assert_eq!(resolve_provider_kind("groq/qwen/qwen3-32b"), "groq");
+        // Without the prefix, a namespaced slug still routes to OpenRouter.
+        assert_eq!(resolve_provider_kind("qwen/qwen3-32b"), "openrouter");
     }
 
     #[test]

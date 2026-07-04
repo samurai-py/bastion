@@ -95,8 +95,15 @@ services:
     environment:
       - MEMUPALACE_PORT=8001
       - MEMUPALACE_CHROMA_PATH=/db/memupalace/chroma
-      - MEMUPALACE_ONNX_MODEL_PATH=/models/model_quantized.onnx
-      - MEMUPALACE_TOKENIZER_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      # The Qdrant repo ships model_optimized.onnx (NOT model_quantized.onnx) — wrong name here
+      # caused FileNotFoundError at boot. It also ships the tokenizer alongside the .onnx, so we
+      # load the tokenizer from /models + set offline flags → genuinely zero-egress at runtime
+      # (it was downloading from HF every boot, which fails under an SSL-inspecting proxy like
+      # Zscaler). This is what makes the D-02/D-04 egress invariant actually hold.
+      - MEMUPALACE_ONNX_MODEL_PATH=/models/model_optimized.onnx
+      - MEMUPALACE_TOKENIZER_NAME=/models
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       # SEC: callback to core gateway — Bearer token required (D-04)
       - CORE_GATEWAY_URL=http://core:3000/api/infer
       - BASTION_INFER_TOKEN=${BASTION_INFER_TOKEN}

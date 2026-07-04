@@ -33,8 +33,14 @@ EXPOSE 8001
 # Env defaults (overridden by docker-compose)
 ENV MEMUPALACE_PORT=8001
 ENV MEMUPALACE_CHROMA_PATH=/db/memupalace/chroma
-ENV MEMUPALACE_ONNX_MODEL_PATH=/models/model_quantized.onnx
-ENV MEMUPALACE_TOKENIZER_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+# model_optimized.onnx is the actual filename shipped by the Qdrant repo (was model_quantized.onnx
+# → FileNotFoundError). Tokenizer loads from the local /models dir (baked above) + offline flags,
+# so runtime makes ZERO HF calls — required for the "zero egress cloud" claim and to survive an
+# SSL-inspecting proxy (Zscaler). These ENVs are AFTER the snapshot_download RUN, so build still fetches.
+ENV MEMUPALACE_ONNX_MODEL_PATH=/models/model_optimized.onnx
+ENV MEMUPALACE_TOKENIZER_NAME=/models
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
 ENV CORE_GATEWAY_URL=http://core:3000/api/infer
 ENV PYTHONPATH=/app
 
