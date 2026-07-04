@@ -156,6 +156,50 @@ impl Memory for SqliteMemory {
         .await?
     }
 
+    async fn reinforce_belief(&self, owner_id: &str, id: i64, delta: f64) -> anyhow::Result<()> {
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+            // Cap (100.0) stops a single hot trail from dominating retrieval forever. Best-effort:
+            // no-match is a silent no-op (the trail may have been revoked since selection).
+            conn.execute(
+                "UPDATE beliefs SET weight = MIN(weight + ?3, 100.0) \
+                 WHERE id = ?1 AND owner_id = ?2 AND revoked = 0 \
+                       AND kind = 'procedural' AND persona_tag IS NULL",
+                rusqlite::params![id, owner_id, delta],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?
+    }
+
+    async fn evaporate_beliefs(
+        &self,
+        owner_id: &str,
+        factor: f64,
+        floor: f64,
+    ) -> anyhow::Result<u64> {
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+            // floor > 0 keeps a decayed trail faintly retrievable; it must never hit 0, which is
+            // the revoked sentinel (weight=0 + the `weight > 0` retrieval gate). Scoped to the
+            // untagged procedural playbook — the same set reinforce_belief targets.
+            let changed = conn.execute(
+                "UPDATE beliefs SET weight = MAX(?2, weight * ?3) \
+                 WHERE owner_id = ?1 AND revoked = 0 AND kind = 'procedural' \
+                       AND persona_tag IS NULL AND weight > 0",
+                rusqlite::params![owner_id, floor, factor],
+            )?;
+            Ok::<u64, anyhow::Error>(changed as u64)
+        })
+        .await?
+    }
+
     async fn load_core(&self, owner_id: &str) -> anyhow::Result<Vec<Belief>> {
         let path = self.db_path.clone();
         let owner_id = owner_id.to_owned();

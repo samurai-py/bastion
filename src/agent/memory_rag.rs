@@ -50,7 +50,10 @@ impl MemoryRagProvider {
 
 /// Overlap léxico: quantos termos (≥ MIN_TERM_LEN chars, case-insensitive) do
 /// turn aparecem no conteúdo do belief. Zero = sem relação detectável.
-fn lexical_overlap(turn_msg: &str, content: &str) -> usize {
+/// `pub(crate)`: o Reflector reusa a MESMA métrica de relevância pra escolher quais
+/// trilhas (beliefs procedurais) reforçar por Δτ (estigmergia), garantindo que o depósito
+/// mira as trilhas que este ranking de fato surfacaria.
+pub(crate) fn lexical_overlap(turn_msg: &str, content: &str) -> usize {
     let content_lower = content.to_lowercase();
     turn_msg
         .split(|c: char| !c.is_alphanumeric())
@@ -108,17 +111,17 @@ impl TurnContextProvider for MemoryRagProvider {
             return vec![];
         }
 
-        // Rank: overlap léxico desc → weight desc → id desc (mais recente primeiro).
+        // Ranking estigmérgico: relevância MODULADA pelo feromônio (weight). Entre beliefs de
+        // relevância léxica parecida, a trilha reforçada (weight maior) é preferida; um belief com
+        // overlap zero pontua zero por mais alto que seja o weight (feromônio nunca fabrica
+        // relevância). Com weight=1.0 (default, pré-reforço) reduz a overlap puro — retrocompatível.
+        // Desempate: id desc (mais recente primeiro).
         candidates.sort_by(|a, b| {
-            let score_a = lexical_overlap(turn_msg, &a.content);
-            let score_b = lexical_overlap(turn_msg, &b.content);
+            let score_a = lexical_overlap(turn_msg, &a.content) as f64 * a.weight;
+            let score_b = lexical_overlap(turn_msg, &b.content) as f64 * b.weight;
             score_b
-                .cmp(&score_a)
-                .then(
-                    b.weight
-                        .partial_cmp(&a.weight)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then(b.id.cmp(&a.id))
         });
         candidates.truncate(self.max_beliefs);

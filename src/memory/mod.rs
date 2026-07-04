@@ -147,6 +147,25 @@ pub trait Memory: Send + Sync {
         outcome: Outcome,
     ) -> anyhow::Result<()>;
 
+    /// Stigmergic reinforcement (ACO pheromone deposit): add `delta` to ONE untagged
+    /// procedural belief's `weight` — the retrieval-ranking factor the RAG multiplies by
+    /// lexical relevance — capped to bound a runaway trail. Owner-scoped and best-effort:
+    /// a no-match (wrong owner, revoked, factual, or persona-tagged) is a silent no-op,
+    /// since a trail may be revoked between selection and deposit.
+    async fn reinforce_belief(&self, owner_id: &str, id: i64, delta: f64) -> anyhow::Result<()>;
+
+    /// Stigmergic evaporation: multiply every non-revoked UNTAGGED procedural belief's
+    /// `weight` by `factor` (= 1 - ρ), floored at `floor` (> 0, so a decayed trail stays
+    /// faintly retrievable and NEVER reaches the revoked-sentinel weight of 0). Scoped to the
+    /// global procedural playbook (persona_tag IS NULL) — the set the Reflector reinforces —
+    /// so no trail decays without ever being reinforceable. Returns the number of trails decayed.
+    async fn evaporate_beliefs(
+        &self,
+        owner_id: &str,
+        factor: f64,
+        floor: f64,
+    ) -> anyhow::Result<u64>;
+
     /// Enqueue a metadata-only pending-correction signal for `belief_id` (LEARN-04
     /// edit half). Called synchronously right after a contestation revoke — never
     /// carries raw text. Drained by the offline Reflector (07-05) via

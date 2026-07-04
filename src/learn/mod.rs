@@ -11,6 +11,17 @@ use delta::DeltaOp;
 use std::sync::Arc;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 
+// --- Stigmergy (ACO) constants — the pheromone loop the Reflector drives each judged tick ---
+/// Trail decay per reflection cycle (ρ): every judged tick multiplies weights by 1-ρ.
+const EVAPORATION_RHO: f64 = 0.10;
+/// Decayed trails floor here (> 0): faint but retrievable, never the revoked sentinel (0).
+const PHEROMONE_FLOOR: f64 = 0.05;
+/// Reference window cost (≈tokens) in Δτ = quality / (1 + L/L_ref) — token-economy: a cheap
+/// high-quality trajectory deposits more pheromone than an expensive one of equal quality.
+const DEPOSIT_L_REF: f64 = 500.0;
+/// Reinforce at most the K trails most lexically relevant to the judged window.
+const DEPOSIT_TOP_K: usize = 8;
+
 /// One Reflector generation: ACE delta-ops PLUS a scalar trajectory-quality score.
 /// `quality` ∈ [0,1] rates how well the assistant's trajectory in the log excerpt served the
 /// user's intent and any tracked goal — it is the fitness signal the stigmergic "autonomous
@@ -286,18 +297,23 @@ impl Reflector {
         if let Err(e) = write_watermark(&self.db_path, owner, new_watermark).await {
             tracing::warn!(event = "reflector_watermark_persist_error", error = %e);
         }
-        // Phase-0 shadow signal (STIGMERGY-AUTONOMOUS-MODE.md): observe the per-tick
-        // trajectory-quality scalar WITHOUT any reinforcement yet. This is the fitness signal
-        // whose correlation with human judgment must be validated (Phase 1) before any pheromone
-        // loop is built. `L` (token cost) + `Δτ = quality/L` + reinforcement are Phase 2.
+        // Stigmergic pheromone update — one ACO cycle per JUDGED tick: evaporate all trails,
+        // then reinforce the ones most relevant to this window by Δτ = quality / (1 + L/L_ref).
+        // Δτ shrinks with window cost L (token-economy: cheap high-quality trajectories deposit
+        // more). Skipped when nothing was judged (quality None) — no signal, no pheromone change.
         if let Some(q) = quality {
+            let l_tokens = (log_tail.len() / 4).max(1) as f64;
+            let delta_tau = q as f64 / (1.0 + l_tokens / DEPOSIT_L_REF);
+            self.deposit_and_evaporate(owner, &log_tail, delta_tau)
+                .await;
             tracing::info!(
-                event = "reflector_quality",
+                event = "reflector_pheromone",
                 owner,
                 quality = q,
+                delta_tau,
                 accepted,
                 generated = candidates.len(),
-                "trajectory-quality shadow signal (observe-only, no reinforcement)"
+                "stigmergic cycle: reinforced relevant trails by Δτ + evaporated all"
             );
         }
         tracing::info!(
@@ -306,6 +322,60 @@ impl Reflector {
             accepted,
             generated = candidates.len()
         );
+    }
+
+    /// One stigmergic cycle for the untagged procedural playbook: evaporate ALL trails (decay
+    /// so unused ones fade), then reinforce by `delta_tau` the `DEPOSIT_TOP_K` trails most
+    /// lexically relevant to `window` — mirroring the RAG's own relevance ranking
+    /// (`memory_rag::lexical_overlap`), so the deposit lands on the trails this window would
+    /// surface. Best-effort: individual failures are logged, never fatal to the tick.
+    async fn deposit_and_evaporate(&self, owner: &str, window: &str, delta_tau: f64) {
+        // Evaporate first (decay everything), then deposit on the relevant few.
+        {
+            let mem = self.memory.write().await;
+            if let Err(e) = mem
+                .evaporate_beliefs(owner, 1.0 - EVAPORATION_RHO, PHEROMONE_FLOOR)
+                .await
+            {
+                tracing::warn!(event = "reflector_evaporate_error", error = %e);
+            }
+        }
+        // Untagged procedural beliefs = the Reflector's global playbook (same scope as
+        // evaporate_beliefs and reinforce_belief). retrieve_tagged(owner, None) returns exactly
+        // the untagged set (SQL: persona_tag IS NULL).
+        let procedural: Vec<(i64, String)> = {
+            let mem = self.memory.read().await;
+            match mem.retrieve_tagged(owner, None).await {
+                Ok(b) => b
+                    .into_iter()
+                    .filter(|x| x.kind == BeliefKind::Procedural)
+                    .map(|x| (x.id, x.content))
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(event = "reflector_deposit_retrieve_error", error = %e);
+                    return;
+                }
+            }
+        };
+        let mut ranked: Vec<(i64, usize)> = procedural
+            .iter()
+            .map(|(id, content)| {
+                (
+                    *id,
+                    crate::agent::memory_rag::lexical_overlap(window, content),
+                )
+            })
+            .filter(|(_, overlap)| *overlap > 0)
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+        ranked.truncate(DEPOSIT_TOP_K);
+
+        let mem = self.memory.write().await;
+        for (id, _) in ranked {
+            if let Err(e) = mem.reinforce_belief(owner, id, delta_tau).await {
+                tracing::warn!(event = "reflector_reinforce_error", belief_id = id, error = %e);
+            }
+        }
     }
 
     /// LEARN-02/Pitfall 2: pairwise dedup ONLY — never a wholesale regenerate/rewrite.
@@ -508,6 +578,7 @@ mod tests {
     /// real LLM-backed generator's budget/empty guards.
     struct CannedGenerator {
         candidates: Vec<DeltaOp>,
+        quality: Option<f32>,
         seen_log_tail: Mutex<Option<String>>,
     }
 
@@ -515,6 +586,14 @@ mod tests {
         fn new(candidates: Vec<DeltaOp>) -> Self {
             Self {
                 candidates,
+                quality: None,
+                seen_log_tail: Mutex::new(None),
+            }
+        }
+        fn with_quality(candidates: Vec<DeltaOp>, quality: f32) -> Self {
+            Self {
+                candidates,
+                quality: Some(quality),
                 seen_log_tail: Mutex::new(None),
             }
         }
@@ -527,7 +606,7 @@ mod tests {
                 Some(log_tail.to_owned());
             Ok(Reflection {
                 deltas: self.candidates.clone(),
-                quality: None,
+                quality: self.quality,
             })
         }
     }
@@ -833,6 +912,208 @@ mod tests {
         assert!(
             remaining.is_empty(),
             "pending_corrections must be drained exactly once by the first tick"
+        );
+    }
+
+    // ---- Stigmergy: pheromone reinforce + evaporate on the untagged procedural playbook ----
+
+    async fn seed_procedural(mem: &SharedMemory, owner: &str, insight: &str) -> i64 {
+        let m = mem.read().await;
+        m.store_procedural_belief(crate::memory::BeliefDraft {
+            owner_id: owner.to_owned(),
+            persona_tag: None,
+            issue: None,
+            insight: insight.to_owned(),
+            keywords: vec![],
+            session_id: "s".into(),
+            source: "t".into(),
+            tier: Some(PrivacyTier::CloudOk),
+        })
+        .await
+        .expect("seed procedural belief")
+    }
+
+    #[tokio::test]
+    async fn reinforce_then_evaporate_moves_pheromone_weight() {
+        let (_f, mem) = make_memory().await;
+        let a = seed_procedural(&mem, "o", "retry with backoff").await;
+        let b = seed_procedural(&mem, "o", "cache the config").await;
+
+        // Reinforce trail A by +0.5 (1.0 -> 1.5), leave B at the 1.0 default.
+        {
+            let m = mem.read().await;
+            m.reinforce_belief("o", a, 0.5).await.expect("reinforce");
+        }
+        // Evaporate the whole untagged procedural playbook by factor 0.9, floor 0.05.
+        let decayed = {
+            let m = mem.read().await;
+            m.evaporate_beliefs("o", 0.9, 0.05)
+                .await
+                .expect("evaporate")
+        };
+        assert_eq!(decayed, 2, "both untagged procedural trails must decay");
+
+        let beliefs = {
+            let m = mem.read().await;
+            m.retrieve_tagged("o", None).await.expect("retrieve")
+        };
+        let w = |id: i64| {
+            beliefs
+                .iter()
+                .find(|x| x.id == id)
+                .map(|x| x.weight)
+                .unwrap()
+        };
+        // A: (1.0 + 0.5) * 0.9 = 1.35 ; B: 1.0 * 0.9 = 0.90
+        assert!((w(a) - 1.35).abs() < 1e-9, "reinforced trail A = {}", w(a));
+        assert!(
+            (w(b) - 0.90).abs() < 1e-9,
+            "unreinforced trail B = {}",
+            w(b)
+        );
+        assert!(w(a) > w(b), "the reinforced trail must outrank the other");
+    }
+
+    #[tokio::test]
+    async fn tick_reinforces_the_relevant_trail_and_evaporates_the_rest() {
+        // Full stigmergic cycle through Reflector::tick: a JUDGED window (quality=Some) must
+        // evaporate all trails, then reinforce the one lexically relevant to the window.
+        let (_f, mem) = make_memory().await;
+        let db = NamedTempFile::new().expect("tempfile");
+        let db_path = db.path().to_str().unwrap().to_owned();
+        crate::session::SessionManager::new(&db_path)
+            .init_schema()
+            .await
+            .expect("init_schema");
+
+        let relevant =
+            seed_procedural(&mem, "owner1", "usar retry com backoff em rate limit").await;
+        let irrelevant = seed_procedural(&mem, "owner1", "receita de bolo de chocolate").await;
+
+        // A window whose content lexically overlaps ONLY the relevant trail.
+        let log = NamedTempFile::new().expect("tempfile");
+        let log_path = log.path().to_str().unwrap().to_owned();
+        std::fs::write(
+            &log_path,
+            "erro de rate limit resolvido com retry e backoff\n",
+        )
+        .expect("write");
+
+        // Judged trajectory: quality 1.0, no deltas (isolates the pheromone path).
+        let generator = Arc::new(CannedGenerator::with_quality(vec![], 1.0));
+        let reflector = Reflector::new(
+            mem.clone(),
+            generator,
+            empty_registry(),
+            test_config(),
+            db_path,
+            log_path,
+        );
+        reflector.tick("owner1").await;
+
+        let beliefs = {
+            let m = mem.read().await;
+            m.retrieve_tagged("owner1", None).await.expect("retrieve")
+        };
+        let w = |id: i64| {
+            beliefs
+                .iter()
+                .find(|x| x.id == id)
+                .map(|x| x.weight)
+                .unwrap()
+        };
+        // Both evaporated (×0.9); only the relevant one also got the +Δτ deposit.
+        assert!(
+            w(relevant) > w(irrelevant),
+            "reinforced relevant trail ({}) must outrank the evaporated-only one ({})",
+            w(relevant),
+            w(irrelevant)
+        );
+        assert!(
+            (w(irrelevant) - 0.9).abs() < 1e-9,
+            "the irrelevant trail must only evaporate (1.0×0.9=0.9), got {}",
+            w(irrelevant)
+        );
+        assert!(
+            w(relevant) > 0.9,
+            "the relevant trail must be evaporated THEN reinforced above 0.9, got {}",
+            w(relevant)
+        );
+    }
+
+    #[tokio::test]
+    async fn evaporation_never_reaches_the_revoked_sentinel_zero() {
+        let (_f, mem) = make_memory().await;
+        let id = seed_procedural(&mem, "o", "faint trail").await;
+        // Decay hard, many rounds — weight must floor above 0 and stay retrievable
+        // (retrieve_tagged filters weight > 0, so a floored trail must remain visible).
+        for _ in 0..50 {
+            let m = mem.read().await;
+            m.evaporate_beliefs("o", 0.5, 0.05)
+                .await
+                .expect("evaporate");
+        }
+        let beliefs = {
+            let m = mem.read().await;
+            m.retrieve_tagged("o", None).await.expect("retrieve")
+        };
+        let belief = beliefs
+            .iter()
+            .find(|x| x.id == id)
+            .expect("a floored trail must remain retrievable, never revoked");
+        assert!(
+            belief.weight >= 0.05 && belief.weight > 0.0,
+            "weight floored above 0 (never the revoked sentinel), got {}",
+            belief.weight
+        );
+    }
+
+    #[tokio::test]
+    async fn reinforce_ignores_factual_and_cross_owner() {
+        let (_f, mem) = make_memory().await;
+        // A factual (non-procedural) belief must NOT be reinforced (stigmergy is procedural-only).
+        let factual = {
+            let m = mem.read().await;
+            m.store_belief(
+                "o",
+                None,
+                "a plain fact",
+                "s",
+                "t",
+                false,
+                Some(PrivacyTier::CloudOk),
+            )
+            .await
+            .expect("store factual")
+        };
+        let proc = seed_procedural(&mem, "o", "a procedural trail").await;
+        {
+            let m = mem.read().await;
+            m.reinforce_belief("o", factual, 5.0)
+                .await
+                .expect("reinforce factual (no-op)");
+            m.reinforce_belief("other", proc, 5.0)
+                .await
+                .expect("reinforce cross-owner (no-op)");
+        }
+        let beliefs = {
+            let m = mem.read().await;
+            m.retrieve_tagged("o", None).await.expect("retrieve")
+        };
+        let w = |id: i64| {
+            beliefs
+                .iter()
+                .find(|x| x.id == id)
+                .map(|x| x.weight)
+                .unwrap()
+        };
+        assert!(
+            (w(factual) - 1.0).abs() < 1e-9,
+            "factual belief must keep static weight"
+        );
+        assert!(
+            (w(proc) - 1.0).abs() < 1e-9,
+            "cross-owner reinforce must be a no-op"
         );
     }
 
