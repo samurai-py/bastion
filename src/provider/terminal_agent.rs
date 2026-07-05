@@ -195,19 +195,6 @@ impl Provider for TerminalAgentProvider {
         false
     }
 
-    async fn complete_structured(
-        &self,
-        system: &str,
-        user: &str,
-        schema: serde_json::Value,
-        _max_tokens: u32,
-        _temperature: f32,
-    ) -> anyhow::Result<String> {
-        let raw = self.run(&structured_prompt(system, user, &schema)).await?;
-        // Return extracted JSON if found, else raw — the caller serde-parses-and-retries.
-        Ok(extract_json(&raw).unwrap_or(&raw).to_owned())
-    }
-
     fn context_limit(&self) -> usize {
         200_000
     }

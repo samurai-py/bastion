@@ -76,10 +76,8 @@ impl GroqProvider {
     }
 
     /// Build the outgoing chat-completion request body, folding in
-    /// `CallConfig.response_format`/`.tool_choice`/`.temperature` — the same
-    /// json_schema/tool_choice wiring `complete_structured` used, now driven by
-    /// `CallConfig` so `complete()` alone covers both paths (D-01 unification).
-    /// `complete_structured` itself is untouched (removed later, Plan 08-09).
+    /// `CallConfig.response_format`/`.tool_choice`/`.temperature` (D-01 unification;
+    /// `complete_structured` was removed from the trait entirely by Plan 08-09).
     /// Built via `async-openai`'s request types then escaped to raw JSON via
     /// `serde_json::to_value`, same idiom `post_chat` expects (see module docs:
     /// Groq's response fields don't fit the strict typed deserializer, but the
@@ -117,9 +115,10 @@ impl GroqProvider {
         }
         if let Some(schema) = &config.response_format {
             // strict:false — Groq's strict validator rejects schemars' representation
-            // of `Option<enum>` (an `anyOf` whose branch is a `$ref`, see
-            // `complete_structured`'s rustdoc below for the full explanation). Kept
-            // in lockstep with `complete_structured`'s leniency.
+            // of `Option<enum>` (an `anyOf` whose branch is a `$ref`, e.g. the
+            // router's `convene_reason`): "anyOf branches must be disambiguated".
+            // Non-strict still schema-GUIDES generation while tolerating `$ref`
+            // branches; the caller serde-parse-retries regardless.
             args.response_format(ResponseFormat::JsonSchema {
                 json_schema: ResponseFormatJsonSchema {
                     name: "structured".into(),
@@ -220,51 +219,6 @@ impl Provider for GroqProvider {
         };
         let resp = self.complete(&messages, &config).await?;
         Ok(resp.text)
-    }
-
-    /// Structured completion via OpenAI-compatible `response_format: json_schema`.
-    /// `strict:false` — Groq's strict validator rejects schemars' representation of
-    /// `Option<enum>` (an `anyOf` whose branch is a `$ref`, e.g. the router's
-    /// `convene_reason`): "anyOf branches must be disambiguated". Non-strict still
-    /// schema-GUIDES generation (verified to return schema-valid JSON) while tolerating
-    /// `$ref` branches; the caller serde-parse-retries regardless. OpenRouter/Gemini
-    /// accept strict:true, so this leniency is Groq-specific.
-    async fn complete_structured(
-        &self,
-        system: &str,
-        user: &str,
-        response_schema: serde_json::Value,
-        max_tokens: u32,
-        temperature: f32,
-    ) -> anyhow::Result<String> {
-        let user_msg = vec![Message {
-            role: Role::User,
-            content: MessageContent::Text(user.to_owned()),
-        }];
-        let oai_messages = super::build_openai_messages(system, &user_msg);
-
-        let mut args = CreateChatCompletionRequestArgs::default();
-        args.model(&self.model)
-            .max_completion_tokens(max_tokens)
-            .temperature(temperature)
-            .response_format(ResponseFormat::JsonSchema {
-                json_schema: ResponseFormatJsonSchema {
-                    name: "structured".into(),
-                    description: None,
-                    schema: Some(response_schema),
-                    strict: Some(false),
-                },
-            })
-            .messages(oai_messages);
-        let request = args.build()?;
-        let body = serde_json::to_value(&request)?;
-        let json = self.post_chat(&body).await?;
-
-        let content = first_content(&json);
-        if content.is_empty() {
-            anyhow::bail!("Groq structured response had no content");
-        }
-        Ok(content.to_owned())
     }
 
     fn context_limit(&self) -> usize {

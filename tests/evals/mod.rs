@@ -884,7 +884,7 @@ async fn cli_session_deterministic_across_turns() {
     let f = NamedTempFile::new().unwrap();
     let path = f.path().to_str().unwrap().to_owned();
 
-    // A MockProvider that returns valid RouterDecision JSON for complete_structured.
+    // A MockProvider that returns a fixed CLI response via complete().
     struct CliMockProvider;
     #[async_trait::async_trait]
     impl Provider for CliMockProvider {
@@ -902,22 +902,6 @@ async fn cli_session_deterministic_across_turns() {
         }
         async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
             Ok("cli-simple".into())
-        }
-        async fn complete_structured(
-            &self,
-            _system: &str,
-            _user: &str,
-            _schema: serde_json::Value,
-            _max_tokens: u32,
-            _temperature: f32,
-        ) -> anyhow::Result<String> {
-            Ok(serde_json::json!({
-                "personas": ["Local"],
-                "owner": "_local",
-                "mode": "single",
-                "convene_reason": null
-            })
-            .to_string())
         }
         fn context_limit(&self) -> usize {
             8192

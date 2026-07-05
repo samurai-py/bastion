@@ -1374,8 +1374,7 @@ mod tests {
     use tempfile::NamedTempFile;
     use tokio::sync::RwLock;
 
-    // MockProvider: complete_simple echoes a persona response;
-    // complete_structured returns a valid Single RouterDecision.
+    // MockProvider: complete_simple echoes a persona response.
     struct MockProvider {
         persona_name: String,
     }
@@ -1396,23 +1395,6 @@ mod tests {
         }
         async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
             Ok(format!("simple:{}", self.persona_name))
-        }
-        async fn complete_structured(
-            &self,
-            _system: &str,
-            _user: &str,
-            _schema: serde_json::Value,
-            _max_tokens: u32,
-            _temperature: f32,
-        ) -> anyhow::Result<String> {
-            // Return a valid Single RouterDecision
-            Ok(serde_json::json!({
-                "personas": [self.persona_name],
-                "owner": DEFAULT_OWNER,
-                "mode": "single",
-                "convene_reason": null
-            })
-            .to_string())
         }
         fn context_limit(&self) -> usize {
             8192
@@ -1632,22 +1614,6 @@ mod tests {
             }
             async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
                 Ok("s".to_owned())
-            }
-            async fn complete_structured(
-                &self,
-                _system: &str,
-                _user: &str,
-                _schema: serde_json::Value,
-                _max_tokens: u32,
-                _temperature: f32,
-            ) -> anyhow::Result<String> {
-                Ok(serde_json::json!({
-                    "personas": ["Cloudy"],
-                    "owner": DEFAULT_OWNER,
-                    "mode": "single",
-                    "convene_reason": null
-                })
-                .to_string())
             }
             fn context_limit(&self) -> usize {
                 8192

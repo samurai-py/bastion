@@ -320,16 +320,6 @@ mod tests {
         async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
             unimplemented!()
         }
-        async fn complete_structured(
-            &self,
-            _: &str,
-            _: &str,
-            _: serde_json::Value,
-            _: u32,
-            _: f32,
-        ) -> anyhow::Result<String> {
-            unimplemented!()
-        }
         fn context_limit(&self) -> usize {
             8192
         }

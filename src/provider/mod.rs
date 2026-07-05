@@ -224,21 +224,6 @@ pub trait Provider: Send + Sync {
     fn supports_json_schema(&self) -> bool {
         true
     }
-
-    /// Structured completion. Default = prompt-only fallback (complete_simple);
-    /// OpenAI-compat overrides to set response_format. Schema is a HINT — the caller
-    /// MUST serde-parse-and-retry (AI-SPEC §4b); never assume schema-valid bytes.
-    async fn complete_structured(
-        &self,
-        system: &str,
-        user: &str,
-        response_schema: serde_json::Value,
-        max_tokens: u32,
-        temperature: f32,
-    ) -> anyhow::Result<String> {
-        let _ = (response_schema, max_tokens, temperature);
-        self.complete_simple(&format!("{system}\n\n{user}")).await
-    }
 }
 
 pub type SharedProvider = Arc<RwLock<Box<dyn Provider>>>;
@@ -331,8 +316,9 @@ const STRUCTURED_OUTPUT_TOOL: &str = "__structured_output";
 ///    directly, which is exactly the guarantee D-02 requires (T-08-03-01).
 ///
 /// The returned JSON string is still a HINT, not schema-validated bytes — callers
-/// (Plan 08-07) MUST serde-parse-and-retry per `Provider::complete_structured`'s
-/// existing documented contract; this helper does not weaken it (T-08-03-02).
+/// (Plan 08-07) MUST serde-parse-and-retry, same contract the removed
+/// `Provider::complete_structured` (Plan 08-09) used to document; this helper does
+/// not weaken it (T-08-03-02).
 pub async fn complete_structured_via_forced_tool_call(
     provider: &dyn Provider,
     registry: &mut crate::capability::CapabilityRegistry,

@@ -52,12 +52,10 @@ impl GeminiProvider {
     }
 
     /// Build the outgoing chat-completion request, folding in `CallConfig.response_format`
-    /// / `.temperature` — the same `response_format=json_object` wiring
-    /// `complete_structured` used, now driven by `CallConfig` so `complete()` alone
-    /// covers both paths (D-01 unification). `complete_structured` itself is untouched
-    /// (removed later, Plan 08-09). Extracted as a pure fn (same idiom as
-    /// `openai.rs::build_request` / `groq.rs::build_request`) so it's unit-testable
-    /// without a live HTTP call.
+    /// / `.temperature` via `response_format=json_object` (D-01 unification;
+    /// `complete_structured` was removed from the trait entirely by Plan 08-09).
+    /// Extracted as a pure fn (same idiom as `openai.rs::build_request` /
+    /// `groq.rs::build_request`) so it's unit-testable without a live HTTP call.
     fn build_request(
         &self,
         messages: &[Message],
@@ -380,59 +378,14 @@ impl Provider for GeminiProvider {
         })
     }
 
-    /// D-09: Gemini's strict json_schema parser rejects `$ref`/`$defs` (see
-    /// `complete_structured` comment below) — callers must not assume
-    /// `CallConfig.response_format` is honored natively and should route structured
-    /// output through the forced-tool-call helper (Plan 08-03) instead.
+    /// D-09: Gemini's strict json_schema parser rejects `$ref`/`$defs` emitted by
+    /// schemars for nested enums (e.g. RouterDecision modes) — callers must not
+    /// assume `CallConfig.response_format` is honored natively and should route
+    /// structured output through the forced-tool-call helper (Plan 08-03) instead.
+    /// `complete()` still honors `response_format=json_object` directly (folded in
+    /// by Plan 08-06) for callers that only need "clean JSON, no schema".
     fn supports_json_schema(&self) -> bool {
         false
-    }
-
-    async fn complete_structured(
-        &self,
-        system: &str,
-        user: &str,
-        response_schema: serde_json::Value,
-        max_tokens: u32,
-        temperature: f32,
-    ) -> anyhow::Result<String> {
-        // Gemini's OpenAI-compat endpoint honors response_format=json_object (forces a clean JSON
-        // object, no prose/fences). We do NOT use json_schema here: schemars emits $ref/$defs for
-        // nested enums (RouterDecision modes, etc.) which Gemini's strict json_schema parser
-        // rejects, silently breaking the router. json_object + an explicit field list in the system
-        // prompt + the caller's parse-retry is the reliable combination. The schema is still used
-        // by the caller to describe the fields; it is not sent to Gemini.
-        let _ = &response_schema;
-        let msgs = vec![Message {
-            role: Role::User,
-            content: MessageContent::Text(user.to_owned()),
-        }];
-        let oai_messages = super::build_openai_messages(system, &msgs);
-
-        let mut args = CreateChatCompletionRequestArgs::default();
-        args.model(&self.model)
-            .max_completion_tokens(max_tokens)
-            .temperature(temperature)
-            .response_format(ResponseFormat::JsonObject)
-            .messages(oai_messages);
-        let request = args.build()?;
-
-        let response = self
-            .client
-            .chat()
-            .create(request)
-            .await
-            .map_err(|e| super::clarify_openai_error(self.name(), e))?;
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Gemini returned no choices"))?;
-        let raw = choice
-            .message
-            .content
-            .ok_or_else(|| anyhow::anyhow!("Gemini structured response had no content"))?;
-        Ok(strip_think(&raw))
     }
 
     async fn complete_simple(&self, prompt: &str) -> anyhow::Result<String> {

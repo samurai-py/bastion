@@ -2,11 +2,9 @@ use async_openai::{
     config::OpenAIConfig,
     types::chat::{
         ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
-        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-        ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption, CompletionUsage,
-        CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionName, ResponseFormat,
-        ResponseFormatJsonSchema, ToolChoiceOptions,
+        ChatCompletionToolChoiceOption, CompletionUsage, CreateChatCompletionRequest,
+        CreateChatCompletionRequestArgs, FunctionName, ResponseFormat, ResponseFormatJsonSchema,
+        ToolChoiceOptions,
     },
     Client,
 };
@@ -36,10 +34,8 @@ impl OpenAIProvider {
     }
 
     /// Build the outgoing chat-completion request, folding in
-    /// `CallConfig.response_format`/`.tool_choice`/`.temperature` — the same
-    /// json_schema/tool_choice wiring `complete_structured` used, now driven by
-    /// `CallConfig` so `complete()` alone covers both paths (D-01 unification).
-    /// `complete_structured` itself is untouched (removed later, Plan 08-09).
+    /// `CallConfig.response_format`/`.tool_choice`/`.temperature` (D-01 unification;
+    /// `complete_structured` was removed from the trait entirely by Plan 08-09).
     fn build_request(
         &self,
         messages: &[Message],
@@ -183,64 +179,6 @@ impl Provider for OpenAIProvider {
     }
     fn name(&self) -> &'static str {
         "openai"
-    }
-
-    async fn complete_structured(
-        &self,
-        system: &str,
-        user: &str,
-        response_schema: serde_json::Value,
-        max_tokens: u32,
-        temperature: f32,
-    ) -> anyhow::Result<String> {
-        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-        if !system.is_empty() {
-            messages.push(ChatCompletionRequestMessage::System(
-                ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(system.to_owned()),
-                    name: None,
-                },
-            ));
-        }
-        messages.push(ChatCompletionRequestMessage::User(
-            ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(user.to_owned()),
-                name: None,
-            },
-        ));
-
-        let mut args = CreateChatCompletionRequestArgs::default();
-        args.model(&self.model)
-            .max_completion_tokens(max_tokens)
-            .temperature(temperature)
-            .response_format(ResponseFormat::JsonSchema {
-                json_schema: ResponseFormatJsonSchema {
-                    name: "structured".into(),
-                    description: None,
-                    schema: Some(response_schema),
-                    strict: Some(true),
-                },
-            })
-            .messages(messages);
-        let request = args.build()?;
-
-        let response = self
-            .client
-            .chat()
-            .create(request)
-            .await
-            .map_err(|e| super::clarify_openai_error(self.name(), e))?;
-
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("OpenAI returned no choices"))?;
-
-        choice
-            .message
-            .content
-            .ok_or_else(|| anyhow::anyhow!("OpenAI structured response had no content"))
     }
 }
 
