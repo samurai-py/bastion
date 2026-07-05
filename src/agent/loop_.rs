@@ -986,6 +986,9 @@ impl AgentLoop {
                         "gen_ai.usage.output_tokens",
                         next_response.usage.output_tokens as i64,
                     ));
+                    // D-14a: surface cache_read/cache_write (Plans 08-02/08-04) so the
+                    // cache-hit effect is observable, not just theoretically possible.
+                    chat_span.set_attributes(cache_usage_attributes(&next_response.usage));
                     let finish_reason = if next_response.tool_calls.is_some() {
                         "tool_calls"
                     } else {
@@ -1130,6 +1133,10 @@ impl AgentLoop {
         turn_persona: Option<&str>,
     ) -> anyhow::Result<String> {
         // Build tool definitions from ToolRegistry.
+        // D-12/D-14b: list_tool_names() returns sorted-by-name output since Plan 08-02's
+        // mcp/registry.rs fix (was iteration-order-dependent HashMap output before) — this
+        // tools array is part of CallConfig and therefore part of the byte-stable-prefix
+        // contract build_system_prompt documents; no code change needed here, confirming only.
         let tools: Vec<serde_json::Value> = self
             .mcp
             .registry()
@@ -1393,6 +1400,56 @@ fn estimate_cost_usd(provider: &str, usage: &TokenUsage) -> f64 {
         }
         "ollama" => 0.0, // local — no cost
         _ => 0.0,
+    }
+}
+
+/// D-14a: `gen_ai.usage.cache_read_tokens`/`gen_ai.usage.cache_write_tokens` OTel span
+/// attributes, mirroring the existing `gen_ai.usage.input_tokens`/`output_tokens` naming
+/// convention. `TokenUsage.cache_read`/`cache_write` are populated by Plans 08-02
+/// (Anthropic `cache_control`) and 08-04 (OpenAI/Groq/OpenRouter `prompt_tokens_details.
+/// cached_tokens`) — this is the missing telemetry step that surfaces them.
+///
+/// Always emits BOTH attributes, including the `0` case — Groq's expected-zero
+/// `cache_read` (Pitfall 6) must be an observable measured `0`, not an absent field, so a
+/// dashboard can distinguish "measured zero" from "not wired".
+fn cache_usage_attributes(usage: &TokenUsage) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new("gen_ai.usage.cache_read_tokens", usage.cache_read as i64),
+        KeyValue::new("gen_ai.usage.cache_write_tokens", usage.cache_write as i64),
+    ]
+}
+
+#[cfg(test)]
+mod cache_usage_attributes_tests {
+    use super::{cache_usage_attributes, TokenUsage};
+
+    #[test]
+    fn emits_both_attributes_including_zero() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read: 0,
+            cache_write: 0,
+        };
+        let attrs = cache_usage_attributes(&usage);
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].key.as_str(), "gen_ai.usage.cache_read_tokens");
+        assert_eq!(attrs[0].value.to_string(), "0");
+        assert_eq!(attrs[1].key.as_str(), "gen_ai.usage.cache_write_tokens");
+        assert_eq!(attrs[1].value.to_string(), "0");
+    }
+
+    #[test]
+    fn emits_nonzero_values() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read: 1200,
+            cache_write: 340,
+        };
+        let attrs = cache_usage_attributes(&usage);
+        assert_eq!(attrs[0].value.to_string(), "1200");
+        assert_eq!(attrs[1].value.to_string(), "340");
     }
 }
 
