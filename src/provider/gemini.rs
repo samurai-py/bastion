@@ -1,6 +1,9 @@
 use async_openai::{
     config::OpenAIConfig,
-    types::chat::{ChatCompletionMessageToolCalls, CreateChatCompletionRequestArgs},
+    types::chat::{
+        ChatCompletionMessageToolCalls, CreateChatCompletionRequest,
+        CreateChatCompletionRequestArgs, ResponseFormat,
+    },
     Client,
 };
 
@@ -38,15 +41,19 @@ impl GeminiProvider {
             model: model.to_owned(),
         }
     }
-}
 
-#[async_trait::async_trait]
-impl Provider for GeminiProvider {
-    async fn complete(
+    /// Build the outgoing chat-completion request, folding in `CallConfig.response_format`
+    /// / `.temperature` — the same `response_format=json_object` wiring
+    /// `complete_structured` used, now driven by `CallConfig` so `complete()` alone
+    /// covers both paths (D-01 unification). `complete_structured` itself is untouched
+    /// (removed later, Plan 08-09). Extracted as a pure fn (same idiom as
+    /// `openai.rs::build_request` / `groq.rs::build_request`) so it's unit-testable
+    /// without a live HTTP call.
+    fn build_request(
         &self,
         messages: &[Message],
         config: &CallConfig,
-    ) -> anyhow::Result<LlmResponse> {
+    ) -> anyhow::Result<CreateChatCompletionRequest> {
         let oai_messages = super::build_openai_messages(&config.system_prompt, messages);
 
         let mut args = CreateChatCompletionRequestArgs::default();
@@ -56,7 +63,32 @@ impl Provider for GeminiProvider {
         if !config.tools.is_empty() {
             args.tools(super::anthropic_tools_to_openai(&config.tools));
         }
-        let request = args.build()?;
+        if let Some(schema) = &config.response_format {
+            // Gemini's OpenAI-compat endpoint honors response_format=json_object (forces a
+            // clean JSON object, no prose/fences). We do NOT use json_schema here: schemars
+            // emits $ref/$defs for nested enums (RouterDecision modes, etc.) which Gemini's
+            // strict json_schema parser rejects, silently breaking the router. json_object +
+            // an explicit field list in the system prompt + the caller's parse-retry is the
+            // reliable combination. The schema is still used by the caller to describe the
+            // fields; it is not sent to Gemini.
+            let _ = schema;
+            args.response_format(ResponseFormat::JsonObject);
+        }
+        if let Some(temperature) = config.temperature {
+            args.temperature(temperature);
+        }
+        Ok(args.build()?)
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for GeminiProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        config: &CallConfig,
+    ) -> anyhow::Result<LlmResponse> {
+        let request = self.build_request(messages, config)?;
 
         let response = self
             .client
@@ -85,6 +117,7 @@ impl Provider for GeminiProvider {
                     name: f.function.name,
                     arguments: serde_json::from_str(&f.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                    extra: None,
                 }),
                 _ => None,
             })
@@ -126,8 +159,6 @@ impl Provider for GeminiProvider {
         max_tokens: u32,
         temperature: f32,
     ) -> anyhow::Result<String> {
-        use async_openai::types::chat::ResponseFormat;
-
         // Gemini's OpenAI-compat endpoint honors response_format=json_object (forces a clean JSON
         // object, no prose/fences). We do NOT use json_schema here: schemars emits $ref/$defs for
         // nested enums (RouterDecision modes, etc.) which Gemini's strict json_schema parser
@@ -188,5 +219,44 @@ impl Provider for GeminiProvider {
     }
     fn name(&self) -> &'static str {
         "gemini"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_provider() -> GeminiProvider {
+        // Bypass `new()`'s GEMINI_API_KEY env lookup — unit tests exercise pure
+        // request-shaping logic only, never a live HTTP call.
+        GeminiProvider {
+            client: Client::new(),
+            model: "gemini-test".into(),
+        }
+    }
+
+    #[test]
+    fn build_request_response_format_uses_json_object_never_json_schema() {
+        let provider = test_provider();
+        let schema = serde_json::json!({"type": "object", "properties": {}});
+        let config = CallConfig {
+            response_format: Some(schema),
+            ..Default::default()
+        };
+        let request = provider.build_request(&[], &config).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(body["response_format"]["type"], "json_object");
+        assert!(body["response_format"].get("json_schema").is_none());
+    }
+
+    #[test]
+    fn build_request_no_response_format_omits_the_field() {
+        let provider = test_provider();
+        let config = CallConfig::default();
+        let request = provider.build_request(&[], &config).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+
+        assert!(body.get("response_format").is_none());
     }
 }

@@ -252,6 +252,7 @@ fn parse_native_response(json: &Value) -> anyhow::Result<LlmResponse> {
                         id: format!("call_{i}"),
                         name,
                         arguments,
+                        extra: None,
                     })
                 })
                 .collect()
@@ -353,6 +354,7 @@ impl Provider for OllamaProvider {
                     name: f.function.name,
                     arguments: serde_json::from_str(&f.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                    extra: None,
                 }),
                 _ => None,
             })

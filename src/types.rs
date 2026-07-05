@@ -59,6 +59,12 @@ pub enum ContentPart {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Opaque, provider-specific metadata tied to this tool call — e.g. Gemini's
+        /// `extra_content.google.thought_signature` (SO-05). Never interpreted by
+        /// Bastion core: stored and re-serialized verbatim on history replay only.
+        /// Every provider besides Gemini leaves this `None` and ignores it entirely.
+        #[serde(default)]
+        extra: Option<serde_json::Value>,
     },
     ToolResult {
         tool_use_id: String,
@@ -71,6 +77,11 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Opaque, provider-specific metadata (mirrors `ContentPart::ToolUse.extra`) —
+    /// copied through 1:1 when a `ToolCall` becomes a `ContentPart::ToolUse` on
+    /// history persistence (`src/agent/loop_.rs`). Data, never instructions.
+    #[serde(default)]
+    pub extra: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -230,6 +241,46 @@ mod tests {
         assert!(cfg.response_format.is_none());
         assert!(cfg.tool_choice.is_none());
         assert!(cfg.temperature.is_none());
+    }
+
+    #[test]
+    fn tool_use_extra_field_roundtrips_through_serde_when_none_and_some() {
+        let none_variant = ContentPart::ToolUse {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "/tmp/x"}),
+            extra: None,
+        };
+        let json = serde_json::to_value(&none_variant).unwrap();
+        let back: ContentPart = serde_json::from_value(json).unwrap();
+        match back {
+            ContentPart::ToolUse { extra, .. } => assert_eq!(extra, None),
+            _ => panic!("expected ToolUse"),
+        }
+
+        let some_variant = ContentPart::ToolUse {
+            id: "call_2".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "/tmp/y"}),
+            extra: Some(serde_json::json!({"a": 1})),
+        };
+        let json = serde_json::to_value(&some_variant).unwrap();
+        let back: ContentPart = serde_json::from_value(json).unwrap();
+        match back {
+            ContentPart::ToolUse { extra, .. } => {
+                assert_eq!(extra, Some(serde_json::json!({"a": 1})))
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn tool_call_extra_defaults_to_none_when_absent_from_json() {
+        // #[serde(default)] must let older/other-provider payloads without an
+        // `extra` key deserialize without error.
+        let json = serde_json::json!({"id": "1", "name": "x", "arguments": {}});
+        let call: ToolCall = serde_json::from_value(json).unwrap();
+        assert_eq!(call.extra, None);
     }
 
     #[test]

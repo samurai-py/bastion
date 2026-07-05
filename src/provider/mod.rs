@@ -48,7 +48,9 @@ pub(crate) fn anthropic_tools_to_openai(tools: &[serde_json::Value]) -> Vec<Chat
 }
 
 /// Flatten a MessageContent to plain text (joins Text parts; ignores tool parts).
-fn content_text(content: &MessageContent) -> String {
+/// `pub(crate)` so `gemini.rs`'s raw-JSON tool-use serializer (`build_gemini_messages`,
+/// SO-05) can reuse it instead of duplicating the match arms.
+pub(crate) fn content_text(content: &MessageContent) -> String {
     match content {
         MessageContent::Text(t) => t.clone(),
         MessageContent::Parts(parts) => parts
@@ -115,7 +117,7 @@ pub(crate) fn build_openai_messages(
                                 }
                                 text.push_str(t);
                             }
-                            ContentPart::ToolUse { id, name, input } => {
+                            ContentPart::ToolUse { id, name, input, .. } => {
                                 tool_calls.push(ChatCompletionMessageToolCalls::Function(
                                     ChatCompletionMessageToolCall {
                                         id: id.clone(),
@@ -410,6 +412,7 @@ mod tests {
                         id: "call_1".into(),
                         name: "read_file".into(),
                         input: json!({"path":"/tmp/x"}),
+                        extra: None,
                     },
                 ]),
             },
@@ -505,6 +508,7 @@ mod tests {
                     id: "1".into(),
                     name: name.clone(),
                     arguments,
+                    extra: None,
                 }]
             });
             Ok(LlmResponse {

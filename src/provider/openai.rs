@@ -143,6 +143,7 @@ impl Provider for OpenAIProvider {
                     name: f.function.name,
                     arguments: serde_json::from_str(&f.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                    extra: None,
                 }),
                 _ => None,
             })

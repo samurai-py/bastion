@@ -755,6 +755,7 @@ impl AgentLoop {
                         id: t.id.clone(),
                         name: t.name.clone(),
                         input: t.arguments.clone(),
+                        extra: t.extra.clone(),
                     }))
                     .collect(),
                 )
@@ -1064,6 +1065,7 @@ impl AgentLoop {
                         id: t.id.clone(),
                         name: t.name.clone(),
                         input: t.arguments.clone(),
+                        extra: t.extra.clone(),
                     }))
                     .collect(),
                 )
@@ -1478,6 +1480,7 @@ mod tests {
                             id: "t1".to_owned(),
                             name: "noop".to_owned(),
                             arguments: serde_json::json!({}),
+                            extra: None,
                         }]),
                         usage: TokenUsage {
                             input_tokens: 1,

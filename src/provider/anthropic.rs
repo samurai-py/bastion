@@ -232,6 +232,7 @@ impl Provider for AnthropicProvider {
                                 id: std::mem::take(&mut current_tool_id),
                                 name: std::mem::take(&mut current_tool_name),
                                 arguments,
+                                extra: None,
                             });
                             current_tool_input = String::new();
                             in_tool_use = false;

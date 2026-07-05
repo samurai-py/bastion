@@ -189,6 +189,7 @@ impl Provider for GroqProvider {
                             id,
                             name,
                             arguments,
+                            extra: None,
                         })
                     })
                     .collect()
