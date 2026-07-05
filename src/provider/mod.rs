@@ -201,6 +201,24 @@ pub trait Provider: Send + Sync {
     /// "anthropic" | "openai" | "gemini" | "openrouter" | "ollama"
     fn name(&self) -> &'static str;
 
+    /// D-09 static capability declaration: does this provider's `complete()` honor
+    /// `CallConfig.response_format` via a native json_schema-equivalent mechanism
+    /// (OpenAI/Groq/OpenRouter's `json_schema`, Ollama's native `format` field)?
+    ///
+    /// `true` (default) — callers may set `CallConfig.response_format` directly and
+    /// trust the provider to enforce it natively.
+    /// `false` — callers must route structured-output requests through
+    /// `complete_structured_via_forced_tool_call` (Plan 08-03's forced-tool-call
+    /// helper), or rely on the provider's own alternate native mechanism handled
+    /// internally by its `complete()` impl (e.g. Gemini's `json_object`, the
+    /// terminal_agent provider's prompt-injection — see Plan 08-06).
+    ///
+    /// Consulted by Plan 08-07's caller branching (router/synth/learn) and Plan
+    /// 08-03's forced-tool-call helper.
+    fn supports_json_schema(&self) -> bool {
+        true
+    }
+
     /// Structured completion. Default = prompt-only fallback (complete_simple);
     /// OpenAI-compat overrides to set response_format. Schema is a HINT — the caller
     /// MUST serde-parse-and-retry (AI-SPEC §4b); never assume schema-valid bytes.

@@ -110,6 +110,14 @@ impl Provider for GeminiProvider {
         })
     }
 
+    /// D-09: Gemini's strict json_schema parser rejects `$ref`/`$defs` (see
+    /// `complete_structured` comment below) — callers must not assume
+    /// `CallConfig.response_format` is honored natively and should route structured
+    /// output through the forced-tool-call helper (Plan 08-03) instead.
+    fn supports_json_schema(&self) -> bool {
+        false
+    }
+
     async fn complete_structured(
         &self,
         system: &str,
