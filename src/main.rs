@@ -160,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
         registry,
         memory.clone(),
         goals,
+        cfg.agent.fallback_models.clone(),
     );
 
     match cli.command {

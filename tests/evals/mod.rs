@@ -974,6 +974,7 @@ async fn cli_session_deterministic_across_turns() {
         PersonaRegistry::new_from_map(personas),
         memory,
         GoalEngine::new(&path, ScoringConfig::default()),
+        vec![],
     );
 
     // Two consecutive CLI turns — both must succeed.

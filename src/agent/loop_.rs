@@ -63,7 +63,25 @@ pub struct AgentLoop {
     /// starts. `/connect-app` writes one-time codes here for the mobile pairing flow
     /// (`/auth/exchange`). `None` when the webhook channel is not running.
     pub otc_store: Option<crate::channel::webhook::OtcStore>,
+    /// D-11 (Plan 08-01) / SO-03 (Plan 08-08): ordered list of model-name strings tried,
+    /// in order, when the primary provider suffers a hard/persistent failure
+    /// (`complete_with_fallback_ladder`'s rung 3). Sourced from `AgentConfig.fallback_models`
+    /// via main.rs. Empty = zero behavior change (today's exact fail-on-exhaustion behavior).
+    pub fallback_models: Vec<String>,
+    /// Test-only seam (mirrors `#[cfg(test)] pub async fn drain_handle` below): lets unit
+    /// tests inject a scripted `Provider` for the fallback ladder's provider-switch rung
+    /// instead of a real, network/credential-backed one from `registry::resolve_provider`.
+    /// Always `None` outside test builds — production always resolves through the real
+    /// registry; this field does not exist in non-test compilations.
+    #[cfg(test)]
+    fallback_resolver_override: Option<FallbackResolverOverride>,
 }
+
+/// Test-only alias for the scripted-provider-resolution closure type (keeps the
+/// `fallback_resolver_override` field declaration under clippy's type-complexity limit).
+#[cfg(test)]
+type FallbackResolverOverride =
+    Box<dyn Fn(&str) -> anyhow::Result<Box<dyn crate::provider::Provider>> + Send + Sync>;
 
 impl AgentLoop {
     // Wires 8 independent subsystems (provider, session, mcp, registry, memory, goals…).
@@ -78,6 +96,7 @@ impl AgentLoop {
         registry: PersonaRegistry,
         memory: SharedMemory,
         goals: GoalEngine,
+        fallback_models: Vec<String>,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
         // BIG-1 (Gap 2): McpClient is shared by-Arc so each McpToolAdapter can hold a
@@ -102,6 +121,9 @@ impl AgentLoop {
             pending_rx: Some(pending_rx),
             forced_persona: None,
             otc_store: None,
+            fallback_models,
+            #[cfg(test)]
+            fallback_resolver_override: None,
         };
         // M1: registrar IdentityProvider para injeção do bloco de identidade via SEAM #2.
         // No primeiro uso retorna o ONBOARDING_PROMPT; nos subsequentes retorna o bloco gravado.
@@ -911,12 +933,9 @@ impl AgentLoop {
                             KeyValue::new("gen_ai.request.model", model_name),
                         ])
                         .start(&tracer);
-                    let next_response = {
-                        let provider = self.provider.read().await;
-                        let prov_ref: &dyn crate::provider::Provider = &**provider;
-                        crate::provider::call_with_retry(|| prov_ref.complete(history, config), 3)
-                            .await?
-                    };
+                    let next_response = self
+                        .complete_with_fallback_ladder(history, config, resolved_tier)
+                        .await?;
                     // Record token usage and finish reason
                     chat_span.set_attribute(KeyValue::new(
                         "gen_ai.usage.input_tokens",
@@ -955,6 +974,105 @@ impl AgentLoop {
                 }
             }
         }
+    }
+
+    /// Resolve the fallback candidate's `Provider` instance (D-10 rung 3).
+    ///
+    /// Production always delegates to the real `registry::resolve_provider` (which
+    /// constructs a live, credential/network-backed provider). Test builds check
+    /// `fallback_resolver_override` first so unit tests can inject a scripted `Provider`
+    /// without real network or provider credentials (mirrors the `#[cfg(test)]
+    /// drain_handle` seam elsewhere in this file).
+    #[cfg(not(test))]
+    fn resolve_fallback_provider(
+        &self,
+        candidate: &str,
+    ) -> anyhow::Result<Box<dyn crate::provider::Provider>> {
+        crate::provider::registry::resolve_provider(candidate)
+    }
+
+    #[cfg(test)]
+    fn resolve_fallback_provider(
+        &self,
+        candidate: &str,
+    ) -> anyhow::Result<Box<dyn crate::provider::Provider>> {
+        match &self.fallback_resolver_override {
+            Some(f) => f(candidate),
+            None => crate::provider::registry::resolve_provider(candidate),
+        }
+    }
+
+    /// D-10 fallback ladder — rung 1 (transient retry) + rung 3 (provider-switch on
+    /// hard/persistent failure). Rung 2 (schema/parse forced-tool-call) is Plan 08-07's
+    /// concern, scoped to structured-output callers (`router::route`, `cabinet::synth`,
+    /// `learn::Reflector`) — it does not apply here, since the main agent tool loop never
+    /// sets `CallConfig.response_format`.
+    ///
+    /// Shared by both provider-call sites (`dispatch_tool_loop`, `run_provider_fallback`)
+    /// so the ladder logic exists exactly once (core = mechanism, not orchestrator — no
+    /// duplicated retry/switch logic per call site).
+    ///
+    /// Bounded to ONE switch per call: if the switched-to provider also fails, that error
+    /// propagates unchanged (no cascading through the rest of `fallback_models`). An empty
+    /// `fallback_models` — or one where every configured entry equals the CURRENT
+    /// provider's `model_name()` — preserves today's exact behavior: the original
+    /// retry-exhaustion error propagates, byte-identical to before this plan.
+    async fn complete_with_fallback_ladder(
+        &mut self,
+        history: &[Message],
+        config: &CallConfig,
+        resolved_tier: Option<crate::memory::PrivacyTier>,
+    ) -> anyhow::Result<crate::types::LlmResponse> {
+        // Rung 1 — transient retry, exactly as today.
+        let rung1 = {
+            let provider = self.provider.read().await;
+            let prov_ref: &dyn crate::provider::Provider = &**provider;
+            call_with_retry(|| prov_ref.complete(history, config), 3).await
+        };
+        let original_err = match rung1 {
+            Ok(resp) => return Ok(resp),
+            Err(e) => e,
+        };
+
+        // Rung 3 — switch to the first configured fallback model that isn't the current
+        // provider. Empty list / all-entries-are-current-provider => zero behavior change.
+        let current_model = self.provider.read().await.model_name().to_owned();
+        let candidate = self
+            .fallback_models
+            .iter()
+            .find(|m| m.as_str() != current_model.as_str())
+            .cloned();
+        let Some(candidate) = candidate else {
+            return Err(original_err);
+        };
+
+        // resolve_provider() itself never fails in practice (every registry.rs branch
+        // returns Ok; the underlying `::new()` may panic on a missing API key — a
+        // pre-existing, accepted pattern, T-08-08-01). Handled defensively regardless:
+        // an unresolvable candidate falls back to the ORIGINAL error, not a new one.
+        let new_provider = match self.resolve_fallback_provider(&candidate) {
+            Ok(p) => p,
+            Err(_) => return Err(original_err),
+        };
+
+        let from_provider_name = self.provider.read().await.name().to_owned();
+        tracing::warn!(
+            event = "provider_fallback_switch",
+            from = %from_provider_name,
+            to_model = %candidate,
+            error = %original_err,
+        );
+
+        // T-08-08-02 (mitigate): re-check egress against the NEW provider BEFORE the
+        // swap and BEFORE the retry call — a fallback that would violate the turn's
+        // privacy tier never gets swapped in.
+        crate::hooks::egress::check_egress(resolved_tier, new_provider.name())?;
+
+        *self.provider.write().await = new_provider;
+
+        let provider = self.provider.read().await;
+        let prov_ref: &dyn crate::provider::Provider = &**provider;
+        call_with_retry(|| prov_ref.complete(history, config), 3).await
     }
 
     /// Classic tool-loop provider call — used as fallback when registry is empty.
@@ -1353,6 +1471,7 @@ mod tests {
             make_registry("TestPersona"),
             memory,
             GoalEngine::new(db_path, ScoringConfig::default()),
+            vec![],
         )
     }
 
@@ -1582,6 +1701,7 @@ mod tests {
             registry,
             memory,
             GoalEngine::new(&path, ScoringConfig::default()),
+            vec![],
         );
 
         // CloudOk persona + cloud provider: the multi-round tool loop must complete,
@@ -1593,6 +1713,219 @@ mod tests {
         assert_eq!(
             resp, "done",
             "tool loop must run a second round and return final text"
+        );
+    }
+
+    // --- Plan 08-08 (SO-03): complete_with_fallback_ladder --------------------------
+    //
+    // `complete_with_fallback_ladder` is a private method — these are unit tests
+    // (not the `tests/provider_hotswap.rs` integration test) because the ladder's
+    // provider-switch rung is only injectable via the `#[cfg(test)]
+    // fallback_resolver_override` seam, which does not exist in the library as seen
+    // by integration-test binaries (they link the crate compiled WITHOUT `--cfg
+    // test`). Exercising the ladder end-to-end here — directly, via `make_loop` —
+    // is the only place these 3 scenarios can assert on the private swap behavior.
+
+    struct AlwaysFailProvider;
+
+    #[async_trait]
+    impl Provider for AlwaysFailProvider {
+        async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
+            // "HTTP 400" short-circuits call_with_retry's backoff (see
+            // src/provider/mod.rs) so this test asserts rung-3 behavior without
+            // waiting through 3 retries — this also models the class of
+            // hard/non-transient failure rung 3 exists to handle.
+            anyhow::bail!("HTTP 400: primary provider unavailable")
+        }
+        async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
+            anyhow::bail!("HTTP 400: primary provider unavailable")
+        }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "primary-model"
+        }
+        fn name(&self) -> &'static str {
+            "primary"
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_ladder_switches_provider_on_hard_failure() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct FallbackOkProvider;
+        #[async_trait]
+        impl Provider for FallbackOkProvider {
+            async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
+                Ok(LlmResponse {
+                    text: "response from fallback".to_owned(),
+                    tool_calls: None,
+                    usage: crate::types::TokenUsage {
+                        input_tokens: 5,
+                        output_tokens: 5,
+                        cache_read: 0,
+                        cache_write: 0,
+                    },
+                })
+            }
+            async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
+                Ok("ok".to_owned())
+            }
+            fn context_limit(&self) -> usize {
+                8192
+            }
+            fn model_name(&self) -> &str {
+                "mock2"
+            }
+            fn name(&self) -> &'static str {
+                "fallback"
+            }
+        }
+
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+
+        agent.provider = Arc::new(RwLock::new(
+            Box::new(AlwaysFailProvider) as Box<dyn Provider>
+        ));
+        agent.fallback_models = vec!["mock2".to_owned()];
+
+        let resolve_calls = Arc::new(AtomicU32::new(0));
+        agent.fallback_resolver_override = Some(Box::new({
+            let resolve_calls = resolve_calls.clone();
+            move |candidate: &str| {
+                assert_eq!(candidate, "mock2");
+                resolve_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FallbackOkProvider) as Box<dyn Provider>)
+            }
+        }));
+
+        let history: Vec<Message> = vec![];
+        let config = CallConfig::default();
+        let resp = agent
+            .complete_with_fallback_ladder(&history, &config, Some(PrivacyTier::CloudOk))
+            .await
+            .expect("ladder must succeed via fallback switch");
+
+        assert_eq!(resp.text, "response from fallback");
+        assert_eq!(resolve_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            agent.provider.read().await.name(),
+            "fallback",
+            "active provider must be swapped to the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_ladder_empty_list_propagates_original_error_unchanged() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+
+        agent.provider = Arc::new(RwLock::new(
+            Box::new(AlwaysFailProvider) as Box<dyn Provider>
+        ));
+        assert!(
+            agent.fallback_models.is_empty(),
+            "make_loop fixture defaults to no fallback list"
+        );
+
+        let history: Vec<Message> = vec![];
+        let config = CallConfig::default();
+        let err = agent
+            .complete_with_fallback_ladder(&history, &config, Some(PrivacyTier::CloudOk))
+            .await
+            .expect_err("empty fallback_models must propagate the original error, not swap");
+
+        assert!(
+            err.to_string().contains("HTTP 400"),
+            "propagated error must be the ORIGINAL error unchanged, got: {err}"
+        );
+        assert_eq!(
+            agent.provider.read().await.name(),
+            "primary",
+            "provider must not be swapped when fallback_models is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_ladder_rechecks_egress_before_switching_and_before_retry() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A resolvable fallback whose provider NAME ("anthropic") is a cloud
+        // provider — check_egress(LocalOnly, "anthropic") must block it BEFORE
+        // this provider's complete() is ever called.
+        struct NeverCalledCloudProvider {
+            called: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl Provider for NeverCalledCloudProvider {
+            async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
+                self.called.store(true, Ordering::SeqCst);
+                Ok(LlmResponse {
+                    text: "should never be returned".to_owned(),
+                    tool_calls: None,
+                    usage: crate::types::TokenUsage::default(),
+                })
+            }
+            async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
+                Ok("ok".to_owned())
+            }
+            fn context_limit(&self) -> usize {
+                8192
+            }
+            fn model_name(&self) -> &str {
+                "gpt-4o"
+            }
+            fn name(&self) -> &'static str {
+                "anthropic"
+            }
+        }
+
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+
+        agent.provider = Arc::new(RwLock::new(
+            Box::new(AlwaysFailProvider) as Box<dyn Provider>
+        ));
+        agent.fallback_models = vec!["gpt-4o".to_owned()];
+
+        let called = Arc::new(AtomicBool::new(false));
+        agent.fallback_resolver_override = Some(Box::new({
+            let called = called.clone();
+            move |_candidate: &str| {
+                Ok(Box::new(NeverCalledCloudProvider {
+                    called: called.clone(),
+                }) as Box<dyn Provider>)
+            }
+        }));
+
+        let history: Vec<Message> = vec![];
+        let config = CallConfig::default();
+        let err = agent
+            .complete_with_fallback_ladder(&history, &config, Some(PrivacyTier::LocalOnly))
+            .await
+            .expect_err("egress-blocked fallback provider must return the egress error");
+
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "the fallback provider's complete() must never be called — egress must \
+             block before the retry"
+        );
+        assert!(
+            err.downcast_ref::<BastionError>()
+                .map(|e| matches!(e, BastionError::PrivacyEgressBlocked))
+                .unwrap_or(false),
+            "expected PrivacyEgressBlocked, got: {err:?}"
+        );
+        assert_eq!(
+            agent.provider.read().await.name(),
+            "primary",
+            "provider must NOT be swapped when the new provider fails egress"
         );
     }
 }
