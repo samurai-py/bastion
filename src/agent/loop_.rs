@@ -246,12 +246,53 @@ impl AgentLoop {
     ///
     /// SECURITY (Pitfall 5): usa o max_tier do BLOCO, não o tier da persona —
     /// impede que beliefs LocalOnly vazem para providers cloud quando a persona é CloudOk.
+    ///
+    /// D-12/D-14b — STABLE vs VOLATILE prefix split (byte-stable prompt caching):
+    /// `context_providers` is intentionally ordered so the FIRST `k` entries are
+    /// turn-invariant and the remainder are turn-scoped:
+    ///   - index 0: `DEFAULT_SYSTEM_PROMPT` (compile-time constant).
+    ///   - index 1: `IdentityProvider`'s block — ignores `turn_msg`/`persona`, reads only
+    ///     `owner`'s core memory (onboarding prompt or the stored identity belief), so it
+    ///     is byte-identical across turns for the same owner as long as identity isn't
+    ///     rewritten mid-session.
+    ///   - index 2+ (when `BASTION_MEMORY_RAG=1`), and the always-on
+    ///     `ProceduralBeliefProvider` / post-construction `MeshSliceProvider`: turn-scoped
+    ///     recall/active_object blocks that legitimately vary per turn — these come AFTER
+    ///     the stable prefix, never before it.
+    ///
+    /// This ordering is what lets a caching-aware provider (e.g. Anthropic
+    /// `cache_control`) cache the stable prefix once and reuse it across turns.
+    /// `build_system_prompt_parts` (below) is the pub seam `tests/prompt_cache_prefix.rs`
+    /// uses to assert `parts[0..2]` stays byte-identical across turns with different
+    /// volatile content (D-14b regression guard) — do NOT reorder `context_providers` in
+    /// `AgentLoop::new`/`add_mesh_slice_provider` without updating that test's `k`.
     async fn build_system_prompt(
         &self,
         owner: &str,
         turn_msg: &str,
         persona: Option<&str>,
     ) -> String {
+        self.build_system_prompt_parts(owner, turn_msg, persona)
+            .await
+            .join("\n\n")
+    }
+
+    /// Test seam for D-14b: identical logic to `build_system_prompt`, but returns the
+    /// pre-join `Vec<String>` parts instead of the final joined `String`.
+    ///
+    /// This is deliberately `pub` and NOT `#[cfg(test)]`-gated: integration test binaries
+    /// under `tests/` are compiled against the crate's normal (non-`cfg(test)`) build, so
+    /// `#[cfg(test)]` items are invisible to them (same limitation already documented for
+    /// `fallback_resolver_override` in Plan 08-08's STATE.md entry). Exposing this ordered
+    /// view lets `tests/prompt_cache_prefix.rs` assert the STABLE prefix (`parts[0..k]`,
+    /// see `build_system_prompt`'s rustdoc) is byte-identical across turns without
+    /// duplicating the egress-check logic below — DO NOT let the two functions diverge.
+    pub async fn build_system_prompt_parts(
+        &self,
+        owner: &str,
+        turn_msg: &str,
+        persona: Option<&str>,
+    ) -> Vec<String> {
         let provider_name = self.provider.read().await.name().to_owned();
         let mut parts: Vec<String> = vec![DEFAULT_SYSTEM_PROMPT.to_owned()];
 
@@ -274,7 +315,7 @@ impl AgentLoop {
             }
         }
 
-        parts.join("\n\n")
+        parts
     }
 
     /// Execute one full agent turn for the default local owner.
