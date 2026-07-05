@@ -194,6 +194,23 @@ impl<'a> Drop for TurnCapabilityScope<'a> {
     }
 }
 
+/// Read-only access to the underlying registry while the scope is alive.
+///
+/// The scope holds the sole `&mut CapabilityRegistry` for its whole lifetime
+/// (needed so `Drop` can always remove what it registered, even on early
+/// return) — so callers that need to `invoke()` a capability while it is still
+/// registered (e.g. Plan 08-03's `complete_structured_via_forced_tool_call`)
+/// cannot reborrow the original `&mut` reference. `Deref` exposes the
+/// immutable `invoke`/`list_*` surface without weakening that guarantee:
+/// nothing here can register/remove a capability out from under the scope.
+impl<'a> std::ops::Deref for TurnCapabilityScope<'a> {
+    type Target = CapabilityRegistry;
+
+    fn deref(&self) -> &Self::Target {
+        self.registry
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
