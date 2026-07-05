@@ -117,7 +117,9 @@ pub(crate) fn build_openai_messages(
                                 }
                                 text.push_str(t);
                             }
-                            ContentPart::ToolUse { id, name, input, .. } => {
+                            ContentPart::ToolUse {
+                                id, name, input, ..
+                            } => {
                                 tool_calls.push(ChatCompletionMessageToolCalls::Function(
                                     ChatCompletionMessageToolCall {
                                         id: id.clone(),
