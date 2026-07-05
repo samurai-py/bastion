@@ -140,16 +140,26 @@ impl OllamaProvider {
     /// `prompt_eval_count`, `eval_count`) are per Ollama docs/api.md as of the 2026-07
     /// phase-8 research — NOT live-verified (owner has no local model, D-08); confirm
     /// during Phase 12 live validation before trusting in production.
-    ///
-    /// `#[allow(dead_code)]`: not wired into `complete()` yet — the dispatch branch and
-    /// the Pitfall 2 `$ref`/`definitions` diagnostic land in Task 2 of this plan.
-    #[allow(dead_code)]
     async fn complete_native(
         &self,
         messages: &[Message],
         config: &CallConfig,
         schema: Value,
     ) -> anyhow::Result<LlmResponse> {
+        // Pitfall 2: warn (not fail) when the schema carries the $ref/definitions
+        // pattern known to risk a silent GBNF constrained-decoding fallback — the
+        // owner has no local model to live-verify against (D-08), so this is the only
+        // signal available until Phase 12.
+        if schema_contains_ref_or_defs(&schema) {
+            tracing::warn!(
+                provider = "ollama",
+                "structured-output schema contains $ref/definitions — GBNF rule-count \
+                 expansion may silently fall back to unconstrained generation on this \
+                 request (llama.cpp#21228, Pitfall 2); confirm with a live Phase 12 test \
+                 if outputs look schema-unenforced"
+            );
+        }
+
         let mut body = serde_json::json!({
             "model": self.model,
             "messages": Self::native_messages(&config.system_prompt, messages),
@@ -265,6 +275,30 @@ fn parse_native_response(json: &Value) -> anyhow::Result<LlmResponse> {
     })
 }
 
+/// Pitfall 2: recursive walk detecting whether a schemars-generated schema contains a
+/// `$ref` (any JSON Schema draft) or a `definitions`/`$defs` map (draft-07 and 2020-12
+/// spellings respectively — schemars 0.8, the version Bastion pins, emits `$ref` +
+/// `definitions`; `$defs` is checked too so this stays correct if schemars is ever
+/// upgraded to a 2020-12-emitting version). llama.cpp's GBNF compiler inlines `$ref`s
+/// and can silently fall back to unconstrained generation past a rule-count threshold
+/// (llama.cpp#21228) — this is a diagnostic, not a build-breaking gate; live GBNF
+/// behavior against production schemas is deferred to Phase 12 (D-08).
+fn schema_contains_ref_or_defs(schema: &Value) -> bool {
+    match schema {
+        Value::Object(map) => {
+            if map.contains_key("$ref")
+                || map.contains_key("definitions")
+                || map.contains_key("$defs")
+            {
+                return true;
+            }
+            map.values().any(schema_contains_ref_or_defs)
+        }
+        Value::Array(arr) => arr.iter().any(schema_contains_ref_or_defs),
+        _ => false,
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for OllamaProvider {
     async fn complete(
@@ -272,6 +306,15 @@ impl Provider for OllamaProvider {
         messages: &[Message],
         config: &CallConfig,
     ) -> anyhow::Result<LlmResponse> {
+        // D-05: structured-output requests MUST use Ollama's native `/api/chat` `format`
+        // field, never `.response_format()` on the async-openai path below — Ollama's
+        // OpenAI-compat shim silently ignores it (ollama/ollama#10001, Pitfall 1). Falls
+        // through to the existing, unchanged path when no schema is requested — zero
+        // regression to today's non-structured behavior.
+        if let Some(schema) = &config.response_format {
+            return self.complete_native(messages, config, schema.clone()).await;
+        }
+
         let oai_messages = super::build_openai_messages(&config.system_prompt, messages);
 
         let mut args = CreateChatCompletionRequestArgs::default();
@@ -357,6 +400,13 @@ impl Provider for OllamaProvider {
     fn name(&self) -> &'static str {
         "ollama"
     }
+
+    // D-09: no override needed. Ollama inherits the trait default (`true`) — it DOES
+    // support `CallConfig.response_format` natively, just via a different internal
+    // mechanism (the native `/api/chat` `format` field routed through `complete_native`
+    // above) rather than the OpenAI-compat `response_format` field other providers in
+    // this trait impl group use. Callers only observe the boolean contract, not which
+    // wire shape satisfies it.
 }
 
 #[cfg(test)]
@@ -445,5 +495,50 @@ mod tests {
         assert_eq!(arr[1]["content"], "hi");
         assert_eq!(arr[2]["role"], "tool");
         assert_eq!(arr[2]["content"], "42");
+    }
+
+    #[test]
+    fn schema_ref_defs_detector_finds_ref_and_definitions_keys() {
+        let with_ref = serde_json::json!({"$ref": "#/definitions/Foo"});
+        let with_definitions = serde_json::json!({"definitions": {"Foo": {}}});
+        let with_defs = serde_json::json!({"$defs": {"Foo": {}}});
+        let without = serde_json::json!({"type": "string"});
+        let nested = serde_json::json!({"properties": {"x": {"$ref": "#/definitions/Foo"}}});
+
+        assert!(schema_contains_ref_or_defs(&with_ref));
+        assert!(schema_contains_ref_or_defs(&with_definitions));
+        assert!(schema_contains_ref_or_defs(&with_defs));
+        assert!(schema_contains_ref_or_defs(&nested));
+        assert!(!schema_contains_ref_or_defs(&without));
+    }
+
+    /// Pitfall 2 diagnostic against a real production schema (D-08: off-GPU, informational
+    /// — does not gate the build on live GBNF behavior, only measures whether this type's
+    /// schemars-generated shape carries the referencing pattern that risks tripping
+    /// llama.cpp's GBNF rule-count threshold). `CabinetVerdict` nests `Vec<Dissent>`
+    /// (itself a `JsonSchema`-deriving struct) — schemars 0.8 always resolves that via
+    /// `$ref` + `definitions` (draft-07 keys; verified this session against a probe type
+    /// with the same nested-struct shape — schemars 0.8 does NOT emit the 2020-12 `$defs`
+    /// name). If this assertion ever starts failing, schemars' output shape changed and
+    /// the Pitfall 2 risk for this type should be re-evaluated against Phase 12's live
+    /// findings.
+    #[test]
+    fn cabinet_verdict_production_schema_ref_defs_diagnostic() {
+        let schema = schemars::schema_for!(crate::cabinet::synth::CabinetVerdict);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+
+        let has_ref_defs = schema_contains_ref_or_defs(&value);
+
+        assert!(
+            has_ref_defs,
+            "CabinetVerdict is expected to reference Dissent via $ref/definitions given \
+             its current shape (Vec<Dissent>, a nested JsonSchema-deriving struct)"
+        );
+    }
+
+    #[test]
+    fn ollama_declares_json_schema_support_via_native_format_field() {
+        let provider = OllamaProvider::new("llama3");
+        assert!(provider.supports_json_schema());
     }
 }
