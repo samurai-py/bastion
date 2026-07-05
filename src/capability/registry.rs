@@ -93,9 +93,18 @@ impl CapabilityRegistry {
     /// Return tool definitions in the JSON format expected by the provider
     /// (name/description/input_schema). Compatible with `anthropic_tools_to_openai()`
     /// in openrouter.rs.
+    ///
+    /// SORTED by capability name (COST-01/D-14b prerequisite): `self.inner` is a
+    /// `HashMap`, whose iteration order is unspecified and can shift across an
+    /// intervening register+remove cycle (e.g. `TurnCapabilityScope`, above) even
+    /// when the surviving capability set is unchanged. Plan 08-10's byte-stable
+    /// cache-prefix guarantee requires this listing to serialize identically
+    /// turn-over-turn — an unsorted HashMap iteration would silently invalidate
+    /// that guarantee.
     pub fn list_tool_defs(&self) -> Vec<serde_json::Value> {
-        self.inner
-            .values()
+        let mut caps: Vec<&Arc<dyn Capability>> = self.inner.values().collect();
+        caps.sort_by(|a, b| a.name().cmp(b.name()));
+        caps.into_iter()
             .map(|cap| {
                 serde_json::json!({
                     "name": cap.name(),
@@ -182,5 +191,74 @@ impl<'a> Drop for TurnCapabilityScope<'a> {
         for name in &self.registered {
             self.registry.remove(name);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubCap {
+        name: String,
+        schema: Value,
+    }
+
+    #[async_trait]
+    impl Capability for StubCap {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &Value {
+            &self.schema
+        }
+        async fn invoke(&self, _args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
+            Ok(Value::Null)
+        }
+    }
+
+    fn stub(name: &str) -> Arc<dyn Capability> {
+        Arc::new(StubCap {
+            name: name.to_owned(),
+            schema: serde_json::json!({}),
+        })
+    }
+
+    #[test]
+    fn list_tool_defs_returns_capabilities_sorted_by_name() {
+        let mut registry = CapabilityRegistry::new();
+        registry.register(stub("z")).unwrap();
+        registry.register(stub("a")).unwrap();
+        registry.register(stub("m")).unwrap();
+
+        let names: Vec<String> = registry
+            .list_tool_defs()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(names, vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn list_tool_defs_is_byte_stable_across_register_remove_cycle() {
+        let mut registry = CapabilityRegistry::new();
+        registry.register(stub("z")).unwrap();
+        registry.register(stub("a")).unwrap();
+        registry.register(stub("m")).unwrap();
+
+        let before = serde_json::to_string(&registry.list_tool_defs()).unwrap();
+
+        // Mirror TurnCapabilityScope: register an ephemeral 4th capability, then drop it.
+        {
+            let _scope = TurnCapabilityScope::new(&mut registry, vec![stub("ephemeral")]);
+        }
+
+        let after = serde_json::to_string(&registry.list_tool_defs()).unwrap();
+        assert_eq!(
+            before, after,
+            "an intervening register+remove cycle must not perturb list_tool_defs() ordering"
+        );
     }
 }
