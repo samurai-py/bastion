@@ -308,7 +308,8 @@ async fn cabinet_preserves_dissent() {
     .to_string();
 
     let provider = MockProvider::always("mock", &verdict_json);
-    let verdict = synthesize(&provider, &transcript)
+    let mut cap_registry = bastion::capability::CapabilityRegistry::new();
+    let verdict = synthesize(&provider, &transcript, &mut cap_registry)
         .await
         .expect("synthesize");
 

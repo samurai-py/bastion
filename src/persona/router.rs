@@ -6,8 +6,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::capability::CapabilityRegistry;
 use crate::persona::PersonaRegistry;
 use crate::provider::Provider;
+use crate::types::{CallConfig, Message, MessageContent, Role};
 
 // ---------------------------------------------------------------------------
 // RouterDecision types — VERBATIM from spec §2 / AI-SPEC §4b
@@ -65,6 +67,7 @@ pub async fn route(
     registry: &PersonaRegistry,
     msg: &str,
     owner: &str,
+    capability_registry: &mut CapabilityRegistry,
 ) -> anyhow::Result<RouterDecision> {
     // Schema/parse target is the owner-less DTO — owner is injected below, not by the model.
     let schema = schemars::schema_for!(RouterDecisionLlm);
@@ -73,12 +76,89 @@ pub async fn route(
 
     let system_prompt = build_router_system_prompt(registry);
 
+    let messages = vec![Message {
+        role: Role::User,
+        content: MessageContent::Text(msg.to_owned()),
+    }];
+    let config = CallConfig {
+        system_prompt: system_prompt.clone(),
+        max_tokens: 512,
+        temperature: Some(0.0),
+        response_format: None,
+        tool_choice: None,
+        tools: vec![],
+    };
+    // D-09 runtime catch: a `supports_json_schema()==true` provider can still reject the
+    // schema at runtime (OpenRouter's per-model variance) — fall through to the
+    // forced-tool-call helper on the FIRST such rejection and stay on it for the
+    // remaining retry attempts (never bounce back to the direct path mid-retry).
+    let mut use_forced = !provider.supports_json_schema();
+
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
-        let raw = provider
-            .complete_structured(&system_prompt, msg, response_schema.clone(), 512, 0.0)
+        tracing::debug!(
+            event = "structured_output_path",
+            provider = %provider.name(),
+            forced = use_forced
+        );
+        let raw_result = if use_forced {
+            // NOTE: `check_egress` denies `None` on ambiguity (fail-closed) — the
+            // ephemeral `StructuredOutputCapability` is `is_local()==true` and only
+            // clears the egress gate for a concrete `Some(LocalOnly)` tier (see
+            // `complete_structured_via_forced_tool_call`'s own test `test_ctx()` in
+            // provider/mod.rs), never for `None`.
+            let ctx = crate::capability::InvokeCtx {
+                owner: owner.to_owned(),
+                privacy_tier: Some(crate::memory::PrivacyTier::LocalOnly),
+                needs_approval: false,
+            };
+            crate::provider::complete_structured_via_forced_tool_call(
+                provider,
+                capability_registry,
+                &ctx,
+                &messages,
+                &config,
+                response_schema.clone(),
+            )
             .await
-            .map_err(|e| anyhow::anyhow!("router provider call failed (attempt {attempt}): {e}"))?;
+        } else {
+            provider
+                .complete(
+                    &messages,
+                    &CallConfig {
+                        response_format: Some(response_schema.clone()),
+                        ..config.clone()
+                    },
+                )
+                .await
+                .map(|r| r.text)
+        };
+
+        let raw = match raw_result {
+            Ok(raw) => raw,
+            Err(e) => {
+                let msg_txt = e.to_string();
+                if !use_forced
+                    && (msg_txt.contains("response_format")
+                        || msg_txt.contains("json_schema")
+                        || msg_txt.contains("400"))
+                {
+                    tracing::warn!(
+                        attempt,
+                        error = %msg_txt,
+                        "router provider rejected the schema at runtime — falling through to forced-tool-call"
+                    );
+                    use_forced = true;
+                } else {
+                    tracing::warn!(
+                        attempt,
+                        error = %msg_txt,
+                        "router provider call failed — retrying"
+                    );
+                }
+                continue;
+            }
+        };
 
         // Defensive: some providers (e.g. Gemini) wrap JSON in ```fences``` or leading prose
         // despite the instruction. Extract the outermost {...} before parsing.
@@ -211,10 +291,11 @@ Do NOT include an "owner" field. No prose, no markdown fences."#
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::CapabilityRegistry;
     use crate::memory::PrivacyTier;
     use crate::persona::{Persona, PersonaRegistry};
     use crate::provider::Provider;
-    use crate::types::{CallConfig, LlmResponse, Message};
+    use crate::types::{CallConfig, LlmResponse, Message, ToolCall, ToolChoice};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -224,12 +305,20 @@ mod tests {
     struct MockProvider {
         /// Scripted responses returned in order. After exhaustion returns the last one.
         responses: Mutex<Vec<String>>,
+        /// D-09 static capability declaration this mock reports.
+        supports_schema: bool,
+        /// If Some, the FIRST direct (non-forced) `complete()` call returns this as an
+        /// `Err`, simulating a runtime schema rejection (D-09 runtime catch); consumed
+        /// (taken) so it only fires once. Forced-tool-call attempts never see it.
+        reject_first_direct: Mutex<Option<String>>,
     }
 
     impl MockProvider {
         fn new(responses: Vec<String>) -> Self {
             Self {
                 responses: Mutex::new(responses),
+                supports_schema: true,
+                reject_first_direct: Mutex::new(None),
             }
         }
 
@@ -240,12 +329,78 @@ mod tests {
         fn sequence(responses: &[&str]) -> Self {
             Self::new(responses.iter().map(|s| s.to_string()).collect())
         }
+
+        /// A provider that declares `supports_json_schema()==false` — route() must go
+        /// straight to the forced-tool-call path.
+        fn without_json_schema_support(response: &str) -> Self {
+            Self {
+                supports_schema: false,
+                ..Self::always(response)
+            }
+        }
+
+        /// A `supports_json_schema()==true` provider whose first direct-path call is
+        /// rejected at runtime (schema-shaped error) — route() must fall through to the
+        /// forced-tool-call path on the next attempt and succeed.
+        fn rejecting_schema_once_then(response: &str) -> Self {
+            Self {
+                reject_first_direct: Mutex::new(Some(
+                    "HTTP 400: response_format not supported by this model".to_string(),
+                )),
+                ..Self::always(response)
+            }
+        }
     }
 
     #[async_trait]
     impl Provider for MockProvider {
-        async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
-            unimplemented!("MockProvider only implements complete_structured for router tests")
+        async fn complete(
+            &self,
+            _: &[Message],
+            config: &CallConfig,
+        ) -> anyhow::Result<LlmResponse> {
+            let forced = matches!(config.tool_choice, Some(ToolChoice::Forced(_)));
+            if !forced {
+                if let Some(err) = self
+                    .reject_first_direct
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                {
+                    anyhow::bail!(err);
+                }
+            }
+            let raw = {
+                let mut responses = self.responses.lock().unwrap_or_else(|e| e.into_inner());
+                if responses.len() > 1 {
+                    responses.remove(0)
+                } else {
+                    responses[0].clone()
+                }
+            };
+            if forced {
+                let Some(ToolChoice::Forced(name)) = config.tool_choice.clone() else {
+                    unreachable!("checked by `forced` above")
+                };
+                let arguments =
+                    serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+                Ok(LlmResponse {
+                    text: String::new(),
+                    tool_calls: Some(vec![ToolCall {
+                        id: "1".into(),
+                        name,
+                        arguments,
+                        extra: None,
+                    }]),
+                    usage: Default::default(),
+                })
+            } else {
+                Ok(LlmResponse {
+                    text: raw,
+                    tool_calls: None,
+                    usage: Default::default(),
+                })
+            }
         }
         async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
             unimplemented!()
@@ -259,21 +414,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock"
         }
-
-        async fn complete_structured(
-            &self,
-            _system: &str,
-            _user: &str,
-            _schema: serde_json::Value,
-            _max_tokens: u32,
-            _temperature: f32,
-        ) -> anyhow::Result<String> {
-            let mut responses = self.responses.lock().unwrap();
-            if responses.len() > 1 {
-                Ok(responses.remove(0))
-            } else {
-                Ok(responses[0].clone())
-            }
+        fn supports_json_schema(&self) -> bool {
+            self.supports_schema
         }
     }
 
@@ -320,7 +462,8 @@ mod tests {
 
         let provider = MockProvider::always(&json);
         let registry = make_registry();
-        let decision = route(&provider, &registry, "hello", "user1")
+        let mut cap_registry = CapabilityRegistry::new();
+        let decision = route(&provider, &registry, "hello", "user1", &mut cap_registry)
             .await
             .expect("route failed");
 
@@ -342,9 +485,16 @@ mod tests {
 
         let provider = MockProvider::always(&json);
         let registry = make_registry();
-        let decision = route(&provider, &registry, "I have chest pains", "user1")
-            .await
-            .expect("route failed");
+        let mut cap_registry = CapabilityRegistry::new();
+        let decision = route(
+            &provider,
+            &registry,
+            "I have chest pains",
+            "user1",
+            &mut cap_registry,
+        )
+        .await
+        .expect("route failed");
 
         assert_eq!(decision.mode, ResponseMode::Cabinet);
         assert_eq!(decision.convene_reason, Some(ConveneReason::HighWeight));
@@ -355,7 +505,8 @@ mod tests {
         // CF-2: 3 consecutive unparseable outputs → safe single-persona fallback
         let provider = MockProvider::sequence(&["not json", "also garbage", "{{ invalid"]);
         let registry = make_registry();
-        let decision = route(&provider, &registry, "test", "user1")
+        let mut cap_registry = CapabilityRegistry::new();
+        let decision = route(&provider, &registry, "test", "user1", &mut cap_registry)
             .await
             .expect("route must not error — safe fallback");
 
@@ -388,9 +539,16 @@ mod tests {
 
         let provider = MockProvider::sequence(&["garbage", "also bad", &valid]);
         let registry = make_registry();
-        let decision = route(&provider, &registry, "cross-domain query", "u")
-            .await
-            .expect("route failed");
+        let mut cap_registry = CapabilityRegistry::new();
+        let decision = route(
+            &provider,
+            &registry,
+            "cross-domain query",
+            "u",
+            &mut cap_registry,
+        )
+        .await
+        .expect("route failed");
 
         assert_eq!(decision.mode, ResponseMode::Parallel);
     }
@@ -410,9 +568,16 @@ mod tests {
 
         let provider = MockProvider::always(&json);
         let registry = make_registry();
-        let decision = route(&provider, &registry, "reuniões de trabalho", "user1")
-            .await
-            .expect("route failed");
+        let mut cap_registry = CapabilityRegistry::new();
+        let decision = route(
+            &provider,
+            &registry,
+            "reuniões de trabalho",
+            "user1",
+            &mut cap_registry,
+        )
+        .await
+        .expect("route failed");
 
         assert_eq!(decision.mode, ResponseMode::Single);
         assert!(
@@ -433,11 +598,13 @@ mod tests {
 
         let provider = MockProvider::always(&json);
         let registry = make_registry();
+        let mut cap_registry = CapabilityRegistry::new();
         let decision = route(
             &provider,
             &registry,
             "plano de fitness para perder peso",
             "user1",
+            &mut cap_registry,
         )
         .await
         .expect("route failed");
@@ -458,11 +625,13 @@ mod tests {
 
         let provider = MockProvider::always(&json);
         let registry = make_registry();
+        let mut cap_registry = CapabilityRegistry::new();
         let decision = route(
             &provider,
             &registry,
             "receita de bolo de chocolate",
             "user1",
+            &mut cap_registry,
         )
         .await
         .expect("route failed");
@@ -492,5 +661,75 @@ mod tests {
                 || prompt.contains("Examples"),
             "Router system prompt must contain at least one routing example"
         );
+    }
+
+    // --- D-04/D-09: complete()-surface migration (Plan 08-07) ---
+
+    #[tokio::test]
+    async fn direct_path_used_when_provider_supports_json_schema() {
+        // Test 1: `supports_json_schema()==true` (default) + well-formed response → the
+        // direct `complete()` path parses successfully, no forced-tool-call needed.
+        let json = serde_json::json!({
+            "personas": ["Aria"],
+            "mode": "single",
+            "convene_reason": null
+        })
+        .to_string();
+
+        let provider = MockProvider::always(&json);
+        let registry = make_registry();
+        let mut cap_registry = CapabilityRegistry::new();
+        let decision = route(&provider, &registry, "hi", "user1", &mut cap_registry)
+            .await
+            .expect("route failed");
+
+        assert_eq!(decision.mode, ResponseMode::Single);
+        assert_eq!(decision.personas, vec!["Aria"]);
+    }
+
+    #[tokio::test]
+    async fn forced_path_used_when_provider_lacks_json_schema_support() {
+        // Test 2: `supports_json_schema()==false` — route() must go straight through
+        // `complete_structured_via_forced_tool_call` and still parse successfully.
+        let json = serde_json::json!({
+            "personas": ["Saúde"],
+            "mode": "single",
+            "convene_reason": null
+        })
+        .to_string();
+
+        let provider = MockProvider::without_json_schema_support(&json);
+        let registry = make_registry();
+        let mut cap_registry = CapabilityRegistry::new();
+        let decision = route(&provider, &registry, "hi", "user1", &mut cap_registry)
+            .await
+            .expect("route failed via forced-tool-call path");
+
+        assert_eq!(decision.personas, vec!["Saúde"]);
+        // The ephemeral StructuredOutputCapability must be cleaned up (TurnCapabilityScope Drop).
+        assert!(cap_registry.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_schema_rejection_falls_through_to_forced_path() {
+        // Test 3: a `supports_json_schema()==true` provider that rejects the schema at
+        // runtime on attempt 1 (HTTP-400-shaped error) must fall through to the
+        // forced-tool-call path on attempt 2 and still succeed.
+        let json = serde_json::json!({
+            "personas": ["Aria"],
+            "mode": "parallel",
+            "convene_reason": null
+        })
+        .to_string();
+
+        let provider = MockProvider::rejecting_schema_once_then(&json);
+        let registry = make_registry();
+        let mut cap_registry = CapabilityRegistry::new();
+        let decision = route(&provider, &registry, "hi", "user1", &mut cap_registry)
+            .await
+            .expect("route must recover via the forced-tool-call fallback");
+
+        assert_eq!(decision.mode, ResponseMode::Parallel);
+        assert!(cap_registry.is_empty());
     }
 }

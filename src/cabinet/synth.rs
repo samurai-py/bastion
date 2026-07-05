@@ -14,7 +14,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::cabinet::Turn;
+use crate::capability::CapabilityRegistry;
 use crate::provider::Provider;
+use crate::types::{CallConfig, Message, MessageContent, Role};
 
 /// A single persona's dissenting stance.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -49,8 +51,9 @@ pub struct CabinetVerdict {
 pub async fn synthesize(
     provider: &dyn Provider,
     transcript: &[Turn],
+    capability_registry: &mut CapabilityRegistry,
 ) -> anyhow::Result<CabinetVerdict> {
-    synthesize_in_language(provider, transcript, "pt-BR").await
+    synthesize_in_language(provider, transcript, "pt-BR", capability_registry).await
 }
 
 /// Like `synthesize()` but with an explicit response language tag.
@@ -58,6 +61,7 @@ pub async fn synthesize_in_language(
     provider: &dyn Provider,
     transcript: &[Turn],
     response_language: &str,
+    capability_registry: &mut CapabilityRegistry,
 ) -> anyhow::Result<CabinetVerdict> {
     let schema = schemars::schema_for!(CabinetVerdict);
     let response_schema = serde_json::to_value(&schema)
@@ -66,14 +70,92 @@ pub async fn synthesize_in_language(
     let system = build_synthesis_prompt(response_language);
     let user = build_transcript_text(transcript);
 
+    let messages = vec![Message {
+        role: Role::User,
+        content: MessageContent::Text(user),
+    }];
+    let config = CallConfig {
+        system_prompt: system.clone(),
+        max_tokens: 4096,
+        temperature: Some(0.3),
+        response_format: None,
+        tool_choice: None,
+        tools: vec![],
+    };
+    // D-09 runtime catch: mirrors persona::router::route — see that function for the
+    // full rationale. Once a runtime schema rejection is caught, stay on the forced
+    // path for the remaining retry attempts.
+    let mut use_forced = !provider.supports_json_schema();
+
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
-        let raw = provider
-            .complete_structured(&system, &user, response_schema.clone(), 4096, 0.3)
+        tracing::debug!(
+            event = "structured_output_path",
+            provider = %provider.name(),
+            forced = use_forced
+        );
+        let raw_result = if use_forced {
+            // `owner` is inert for this ephemeral, pure-echo capability: it is
+            // `is_local()==true` by construction (structured_output.rs), so egress
+            // policy never keys on it. A fixed label is honest observability, not a
+            // forged identity — no policy decision depends on this value.
+            // NOTE: `check_egress` denies `None` on ambiguity (fail-closed) — the
+            // ephemeral `StructuredOutputCapability` is `is_local()==true` and only
+            // clears the egress gate for a concrete `Some(LocalOnly)` tier (see
+            // `complete_structured_via_forced_tool_call`'s own test `test_ctx()` in
+            // provider/mod.rs), never for `None`.
+            let ctx = crate::capability::InvokeCtx {
+                owner: "cabinet_synthesis".to_owned(),
+                privacy_tier: Some(crate::memory::PrivacyTier::LocalOnly),
+                needs_approval: false,
+            };
+            crate::provider::complete_structured_via_forced_tool_call(
+                provider,
+                capability_registry,
+                &ctx,
+                &messages,
+                &config,
+                response_schema.clone(),
+            )
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("cabinet synthesis provider call failed (attempt {attempt}): {e}")
-            })?;
+        } else {
+            provider
+                .complete(
+                    &messages,
+                    &CallConfig {
+                        response_format: Some(response_schema.clone()),
+                        ..config.clone()
+                    },
+                )
+                .await
+                .map(|r| r.text)
+        };
+
+        let raw = match raw_result {
+            Ok(raw) => raw,
+            Err(e) => {
+                let msg_txt = e.to_string();
+                if !use_forced
+                    && (msg_txt.contains("response_format")
+                        || msg_txt.contains("json_schema")
+                        || msg_txt.contains("400"))
+                {
+                    tracing::warn!(
+                        attempt,
+                        error = %msg_txt,
+                        "cabinet synthesis provider rejected the schema at runtime — falling through to forced-tool-call"
+                    );
+                    use_forced = true;
+                } else {
+                    tracing::warn!(
+                        attempt,
+                        error = %msg_txt,
+                        "cabinet synthesis provider call failed — retrying"
+                    );
+                }
+                continue;
+            }
+        };
 
         match serde_json::from_str::<CabinetVerdict>(&raw) {
             Ok(verdict) => return Ok(verdict),
@@ -169,30 +251,104 @@ mod tests {
     use super::*;
     use crate::cabinet::{Turn, TurnKind};
     use crate::provider::Provider;
-    use crate::types::{CallConfig, LlmResponse, Message};
+    use crate::types::{CallConfig, LlmResponse, Message, ToolCall, ToolChoice};
     use async_trait::async_trait;
     use std::sync::Mutex;
 
     struct ScriptedProvider {
         responses: Mutex<Vec<String>>,
+        /// D-09 static capability declaration this mock reports.
+        supports_schema: bool,
+        /// If Some, the FIRST direct (non-forced) `complete()` call returns this as an
+        /// `Err`, simulating a runtime schema rejection; consumed (taken) so it only
+        /// fires once. Forced-tool-call attempts never see it.
+        reject_first_direct: Mutex<Option<String>>,
     }
 
     impl ScriptedProvider {
         fn sequence(responses: &[&str]) -> Self {
             Self {
                 responses: Mutex::new(responses.iter().map(|s| s.to_string()).collect()),
+                supports_schema: true,
+                reject_first_direct: Mutex::new(None),
             }
         }
 
         fn always(response: &str) -> Self {
             Self::sequence(&[response])
         }
+
+        /// A provider that declares `supports_json_schema()==false` — synthesize() must
+        /// go straight to the forced-tool-call path.
+        fn without_json_schema_support(response: &str) -> Self {
+            Self {
+                supports_schema: false,
+                ..Self::always(response)
+            }
+        }
+
+        /// A `supports_json_schema()==true` provider whose first direct-path call is
+        /// rejected at runtime — synthesize() must fall through to the forced-tool-call
+        /// path on the next attempt and succeed.
+        fn rejecting_schema_once_then(response: &str) -> Self {
+            Self {
+                reject_first_direct: Mutex::new(Some(
+                    "HTTP 400: response_format not supported by this model".to_string(),
+                )),
+                ..Self::always(response)
+            }
+        }
     }
 
     #[async_trait]
     impl Provider for ScriptedProvider {
-        async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
-            unimplemented!()
+        async fn complete(
+            &self,
+            _: &[Message],
+            config: &CallConfig,
+        ) -> anyhow::Result<LlmResponse> {
+            let forced = matches!(config.tool_choice, Some(ToolChoice::Forced(_)));
+            if !forced {
+                if let Some(err) = self
+                    .reject_first_direct
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                {
+                    anyhow::bail!(err);
+                }
+            }
+            let raw = {
+                let mut responses = self.responses.lock().unwrap_or_else(|e| e.into_inner());
+                if responses.len() > 1 {
+                    responses.remove(0)
+                } else {
+                    responses[0].clone()
+                }
+            };
+            if forced {
+                let Some(ToolChoice::Forced(name)) = config.tool_choice.clone() else {
+                    unreachable!("checked by `forced` above")
+                };
+                let arguments =
+                    serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+                Ok(LlmResponse {
+                    text: String::new(),
+                    tool_calls: Some(vec![ToolCall {
+                        id: "1".into(),
+                        name,
+                        arguments,
+                        extra: None,
+                    }]),
+                    usage: Default::default(),
+                })
+            } else {
+                Ok(LlmResponse {
+                    text: raw,
+                    tool_calls: None,
+                    usage: Default::default(),
+                })
+            }
         }
         async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
             unimplemented!()
@@ -206,21 +362,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock"
         }
-
-        async fn complete_structured(
-            &self,
-            _system: &str,
-            _user: &str,
-            _schema: serde_json::Value,
-            _max_tokens: u32,
-            _temperature: f32,
-        ) -> anyhow::Result<String> {
-            let mut responses = self.responses.lock().unwrap();
-            if responses.len() > 1 {
-                Ok(responses.remove(0))
-            } else {
-                Ok(responses[0].clone())
-            }
+        fn supports_json_schema(&self) -> bool {
+            self.supports_schema
         }
     }
 
@@ -251,8 +394,11 @@ mod tests {
 
         let provider = ScriptedProvider::always(&verdict_json);
         let transcript = make_divergent_transcript();
+        let mut cap_registry = CapabilityRegistry::new();
 
-        let verdict = synthesize(&provider, &transcript).await.unwrap();
+        let verdict = synthesize(&provider, &transcript, &mut cap_registry)
+            .await
+            .unwrap();
 
         assert!(
             !verdict.dissents.is_empty(),
@@ -266,8 +412,11 @@ mod tests {
         // AI-SPEC §6: parse failure → raw positions, no fabricated verdict, no panic.
         let provider = ScriptedProvider::sequence(&["garbage", "also bad", "{{ invalid"]);
         let transcript = make_divergent_transcript();
+        let mut cap_registry = CapabilityRegistry::new();
 
-        let verdict = synthesize(&provider, &transcript).await.unwrap();
+        let verdict = synthesize(&provider, &transcript, &mut cap_registry)
+            .await
+            .unwrap();
 
         // Fallback: recommendation contains "raw positions"
         assert!(
@@ -298,15 +447,19 @@ mod tests {
 
         let provider = ScriptedProvider::sequence(&["garbage", "also bad", &verdict_json]);
         let transcript = make_divergent_transcript();
+        let mut cap_registry = CapabilityRegistry::new();
 
-        let verdict = synthesize(&provider, &transcript).await.unwrap();
+        let verdict = synthesize(&provider, &transcript, &mut cap_registry)
+            .await
+            .unwrap();
         assert_eq!(verdict.recommendation, "Go with approach A.");
     }
 
     #[tokio::test]
     async fn empty_transcript_returns_graceful_fallback() {
         let provider = ScriptedProvider::sequence(&["garbage", "garbage", "garbage"]);
-        let verdict = synthesize(&provider, &[]).await.unwrap();
+        let mut cap_registry = CapabilityRegistry::new();
+        let verdict = synthesize(&provider, &[], &mut cap_registry).await.unwrap();
         // No panic, recommendation mentions raw positions
         assert!(
             verdict.recommendation.contains("raw positions")
@@ -336,5 +489,70 @@ mod tests {
             prompt_ptbr, prompt_en,
             "prompts for different languages must differ"
         );
+    }
+
+    // --- D-04/D-09: complete()-surface migration (Plan 08-07) ---
+
+    #[tokio::test]
+    async fn direct_path_used_when_provider_supports_json_schema() {
+        // Test 4a: `supports_json_schema()==true` (default) + well-formed response →
+        // the direct `complete()` path parses successfully.
+        let verdict_json = serde_json::json!({
+            "recommendation": "Go with approach A.",
+            "dissents": []
+        })
+        .to_string();
+
+        let provider = ScriptedProvider::always(&verdict_json);
+        let transcript = make_divergent_transcript();
+        let mut cap_registry = CapabilityRegistry::new();
+
+        let verdict = synthesize(&provider, &transcript, &mut cap_registry)
+            .await
+            .unwrap();
+        assert_eq!(verdict.recommendation, "Go with approach A.");
+    }
+
+    #[tokio::test]
+    async fn forced_path_used_when_provider_lacks_json_schema_support() {
+        // Test 4b: `supports_json_schema()==false` — synthesize() must go straight
+        // through the forced-tool-call path and still parse successfully.
+        let verdict_json = serde_json::json!({
+            "recommendation": "Go with approach B.",
+            "dissents": []
+        })
+        .to_string();
+
+        let provider = ScriptedProvider::without_json_schema_support(&verdict_json);
+        let transcript = make_divergent_transcript();
+        let mut cap_registry = CapabilityRegistry::new();
+
+        let verdict = synthesize(&provider, &transcript, &mut cap_registry)
+            .await
+            .expect("synthesize via forced-tool-call path");
+        assert_eq!(verdict.recommendation, "Go with approach B.");
+        assert!(cap_registry.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_schema_rejection_falls_through_to_forced_path() {
+        // Test 4c: a `supports_json_schema()==true` provider that rejects the schema at
+        // runtime on attempt 1 must fall through to the forced-tool-call path on
+        // attempt 2 and still succeed.
+        let verdict_json = serde_json::json!({
+            "recommendation": "Go with approach C.",
+            "dissents": []
+        })
+        .to_string();
+
+        let provider = ScriptedProvider::rejecting_schema_once_then(&verdict_json);
+        let transcript = make_divergent_transcript();
+        let mut cap_registry = CapabilityRegistry::new();
+
+        let verdict = synthesize(&provider, &transcript, &mut cap_registry)
+            .await
+            .expect("synthesize must recover via the forced-tool-call fallback");
+        assert_eq!(verdict.recommendation, "Go with approach C.");
+        assert!(cap_registry.is_empty());
     }
 }

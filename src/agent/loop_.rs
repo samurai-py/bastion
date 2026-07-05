@@ -409,8 +409,14 @@ impl AgentLoop {
         //    If /as forced a persona, override the router's choice.
         let mut decision = {
             let provider_ref = self.provider.read().await;
-            crate::persona::router::route(&**provider_ref, &self.registry, user_input, owner)
-                .await?
+            crate::persona::router::route(
+                &**provider_ref,
+                &self.registry,
+                user_input,
+                owner,
+                &mut self.capability_registry,
+            )
+            .await?
         };
 
         if let Some(ref forced) = self.forced_persona.take() {
@@ -462,8 +468,12 @@ impl AgentLoop {
                 let synth_provider_name = self.provider.read().await.name().to_owned();
                 crate::hooks::egress::check_egress(Some(table.tier), &synth_provider_name)?;
                 let provider_ref = self.provider.read().await;
-                let verdict =
-                    crate::cabinet::synth::synthesize(&**provider_ref, &transcript).await?;
+                let verdict = crate::cabinet::synth::synthesize(
+                    &**provider_ref,
+                    &transcript,
+                    &mut self.capability_registry,
+                )
+                .await?;
                 drop(provider_ref);
                 render_verdict(&verdict)
             }

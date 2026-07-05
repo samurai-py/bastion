@@ -103,9 +103,20 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
+    /// D-04 (Plan 08-07): `synthesize()` now calls `complete()` with
+    /// `response_format` set (this mock's default `supports_json_schema()==true`
+    /// takes the direct path, never the forced-tool-call fallback) — serve the
+    /// SAME scripted JSON responses `complete_structured` used to return, so
+    /// existing eval assertions on the parsed `CabinetVerdict` still hold.
     async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
+        let mut responses = self.responses.lock().unwrap();
+        let text = if responses.len() > 1 {
+            responses.remove(0)
+        } else {
+            responses[0].clone()
+        };
         Ok(LlmResponse {
-            text: "mock-response".into(),
+            text,
             tool_calls: None,
             usage: TokenUsage::default(),
         })

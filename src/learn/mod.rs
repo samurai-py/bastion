@@ -1062,7 +1062,7 @@ mod tests {
             .find(|x| x.id == id)
             .expect("a floored trail must remain retrievable, never revoked");
         assert!(
-            belief.weight >= 0.05 && belief.weight > 0.0,
+            belief.weight >= 0.05,
             "weight floored above 0 (never the revoked sentinel), got {}",
             belief.weight
         );
