@@ -1,6 +1,7 @@
 // Router — classifies an inbound message into a typed RouterDecision.
 // DECIDES only; does not execute personas.
-// 3-attempt serde-parse-retry on complete_structured output (AI-SPEC §4b).
+// 3-attempt serde-parse-retry on the unified complete() structured output (AI-SPEC §4b),
+// with a D-09 runtime catch that degrades to the forced-tool-call path (Plan 08-07/08-03).
 // Safe fallback to single persona + review flag on parse exhaustion (CF-2, T-02-09).
 
 use schemars::JsonSchema;

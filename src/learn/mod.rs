@@ -7,6 +7,7 @@ use crate::capability::registry::{CapabilityRegistry, InvokeCtx};
 use crate::config::ReflectorConfig;
 use crate::memory::{BeliefKind, PrivacyTier, SharedMemory};
 use crate::provider::SharedProvider;
+use crate::types::{CallConfig, Message, MessageContent, Role};
 use delta::DeltaOp;
 use std::sync::Arc;
 use tokio::time::{interval, Duration, MissedTickBehavior};
@@ -63,7 +64,8 @@ struct GenResponse {
     quality: Option<f32>,
 }
 
-/// Real generator: one `complete_structured` call per tick, budget-capped BEFORE the call.
+/// Real generator: one unified `complete()` structured call per tick, budget-capped BEFORE
+/// the call (D-04, Plan 08-07 — migrated off `complete_structured`).
 pub struct LlmCandidateGenerator {
     provider: SharedProvider,
     model: Option<String>,
@@ -141,9 +143,92 @@ impl CandidateGenerator for LlmCandidateGenerator {
             provider_model = provider.model_name(),
             "invoking Reflector candidate generator"
         );
-        let raw = provider
-            .complete_structured(system, &user, schema, 800, 0.2)
-            .await?;
+
+        // D-04 (Plan 08-07): migrate off `complete_structured` onto the unified
+        // `complete()` surface. Single-attempt (matches the pre-existing non-looped
+        // shape) PLUS a one-shot D-09 runtime catch: if a `supports_json_schema()==true`
+        // provider rejects the schema at runtime, retry ONCE via the forced-tool-call
+        // helper (Plan 08-03). Providers whose `supports_json_schema()==false` go
+        // straight to the forced path. The budget/empty guards above still run BEFORE
+        // any of this, preserving the "one call per tick, budget-capped BEFORE the call"
+        // invariant (LEARN-02).
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Text(user),
+        }];
+        let config = CallConfig {
+            system_prompt: system.to_owned(),
+            max_tokens: 800,
+            temperature: Some(0.2),
+            response_format: None,
+            tool_choice: None,
+            tools: vec![],
+        };
+        // The forced-tool-call helper needs a mutable registry to register/remove its
+        // ephemeral, pure-echo `StructuredOutputCapability` (RAII-scoped within the one
+        // call). A fresh empty registry is the correct isolated context — the dispatch
+        // still flows through `CapabilityRegistry::invoke`, the one sanctioned tool
+        // surface (AGENTS.md law). `Some(LocalOnly)` clears egress for the `is_local()`
+        // ephemeral capability; `None` would be denied on ambiguity (fail-closed).
+        let mut forced_registry = CapabilityRegistry::new();
+        let forced_ctx = InvokeCtx {
+            owner: "reflector".to_owned(),
+            privacy_tier: Some(PrivacyTier::LocalOnly),
+            needs_approval: false,
+        };
+        let use_forced = !provider.supports_json_schema();
+        tracing::debug!(
+            event = "structured_output_path",
+            provider = %provider.name(),
+            forced = use_forced
+        );
+        let raw = if use_forced {
+            crate::provider::complete_structured_via_forced_tool_call(
+                &**provider,
+                &mut forced_registry,
+                &forced_ctx,
+                &messages,
+                &config,
+                schema.clone(),
+            )
+            .await?
+        } else {
+            match provider
+                .complete(
+                    &messages,
+                    &CallConfig {
+                        response_format: Some(schema.clone()),
+                        ..config.clone()
+                    },
+                )
+                .await
+            {
+                Ok(r) => r.text,
+                Err(e) => {
+                    let msg_txt = e.to_string();
+                    if msg_txt.contains("response_format")
+                        || msg_txt.contains("json_schema")
+                        || msg_txt.contains("400")
+                    {
+                        tracing::warn!(
+                            error = %msg_txt,
+                            "reflector provider rejected the schema at runtime — retrying once via forced-tool-call"
+                        );
+                        crate::provider::complete_structured_via_forced_tool_call(
+                            &**provider,
+                            &mut forced_registry,
+                            &forced_ctx,
+                            &messages,
+                            &config,
+                            schema.clone(),
+                        )
+                        .await?
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        };
         match serde_json::from_str::<GenResponse>(&raw) {
             Ok(r) => Ok(Reflection {
                 deltas: r.deltas,
@@ -532,10 +617,16 @@ mod tests {
         }
     }
 
-    /// A `Provider` mock that counts every `complete_structured` call — used to prove
-    /// the budget/empty-input guards never reach the provider.
+    /// A `Provider` mock that counts every structured `complete()` call — used to prove
+    /// the budget/empty-input guards never reach the provider. Plan 08-07: the Reflector
+    /// now calls the unified `complete()` surface (never `complete_structured`), so the
+    /// counter lives on `complete()` and covers BOTH the direct path (a request with
+    /// `response_format` set) and the forced-tool-call fallback (a `Forced` tool_choice).
     struct CountingProvider {
         calls: Arc<AtomicUsize>,
+        /// D-09 static capability declaration this mock reports. `true` → direct
+        /// `complete()` path; `false` → forced-tool-call path.
+        supports_schema: bool,
     }
 
     #[async_trait::async_trait]
@@ -543,9 +634,39 @@ mod tests {
         async fn complete(
             &self,
             _messages: &[Message],
-            _config: &CallConfig,
+            config: &CallConfig,
         ) -> anyhow::Result<LlmResponse> {
-            unreachable!("not exercised by these tests")
+            // Count EVERY structured completion — the whole point of this mock is proving
+            // the budget-check-before-call invariant survives the migration. Assert the
+            // request is a real structured call (either shape), never a bare completion.
+            let forced = matches!(
+                config.tool_choice,
+                Some(crate::types::ToolChoice::Forced(_))
+            );
+            assert!(
+                config.response_format.is_some() || forced,
+                "reflector must issue a structured complete() call (response_format or Forced tool_choice)"
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let payload = serde_json::json!({"deltas": [], "quality": 0.8});
+            if let Some(crate::types::ToolChoice::Forced(name)) = config.tool_choice.clone() {
+                Ok(LlmResponse {
+                    text: String::new(),
+                    tool_calls: Some(vec![crate::types::ToolCall {
+                        id: "1".into(),
+                        name,
+                        arguments: payload,
+                        extra: None,
+                    }]),
+                    usage: Default::default(),
+                })
+            } else {
+                Ok(LlmResponse {
+                    text: payload.to_string(),
+                    tool_calls: None,
+                    usage: Default::default(),
+                })
+            }
         }
         async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
             unreachable!("not exercised by these tests")
@@ -559,16 +680,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock"
         }
-        async fn complete_structured(
-            &self,
-            _system: &str,
-            _user: &str,
-            _response_schema: serde_json::Value,
-            _max_tokens: u32,
-            _temperature: f32,
-        ) -> anyhow::Result<String> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(serde_json::json!({"deltas": [], "quality": 0.8}).to_string())
+        fn supports_json_schema(&self) -> bool {
+            self.supports_schema
         }
     }
 
@@ -641,6 +754,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
+            supports_schema: true,
         })));
         let gen = LlmCandidateGenerator::new(provider, None, true);
         let out = gen
@@ -660,6 +774,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
+            supports_schema: true,
         })));
         let gen = LlmCandidateGenerator::new(provider, None, true);
         let out = gen
@@ -675,6 +790,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
+            supports_schema: true,
         })));
         let gen = LlmCandidateGenerator::new(provider, None, true);
         let out = gen.generate("", 0.10).await.expect("generate");
@@ -691,6 +807,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
+            supports_schema: true,
         })));
         let gen = LlmCandidateGenerator::new(provider, None, true);
         let out = gen
@@ -713,6 +830,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
             calls: calls.clone(),
+            supports_schema: true,
         })));
         let gen = LlmCandidateGenerator::new(provider, None, false);
         let out = gen
@@ -727,6 +845,57 @@ mod tests {
             calls.load(Ordering::SeqCst),
             0,
             "a cloud provider must never receive the raw log tail when allow_cloud=false"
+        );
+    }
+
+    // ---- D-04/D-09: complete()-surface migration (Plan 08-07) ----
+
+    #[tokio::test]
+    async fn llm_generator_direct_path_when_provider_supports_json_schema() {
+        // Test 1: `supports_json_schema()==true` + well-formed response → the generator
+        // parses via the direct `complete()` path (response_format set), one call.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
+            calls: calls.clone(),
+            supports_schema: true,
+        })));
+        let gen = LlmCandidateGenerator::new(provider, None, true);
+        let out = gen
+            .generate("some new log content", 0.10)
+            .await
+            .expect("generate");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "exactly one structured call"
+        );
+        assert_eq!(out.quality, Some(0.8));
+    }
+
+    #[tokio::test]
+    async fn llm_generator_forced_path_when_provider_lacks_json_schema_support() {
+        // Test 2: `supports_json_schema()==false` → the generator routes through the
+        // forced-tool-call helper and still parses the response; the counter fires
+        // EXACTLY ONCE (budget-check-before-call invariant holds on the forced path too).
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: SharedProvider = Arc::new(RwLock::new(Box::new(CountingProvider {
+            calls: calls.clone(),
+            supports_schema: false,
+        })));
+        let gen = LlmCandidateGenerator::new(provider, None, true);
+        let out = gen
+            .generate("some new log content", 0.10)
+            .await
+            .expect("generate via forced-tool-call path");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the forced path must issue exactly one provider call"
+        );
+        assert_eq!(
+            out.quality,
+            Some(0.8),
+            "quality must still be parsed from the forced-tool-call payload"
         );
     }
 
