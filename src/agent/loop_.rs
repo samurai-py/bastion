@@ -479,6 +479,7 @@ impl AgentLoop {
                     system_prompt, // ← dinâmico via SEAM #2
                     max_tokens: 4096,
                     tools,
+                    ..Default::default()
                 };
 
                 let output = crate::persona::runner::run(
@@ -989,6 +990,7 @@ impl AgentLoop {
             system_prompt,
             max_tokens: 4096,
             tools,
+            ..Default::default()
         };
 
         // WR-04 / WR-01 (review #2): the turn's PrivacyTier is resolved ONCE in run_turn_for

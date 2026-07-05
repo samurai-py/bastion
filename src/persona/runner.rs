@@ -84,6 +84,7 @@ async fn run_single(
         },
         max_tokens: config.max_tokens,
         tools: config.tools.clone(),
+        ..Default::default()
     };
 
     let response = {
@@ -117,6 +118,7 @@ async fn run_parallel(
             },
             max_tokens: config.max_tokens,
             tools: config.tools.clone(),
+            ..Default::default()
         };
         let history_clone = history.to_owned();
         let provider_clone = provider.clone(); // clone Arc, not the inner value
@@ -290,6 +292,7 @@ mod tests {
             system_prompt: "You are Bastion.".to_owned(),
             max_tokens: 256,
             tools: vec![],
+            ..Default::default()
         }
     }
 
