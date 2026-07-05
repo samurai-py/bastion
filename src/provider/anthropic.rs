@@ -5,7 +5,29 @@ use std::time::Duration;
 use super::Provider;
 use crate::types::{
     strip_think, CallConfig, LlmResponse, Message, MessageContent, Role, TokenUsage, ToolCall,
+    ToolChoice,
 };
+
+/// Parse the `message_start` SSE event's `usage` block into `TokenUsage`, extracted
+/// as a pure fn so it is unit-testable against a hand-built fixture without a live
+/// stream. Uses the same `.and_then(|v| v.as_u64())` idiom already used for
+/// `input_tokens` for the two prompt-caching fields (COST-01/D-14a).
+fn apply_message_start_usage(usage: &mut TokenUsage, event: &Value) {
+    if let Some(u) = event["message"]["usage"].as_object() {
+        if let Some(inp) = u.get("input_tokens").and_then(|v| v.as_u64()) {
+            usage.input_tokens = inp as u32;
+        }
+        if let Some(cr) = u.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+            usage.cache_read = cr as u32;
+        }
+        if let Some(cw) = u
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            usage.cache_write = cw as u32;
+        }
+    }
+}
 
 pub struct AnthropicProvider {
     client: reqwest::Client,
@@ -50,6 +72,54 @@ impl AnthropicProvider {
         }
         Value::Array(out)
     }
+
+    /// Pure request-body assembly, extracted from `complete()` for unit testing
+    /// without a live HTTP call.
+    ///
+    /// COST-01/D-14a (Pitfall 5): `system` is sent as an array of content blocks
+    /// (never a plain string) with `cache_control` on that block — Anthropic's
+    /// prompt-caching mechanism keys on a specific *content block*, never a bare
+    /// top-level request key (verified narrow scope, T-08-02-02: this marker is
+    /// applied ONLY to `body["system"]`, the D-12/D-13 stable prefix — never to the
+    /// turn-volatile `messages` array).
+    fn build_request_body(&self, messages_json: Value, config: &CallConfig) -> Value {
+        let mut body = serde_json::json!({
+            "model":      self.model,
+            "max_tokens": config.max_tokens,
+            "stream":     true,
+            "messages":   messages_json,
+        });
+
+        if !config.system_prompt.is_empty() {
+            body["system"] = Value::Array(vec![serde_json::json!({
+                "type": "text",
+                "text": config.system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            })]);
+        }
+
+        if !config.tools.is_empty() {
+            body["tools"] = Value::Array(config.tools.clone());
+        }
+
+        // T-08-02-03: this is pure request-shaping — AnthropicProvider::complete()
+        // never calls registry.invoke() itself. Dispatch of the resulting tool_calls
+        // flows through complete_structured_via_forced_tool_call (Plan 08-03/08-07),
+        // never inline here.
+        match &config.tool_choice {
+            Some(ToolChoice::Forced(name)) => {
+                body["tool_choice"] = serde_json::json!({"type": "tool", "name": name});
+            }
+            Some(ToolChoice::Required) => {
+                body["tool_choice"] = serde_json::json!({"type": "any"});
+            }
+            Some(ToolChoice::Auto) | None => {
+                // Anthropic's own default — leave the key unset.
+            }
+        }
+
+        body
+    }
 }
 
 #[async_trait::async_trait]
@@ -60,21 +130,7 @@ impl Provider for AnthropicProvider {
         config: &CallConfig,
     ) -> anyhow::Result<LlmResponse> {
         let messages_json = self.messages_to_json(messages);
-
-        let mut body = serde_json::json!({
-            "model":      self.model,
-            "max_tokens": config.max_tokens,
-            "stream":     true,
-            "messages":   messages_json,
-        });
-
-        if !config.system_prompt.is_empty() {
-            body["system"] = Value::String(config.system_prompt.clone());
-        }
-
-        if !config.tools.is_empty() {
-            body["tools"] = Value::Array(config.tools.clone());
-        }
+        let body = self.build_request_body(messages_json, config);
 
         let resp = self
             .client
@@ -190,13 +246,7 @@ impl Provider for AnthropicProvider {
                         }
                     }
 
-                    "message_start" => {
-                        if let Some(u) = event["message"]["usage"].as_object() {
-                            if let Some(inp) = u.get("input_tokens").and_then(|v| v.as_u64()) {
-                                usage.input_tokens = inp as u32;
-                            }
-                        }
-                    }
+                    "message_start" => apply_message_start_usage(&mut usage, &event),
 
                     "message_stop" => break,
 
@@ -242,5 +292,136 @@ impl Provider for AnthropicProvider {
     }
     fn name(&self) -> &'static str {
         "anthropic"
+    }
+
+    /// D-09: Anthropic has no native `response_format`/json_schema mode. Structured
+    /// output for Anthropic routes through `complete_structured_via_forced_tool_call`
+    /// (Plan 08-03), consumed by Plan 08-07's callers.
+    fn supports_json_schema(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_provider() -> AnthropicProvider {
+        // Bypass `new()`'s ANTHROPIC_API_KEY env lookup — unit tests exercise pure
+        // request-shaping logic only, never a live HTTP call.
+        AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".into(),
+            model: "claude-test".into(),
+        }
+    }
+
+    #[test]
+    fn build_request_body_sends_system_as_cache_control_tagged_array() {
+        let provider = test_provider();
+        let config = CallConfig {
+            system_prompt: "you are a helpful assistant".into(),
+            ..Default::default()
+        };
+        let body = provider.build_request_body(Value::Array(vec![]), &config);
+
+        assert_eq!(
+            body["system"],
+            serde_json::json!([{
+                "type": "text",
+                "text": "you are a helpful assistant",
+                "cache_control": {"type": "ephemeral"},
+            }])
+        );
+    }
+
+    #[test]
+    fn build_request_body_omits_system_key_when_prompt_empty() {
+        let provider = test_provider();
+        let config = CallConfig::default();
+        let body = provider.build_request_body(Value::Array(vec![]), &config);
+
+        assert!(body.get("system").is_none());
+    }
+
+    #[test]
+    fn build_request_body_forced_tool_choice_maps_to_anthropic_tool_shape() {
+        let provider = test_provider();
+        let config = CallConfig {
+            tool_choice: Some(ToolChoice::Forced("x".into())),
+            ..Default::default()
+        };
+        let body = provider.build_request_body(Value::Array(vec![]), &config);
+
+        assert_eq!(
+            body["tool_choice"],
+            serde_json::json!({"type": "tool", "name": "x"})
+        );
+    }
+
+    #[test]
+    fn build_request_body_required_tool_choice_maps_to_any() {
+        let provider = test_provider();
+        let config = CallConfig {
+            tool_choice: Some(ToolChoice::Required),
+            ..Default::default()
+        };
+        let body = provider.build_request_body(Value::Array(vec![]), &config);
+
+        assert_eq!(body["tool_choice"], serde_json::json!({"type": "any"}));
+    }
+
+    #[test]
+    fn build_request_body_auto_tool_choice_leaves_key_unset() {
+        let provider = test_provider();
+        let config = CallConfig {
+            tool_choice: Some(ToolChoice::Auto),
+            ..Default::default()
+        };
+        let body = provider.build_request_body(Value::Array(vec![]), &config);
+
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn message_start_event_parses_cache_read_and_cache_write_tokens() {
+        let event = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 40,
+                    "cache_creation_input_tokens": 10,
+                }
+            }
+        });
+
+        let mut usage = TokenUsage::default();
+        apply_message_start_usage(&mut usage, &event);
+
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cache_read, 40);
+        assert_eq!(usage.cache_write, 10);
+    }
+
+    #[test]
+    fn message_start_event_without_cache_fields_leaves_them_zero() {
+        let event = serde_json::json!({
+            "type": "message_start",
+            "message": { "usage": { "input_tokens": 50 } }
+        });
+
+        let mut usage = TokenUsage::default();
+        apply_message_start_usage(&mut usage, &event);
+
+        assert_eq!(usage.input_tokens, 50);
+        assert_eq!(usage.cache_read, 0);
+        assert_eq!(usage.cache_write, 0);
+    }
+
+    #[test]
+    fn anthropic_provider_declares_no_native_json_schema_support() {
+        let provider = test_provider();
+        assert!(!provider.supports_json_schema());
     }
 }
