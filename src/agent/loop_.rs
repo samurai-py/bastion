@@ -1166,14 +1166,13 @@ impl AgentLoop {
             // check above covers round 0; this covers all rounds uniformly.)
             crate::hooks::egress::check_egress(resolved_tier, &provider_name)?;
 
-            // LLM call — hold READ lock for full stream duration (Pitfall 5)
-            let response = {
-                let provider = self.provider.read().await;
-                let prov_ref: &dyn crate::provider::Provider = &**provider;
-                // SAFETY: call_with_retry closure borrows prov_ref for the duration of this block.
-                // The READ lock is held for the entire duration of complete(), released after this block.
-                call_with_retry(|| prov_ref.complete(history, &config), 3).await?
-            }; // READ lock released here
+            // LLM call — delegates rung 1 (retry) + rung 3 (provider-switch, D-10) to the
+            // shared ladder. Egress for THIS round was already checked above; a switch
+            // inside the ladder re-checks egress again against the NEW provider before
+            // swapping (T-08-08-02).
+            let response = self
+                .complete_with_fallback_ladder(history, &config, resolved_tier)
+                .await?;
 
             // Update budget with actual cost
             let cost_usd = estimate_cost_usd(provider_name.as_str(), &response.usage);
