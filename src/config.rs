@@ -98,6 +98,13 @@ pub struct BastionConfig {
 pub struct AgentConfig {
     pub default_model: String,
     pub daily_budget_usd: f64,
+    /// D-11: ordered list of model-name strings, using the same naming convention
+    /// `resolve_provider()` (src/provider/registry.rs) already accepts (e.g.
+    /// `"groq/llama-3.1-8b-instant"`, `"gemini-2.0-flash"`). Tried in order when the
+    /// primary provider suffers a hard/persistent failure (SO-03/D-10 rung 3, wired
+    /// in Plan 08-08). Empty = no provider-switching (today's exact behavior).
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
