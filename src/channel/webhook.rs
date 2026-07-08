@@ -79,9 +79,10 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
+use base64::Engine;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -140,6 +141,10 @@ struct AppState {
     /// In-memory store of received mesh slices, keyed by from_owner.
     /// Updated by ingest_handler; read by MeshSliceProvider (SEAM #2).
     mesh_slice_store: Option<crate::mesh::context_provider::MeshSliceStore>,
+    /// Agent identity for Agent Card endpoint (SEC-06). None = /agent-card returns 404.
+    agent_identity: Option<std::sync::Arc<crate::identity::age_identity::AgeIdentity>>,
+    /// Human-readable agent name for Agent Card.
+    agent_name: String,
 }
 
 /// Categorize an anyhow error for safe HTTP status mapping.
@@ -644,6 +649,58 @@ async fn mesh_pair_handler(
     }
 }
 
+/// GET /agent-card — return signed Agent Card JSON (SEC-06).
+///
+/// Returns 404 if agent identity is not configured (MESH_IDENTITY_KEY not set).
+/// Returns a signed `AgentCard` document with age pubkey, Ed25519 pubkey,
+/// capabilities, and mesh/MCP URLs.
+async fn agent_card_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let identity = state.agent_identity.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+
+    let webhook_addr = std::env::var("BASTION_WEBHOOK_ADDR").unwrap_or_default();
+    let mesh_url = if webhook_addr.is_empty() {
+        None
+    } else {
+        Some(webhook_addr.clone())
+    };
+    let mcp_url = if webhook_addr.is_empty() {
+        None
+    } else {
+        Some(format!("{}/mcp", webhook_addr))
+    };
+
+    let mut card = crate::identity::AgentCard {
+        version: crate::identity::AGENT_CARD_VERSION,
+        name: state.agent_name.clone(),
+        pubkey_age: identity.pubkey_age(),
+        pubkey_ed25519: identity.pubkey_ed25519(),
+        capabilities: vec![
+            "memory_retrieve".to_string(),
+            "memory_search".to_string(),
+            "personas_list".to_string(),
+            "goals_list".to_string(),
+            "tools_invoke".to_string(),
+        ],
+        allowed_tags: vec![],
+        mesh_url,
+        mcp_url,
+        signature: None,
+    };
+
+    let signature = identity
+        .sign_agent_card(&card)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    card.signature = Some(engine.encode(&signature));
+
+    Ok(Json(
+        serde_json::to_value(&card).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
+}
+
 pub async fn serve(
     agent: AgentHandle,
     addr: &str,
@@ -662,6 +719,8 @@ pub async fn serve(
         None,
         None,
         new_otc_store(),
+        None,
+        "bastion".to_string(),
     )
     .await
 }
@@ -684,6 +743,8 @@ pub async fn serve_with_mesh(
     mesh_transport: Option<crate::mesh::SharedMeshTransport>,
     mesh_slice_store: Option<crate::mesh::context_provider::MeshSliceStore>,
     otc_store: OtcStore,
+    agent_identity: Option<std::sync::Arc<crate::identity::age_identity::AgeIdentity>>,
+    agent_name: String,
 ) -> anyhow::Result<()> {
     let state = AppState {
         agent,
@@ -694,10 +755,13 @@ pub async fn serve_with_mesh(
         jwt_secret,
         mesh_transport,
         mesh_slice_store,
+        agent_identity,
+        agent_name,
     };
     let app = Router::new()
         .route("/webhook", post(handle))
         .route("/events", axum::routing::get(sse_handler))
+        .route("/agent-card", get(agent_card_handler))
         .route("/mesh/ingest", post(ingest_handler))
         .route("/auth/exchange", post(auth_exchange_handler))
         .route("/mesh/pair", post(mesh_pair_handler))
@@ -742,10 +806,13 @@ mod tests {
             jwt_secret: "test-secret".to_string(),
             mesh_transport: None,
             mesh_slice_store: None,
+            agent_identity: None,
+            agent_name: "test".to_string(),
         };
         Router::new()
             .route("/webhook", post(handle))
             .route("/events", axum::routing::get(sse_handler))
+            .route("/agent-card", get(agent_card_handler))
             .route("/mesh/ingest", post(ingest_handler))
             .route("/auth/exchange", post(auth_exchange_handler))
             .route("/mesh/pair", post(mesh_pair_handler))
@@ -982,10 +1049,13 @@ mod tests {
             jwt_secret: "test-secret".to_string(),
             mesh_transport: None,
             mesh_slice_store: None,
+            agent_identity: None,
+            agent_name: "test".to_string(),
         };
         Router::new()
             .route("/webhook", post(handle))
             .route("/events", axum::routing::get(sse_handler))
+            .route("/agent-card", get(agent_card_handler))
             .route("/auth/exchange", post(auth_exchange_handler))
             .route("/mesh/pair", post(mesh_pair_handler))
             .with_state(state)

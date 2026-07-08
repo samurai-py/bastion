@@ -265,6 +265,28 @@ async fn daemon_loop(
                 (None, None)
             };
 
+        // SEC-06: initialize agent identity from MESH_IDENTITY_KEY.
+        let agent_identity = if let Ok(identity_key) = std::env::var("MESH_IDENTITY_KEY") {
+            match bastion::identity::age_identity::AgeIdentity::from_bech32(&identity_key) {
+                Ok(id) => {
+                    tracing::info!(event = "agent_identity_enabled");
+                    Some(std::sync::Arc::new(id))
+                }
+                Err(e) => {
+                    tracing::warn!(event = "agent_identity_init_failed", error = %e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!(
+                event = "agent_identity_disabled",
+                "MESH_IDENTITY_KEY not set"
+            );
+            None
+        };
+        let agent_name =
+            std::env::var("BASTION_AGENT_NAME").unwrap_or_else(|_| "bastion".to_string());
+
         // CR-02: create an OtcStore and pass it to serve_with_mesh so skill commands
         // can insert BAST-XXXX codes for /auth/exchange and /mesh/pair.
         // The same Arc is injected into the agent so the /connect-app REPL command
@@ -282,6 +304,8 @@ async fn daemon_loop(
                 mesh_transport,
                 mesh_slice_store,
                 otc_store,
+                agent_identity,
+                agent_name,
             )
             .await
             {
