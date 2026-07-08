@@ -30,7 +30,7 @@ pub struct Persona {
 
 /// A registry of all loaded personas, keyed by `name`.
 /// Built at daemon start via `PersonaRegistry::load_dir`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PersonaRegistry {
     personas: HashMap<String, Persona>,
 }

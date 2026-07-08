@@ -41,6 +41,8 @@ pub struct BastionConfig {
     pub session: SessionConfig,
     pub logging: LoggingConfig,
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub mcp_server: McpServerConfig,
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub mesh: MeshConfig,
@@ -75,6 +77,34 @@ pub struct McpConfig {
 pub struct McpServerEntry {
     pub url: String,
     pub label: String,
+}
+
+/// Individual token entry for the MCP server (static token auth, D-05).
+#[derive(Debug, Deserialize, Clone)]
+pub struct McpServerTokenConfig {
+    /// If true, this token can list/read resources but not invoke tools.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Owner identity bound to this token.
+    pub owner_id: String,
+}
+
+/// Config section for the MCP server (not the client — D-08).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct McpServerConfig {
+    /// Enable the streamable HTTP MCP server.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to mount on, e.g. "/mcp".
+    #[serde(default = "default_mcp_server_path")]
+    pub mount_path: String,
+    /// Per-token permissions map.
+    #[serde(default)]
+    pub tokens: HashMap<String, McpServerTokenConfig>,
+}
+
+fn default_mcp_server_path() -> String {
+    "/mcp".into()
 }
 
 #[derive(Debug, Deserialize, Clone)]

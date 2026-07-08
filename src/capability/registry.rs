@@ -37,6 +37,7 @@ pub trait Capability: Send + Sync {
 ///
 /// Single policy enforcement point — every frontend (direct fn, MCP tool, NL command)
 /// invokes through here. check_egress is called once per invoke at this boundary.
+#[derive(Clone)]
 pub struct CapabilityRegistry {
     inner: HashMap<String, Arc<dyn Capability>>,
 }

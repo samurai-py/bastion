@@ -721,6 +721,7 @@ pub async fn serve(
         new_otc_store(),
         None,
         "bastion".to_string(),
+        None,
     )
     .await
 }
@@ -745,6 +746,10 @@ pub async fn serve_with_mesh(
     otc_store: OtcStore,
     agent_identity: Option<std::sync::Arc<crate::identity::age_identity::AgeIdentity>>,
     agent_name: String,
+    // Optional pre-built axum Router to mount alongside the webhook routes.
+    // Used by the MCP server to expose its Streamable HTTP service at the
+    // configured mount path (e.g. `/mcp`).
+    mcp_routes: Option<axum::Router>,
 ) -> anyhow::Result<()> {
     let state = AppState {
         agent,
@@ -758,7 +763,7 @@ pub async fn serve_with_mesh(
         agent_identity,
         agent_name,
     };
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/webhook", post(handle))
         .route("/events", axum::routing::get(sse_handler))
         .route("/agent-card", get(agent_card_handler))
@@ -766,6 +771,9 @@ pub async fn serve_with_mesh(
         .route("/auth/exchange", post(auth_exchange_handler))
         .route("/mesh/pair", post(mesh_pair_handler))
         .with_state(state);
+    if let Some(mcp) = mcp_routes {
+        app = app.merge(mcp);
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())

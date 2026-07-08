@@ -14,10 +14,15 @@ use crate::capability::CapabilityRegistry;
 use crate::goal::GoalEngine;
 use crate::memory::{PrivacyTier, SharedMemory};
 use crate::persona::PersonaRegistry;
+use axum::Router;
+use rmcp::handler::server::router::Router as McpRouter;
 use rmcp::model::*;
-use serde_json::Value;
 use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
+use rmcp::transport::streamable_http_server::{
+    session::local::LocalSessionManager, tower::StreamableHttpService, StreamableHttpServerConfig,
+};
 use rmcp::{ErrorData as McpError, ServerHandler};
+use serde_json::Value;
 
 /// Per-token permissions (D-05): read_only vs read-write, bound to a specific owner.
 #[derive(Debug, Clone)]
@@ -130,9 +135,9 @@ impl ServerHandler for BastionMcpServer {
                 });
 
             if perms.read_only {
-                return Ok(CallToolResult::error(vec![
-                    Content::text("read-only token cannot invoke tools"),
-                ]));
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "read-only token cannot invoke tools",
+                )]));
             }
 
             let ctx = crate::capability::InvokeCtx {
@@ -145,9 +150,7 @@ impl ServerHandler for BastionMcpServer {
                 Ok(value) => Ok(CallToolResult::success(vec![Content::text(
                     value.to_string(),
                 )])),
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(
-                    e.to_string(),
-                )])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
             }
         }
     }
@@ -202,8 +205,7 @@ impl ServerHandler for BastionMcpServer {
                         .unwrap_or_default();
                     let json =
                         serde_json::to_string_pretty(&beliefs).unwrap_or_else(|_| "[]".into());
-                    vec![ResourceContents::text(json, &uri)
-                        .with_mime_type("application/json")]
+                    vec![ResourceContents::text(json, &uri).with_mime_type("application/json")]
                 }
                 "bastion://personas" => {
                     let all_personas: Vec<&crate::persona::Persona> = personas
@@ -211,17 +213,15 @@ impl ServerHandler for BastionMcpServer {
                         .into_iter()
                         .filter_map(|name| personas.get(name))
                         .collect();
-                    let json = serde_json::to_string_pretty(&all_personas)
-                        .unwrap_or_else(|_| "[]".into());
-                    vec![ResourceContents::text(json, &uri)
-                        .with_mime_type("application/json")]
+                    let json =
+                        serde_json::to_string_pretty(&all_personas).unwrap_or_else(|_| "[]".into());
+                    vec![ResourceContents::text(json, &uri).with_mime_type("application/json")]
                 }
                 "bastion://goals" => {
                     let all_goals = goals.list_goals(&local_owner).await.unwrap_or_default();
-                    let json = serde_json::to_string_pretty(&all_goals)
-                        .unwrap_or_else(|_| "[]".into());
-                    vec![ResourceContents::text(json, &uri)
-                        .with_mime_type("application/json")]
+                    let json =
+                        serde_json::to_string_pretty(&all_goals).unwrap_or_else(|_| "[]".into());
+                    vec![ResourceContents::text(json, &uri).with_mime_type("application/json")]
                 }
                 _ => {
                     return Err(McpError::invalid_params(
@@ -236,3 +236,29 @@ impl ServerHandler for BastionMcpServer {
     }
 }
 
+/// Build an axum Router for the MCP Streamable HTTP server.
+///
+/// Creates a `BastionMcpServer` from components, wraps it in the rmcp
+/// `Router` → `StreamableHttpService` chain, and nests it under `mount_path`
+/// on an otherwise-empty axum `Router` ready to be merged into the main app.
+pub fn build_mcp_axum_router(
+    registry: Arc<CapabilityRegistry>,
+    memory: SharedMemory,
+    personas: Arc<PersonaRegistry>,
+    goals: GoalEngine,
+    tokens: HashMap<String, TokenPermissions>,
+    local_owner: String,
+    mount_path: &str,
+) -> Router {
+    let server = BastionMcpServer::new(registry, memory, personas, goals, tokens, local_owner);
+    let session_manager = Arc::new(LocalSessionManager::default());
+
+    let streamable: StreamableHttpService<McpRouter<BastionMcpServer>, LocalSessionManager> =
+        StreamableHttpService::new(
+            move || Ok(McpRouter::new(server.clone())),
+            session_manager,
+            StreamableHttpServerConfig::default(),
+        );
+
+    Router::new().nest_service(mount_path, streamable)
+}

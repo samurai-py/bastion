@@ -68,6 +68,9 @@ enum Command {
     },
     /// Start long-running REPL daemon (reads stdin, responds, loops)
     Daemon,
+    /// Start MCP server over stdio (local subprocess transport).
+    /// Used by local agents that control lifecycle (Claude Code, opencode, etc.).
+    McpStdio,
 }
 
 #[tokio::main]
@@ -169,6 +172,32 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Daemon => {
             daemon_loop(&mut agent, &cfg).await?;
+        }
+        Command::McpStdio => {
+            use rmcp::ServiceExt;
+
+            let token_perms = build_token_perms(&cfg);
+            let local_owner = std::env::var("BASTION_OWNER_ID")
+                .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+            let personas = Arc::new(agent.registry.clone());
+            let mcp_server = bastion::mcp::server::BastionMcpServer::new(
+                Arc::new(agent.capability_registry.clone()),
+                memory.clone(),
+                personas,
+                agent.goals.clone(),
+                token_perms,
+                local_owner,
+            );
+            let (stdin, stdout) = rmcp::transport::stdio();
+            tracing::info!(event = "mcp_stdio_started", "MCP stdio server starting");
+            let running = mcp_server
+                .serve((stdin, stdout))
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP stdio server error: {}", e))?;
+            running
+                .waiting()
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP stdio server terminated: {}", e))?;
         }
     }
 
@@ -287,6 +316,35 @@ async fn daemon_loop(
         let agent_name =
             std::env::var("BASTION_AGENT_NAME").unwrap_or_else(|_| "bastion".to_string());
 
+        // Build MCP Streamable HTTP server if enabled.
+        let mcp_routes = if cfg.mcp_server.enabled {
+            // Clone AgentLoop components that BastionMcpServer needs.
+            let cap_registry = Arc::new(agent.capability_registry.clone());
+            let mem = agent.memory.clone();
+            let personas = Arc::new(agent.registry.clone());
+            let goals = agent.goals.clone();
+            let local_owner = std::env::var("BASTION_OWNER_ID")
+                .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+            let token_perms = build_token_perms(cfg);
+            let router = bastion::mcp::server::build_mcp_axum_router(
+                cap_registry,
+                mem,
+                personas,
+                goals,
+                token_perms,
+                local_owner,
+                &cfg.mcp_server.mount_path,
+            );
+            tracing::info!(
+                event = "mcp_server_enabled",
+                mount_path = %cfg.mcp_server.mount_path,
+            );
+            Some(router)
+        } else {
+            tracing::info!(event = "mcp_server_disabled");
+            None
+        };
+
         // CR-02: create an OtcStore and pass it to serve_with_mesh so skill commands
         // can insert BAST-XXXX codes for /auth/exchange and /mesh/pair.
         // The same Arc is injected into the agent so the /connect-app REPL command
@@ -306,6 +364,7 @@ async fn daemon_loop(
                 otc_store,
                 agent_identity,
                 agent_name,
+                mcp_routes,
             )
             .await
             {
@@ -540,6 +599,25 @@ async fn daemon_loop(
         }
     }
     Ok(())
+}
+
+/// Build token permissions map from config (shared between daemon and mcp-stdio paths).
+fn build_token_perms(
+    cfg: &bastion::config::BastionConfig,
+) -> HashMap<String, bastion::mcp::server::TokenPermissions> {
+    cfg.mcp_server
+        .tokens
+        .iter()
+        .map(|(token, t)| {
+            (
+                token.clone(),
+                bastion::mcp::server::TokenPermissions {
+                    read_only: t.read_only,
+                    owner_id: t.owner_id.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Parse a `KEY=val1:owner1,val2:owner2` env var into an [`OwnerMap`].
