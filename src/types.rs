@@ -126,6 +126,9 @@ pub enum BastionError {
     /// Carries a detail string for logging; MUST NOT be echoed to the client.
     #[error("Input guardrail rejected: {0}")]
     InputGuardrailRejected(String),
+    /// Identity error — Agent Card sign/verify failures (SEC-06).
+    #[error("Identity error: {0}")]
+    IdentityError(String),
 }
 
 /// Strip `<think>...</think>` blocks from LLM output (CORE-09).
