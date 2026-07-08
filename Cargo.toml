@@ -27,8 +27,11 @@ reqwest            = { version = "0.13", features = ["json", "stream"] }
 rusqlite           = { version = "0.39", features = ["bundled"] }
 rmcp               = { version = "1.6",  features = [
                          "client",
+                         "server",
                          "transport-child-process",
                          "transport-streamable-http-client-reqwest",
+                         "transport-streamable-http-server",
+                         "transport-io",
                        ] }
 ed25519-dalek      = { version = "2", features = ["rand_core"] }
 base64             = "0.22"

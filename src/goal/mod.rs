@@ -34,7 +34,7 @@ impl Default for ScoringConfig {
 // ---------------------------------------------------------------------------
 
 /// A persisted goal row.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Goal {
     pub id: i64,
     pub owner_id: String,

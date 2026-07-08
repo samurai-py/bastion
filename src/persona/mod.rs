@@ -12,7 +12,7 @@ use crate::memory::PrivacyTier;
 use std::collections::HashMap;
 
 /// A loaded persona ready for execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Persona {
     /// Canonical persona identifier (matches the directory name / SOUL.md `name` field).
     pub name: String,
