@@ -1,8 +1,10 @@
 use super::{
-    anthropic::AnthropicProvider, gemini::GeminiProvider, ollama::OllamaProvider,
-    openai::OpenAIProvider, openrouter::OpenRouterProvider, terminal_agent::TerminalAgentProvider,
-    Provider,
+    anthropic::AnthropicProvider, gemini::GeminiProvider, groq::GroqProvider,
+    ollama::OllamaProvider, openai::OpenAIProvider, openrouter::OpenRouterProvider,
+    terminal_agent::TerminalAgentProvider, Provider, SharedProvider,
 };
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
     // Exact match BEFORE the `claude` prefix check — "claude_code" must not hit Anthropic.
@@ -22,11 +24,40 @@ pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
         Ok(Box::new(OpenAIProvider::new(model_name)))
     } else if model_name.starts_with("gemini") {
         Ok(Box::new(GeminiProvider::new(model_name)))
+    } else if let Some(groq_model) = model_name.strip_prefix("groq/") {
+        // `groq/<model>` — checked BEFORE the generic `/` (OpenRouter) branch. The prefix is
+        // stripped so the bare Groq id is sent upstream (it may itself contain a `/`, e.g.
+        // `groq/qwen/qwen3-32b` → `qwen/qwen3-32b`).
+        Ok(Box::new(GroqProvider::new(groq_model)))
     } else if model_name.contains('/') {
         // OpenRouter slugs are namespaced: `vendor/model[:tag]` (e.g. `:free`).
         Ok(Box::new(OpenRouterProvider::new(model_name)))
     } else {
         Ok(Box::new(OllamaProvider::new(model_name)))
+    }
+}
+
+/// Resolve the `Provider` instance the offline Reflector should call (LEARN-05: budget,
+/// interval AND model are configurable independently).
+///
+/// Mirrors `PersonaRegistry::provider_model_for`'s tier-based-default shape: an explicit,
+/// non-empty `configured_model` always wins and gets its own freshly-built provider instance
+/// (via [`resolve_provider`]); unset/empty falls back to `default_model` — the SAME model the
+/// main agent provider already runs on — in which case `default_provider` is reused verbatim
+/// (no redundant duplicate instance), preserving the pre-fix default behavior exactly.
+pub fn resolve_reflector_provider(
+    configured_model: Option<&str>,
+    default_model: &str,
+    default_provider: SharedProvider,
+) -> anyhow::Result<SharedProvider> {
+    let resolved = match configured_model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => default_model,
+    };
+    if resolved == default_model {
+        Ok(default_provider)
+    } else {
+        Ok(Arc::new(RwLock::new(resolve_provider(resolved)?)))
     }
 }
 
@@ -45,6 +76,8 @@ pub fn resolve_provider_kind(model_name: &str) -> &'static str {
         "openai"
     } else if model_name.starts_with("gemini") {
         "gemini"
+    } else if model_name.starts_with("groq/") {
+        "groq"
     } else if model_name.contains('/') {
         "openrouter"
     } else {
@@ -88,6 +121,16 @@ mod tests {
     }
 
     #[test]
+    fn resolve_provider_kind_groq() {
+        // `groq/` prefix wins over the generic `/` OpenRouter branch, even when the
+        // bare Groq id itself contains a `/` (e.g. qwen/qwen3-32b).
+        assert_eq!(resolve_provider_kind("groq/llama-3.1-8b-instant"), "groq");
+        assert_eq!(resolve_provider_kind("groq/qwen/qwen3-32b"), "groq");
+        // Without the prefix, a namespaced slug still routes to OpenRouter.
+        assert_eq!(resolve_provider_kind("qwen/qwen3-32b"), "openrouter");
+    }
+
+    #[test]
     fn resolve_provider_kind_openrouter() {
         assert_eq!(
             resolve_provider_kind("meta-llama/llama-3.3-70b-instruct:free"),
@@ -100,6 +143,55 @@ mod tests {
         assert_eq!(
             resolve_provider_kind("google/gemma-2-9b-it:free"),
             "openrouter"
+        );
+    }
+
+    // ---- resolve_reflector_provider (LEARN-05 gap fix) ----
+    // Uses ollama-style model names only — the only provider kind that never reads an
+    // API key env var, so these tests are safe to run in any CI environment.
+
+    #[tokio::test]
+    async fn resolve_reflector_provider_reuses_default_when_unset() {
+        let default_provider: SharedProvider =
+            Arc::new(RwLock::new(resolve_provider("llama3").expect("resolve")));
+        let default_clone = default_provider.clone();
+        let resolved = resolve_reflector_provider(None, "llama3", default_provider)
+            .expect("resolve_reflector_provider");
+        assert!(
+            Arc::ptr_eq(&resolved, &default_clone),
+            "unset [reflector].model must reuse the exact default agent provider instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_reflector_provider_reuses_default_when_configured_is_blank() {
+        let default_provider: SharedProvider =
+            Arc::new(RwLock::new(resolve_provider("llama3").expect("resolve")));
+        let default_clone = default_provider.clone();
+        let resolved = resolve_reflector_provider(Some("   "), "llama3", default_provider)
+            .expect("resolve_reflector_provider");
+        assert!(
+            Arc::ptr_eq(&resolved, &default_clone),
+            "a blank [reflector].model must be treated as unset, never routed as a model id"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_reflector_provider_builds_distinct_provider_when_configured_differs() {
+        let default_provider: SharedProvider =
+            Arc::new(RwLock::new(resolve_provider("llama3").expect("resolve")));
+        let default_clone = default_provider.clone();
+        let resolved = resolve_reflector_provider(Some("mistral"), "llama3", default_provider)
+            .expect("resolve_reflector_provider");
+        assert!(
+            !Arc::ptr_eq(&resolved, &default_clone),
+            "a distinct configured model must build a fresh provider, not reuse the default"
+        );
+        let guard = resolved.read().await;
+        assert_eq!(
+            guard.model_name(),
+            "mistral",
+            "the Reflector-specific provider must be built from the configured model"
         );
     }
 }

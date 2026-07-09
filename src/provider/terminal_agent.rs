@@ -106,6 +106,19 @@ fn structured_prompt(system: &str, user: &str, schema: &serde_json::Value) -> St
     )
 }
 
+/// Build the prompt for `complete()`'s `response_format` branch — extracted so it's
+/// unit-testable without spawning a subprocess (Task 3). Renders the multi-turn
+/// `messages` list as the "user" half of `structured_prompt` (system passed
+/// separately, so it isn't duplicated inside `render_prompt`'s own system slot),
+/// producing the identical prompt shape `complete_structured` already relies on.
+fn build_structured_invocation(
+    system_prompt: &str,
+    messages: &[Message],
+    schema: &serde_json::Value,
+) -> String {
+    structured_prompt(system_prompt, &render_prompt("", messages), schema)
+}
+
 /// Extract the first balanced JSON object from a possibly-messy reply (strips ```json
 /// fences and surrounding prose). Brace-counting is string-aware so `}` inside a string
 /// value doesn't end it early. The fragile bit → covered by the self-check below.
@@ -140,6 +153,25 @@ impl Provider for TerminalAgentProvider {
         messages: &[Message],
         config: &CallConfig,
     ) -> anyhow::Result<LlmResponse> {
+        // D-01 unification: fold `complete_structured`'s prompt-injection behavior
+        // (below, untouched — removed later, Plan 08-09) into complete()'s
+        // response_format branch, verbatim, reusing the same structured_prompt/
+        // extract_json helpers.
+        if let Some(schema) = &config.response_format {
+            let raw = self
+                .run(&build_structured_invocation(
+                    &config.system_prompt,
+                    messages,
+                    schema,
+                ))
+                .await?;
+            return Ok(LlmResponse {
+                text: extract_json(&raw).unwrap_or(&raw).to_owned(),
+                tool_calls: None,
+                usage: Default::default(),
+            });
+        }
+
         let text = self
             .run(&render_prompt(&config.system_prompt, messages))
             .await?;
@@ -154,17 +186,13 @@ impl Provider for TerminalAgentProvider {
         self.run(prompt).await
     }
 
-    async fn complete_structured(
-        &self,
-        system: &str,
-        user: &str,
-        schema: serde_json::Value,
-        _max_tokens: u32,
-        _temperature: f32,
-    ) -> anyhow::Result<String> {
-        let raw = self.run(&structured_prompt(system, user, &schema)).await?;
-        // Return extracted JSON if found, else raw — the caller serde-parses-and-retries.
-        Ok(extract_json(&raw).unwrap_or(&raw).to_owned())
+    /// D-09: terminal_agent has NO API-level schema/tool_choice control at all — it's
+    /// a subprocess CLI, not a real model endpoint. Callers (Plan 08-07) MUST NOT
+    /// route it through `complete_structured_via_forced_tool_call` (which requires
+    /// `tool_choice` support this provider lacks); its `complete()` above already
+    /// handles `response_format` entirely via its own prompt-injection strategy.
+    fn supports_json_schema(&self) -> bool {
+        false
     }
 
     fn context_limit(&self) -> usize {
@@ -180,7 +208,8 @@ impl Provider for TerminalAgentProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_json;
+    use super::{build_structured_invocation, extract_json};
+    use crate::types::{Message, MessageContent, Role};
 
     #[test]
     fn extract_json_handles_bare_fenced_prose_and_braces_in_strings() {
@@ -195,5 +224,21 @@ mod tests {
             Some(r#"{"s":"has } brace"}"#)
         );
         assert_eq!(extract_json("no json here"), None);
+    }
+
+    #[test]
+    fn build_structured_invocation_matches_structured_prompt_shape() {
+        let schema = serde_json::json!({"type": "object", "properties": {"a": {}}});
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+        }];
+
+        let out = build_structured_invocation("be helpful", &messages, &schema);
+
+        assert!(out.starts_with("be helpful\n\n"));
+        assert!(out.contains("User: hi"));
+        assert!(out.contains("Respond with ONLY a JSON object matching this JSON Schema."));
+        assert!(out.contains(&serde_json::to_string_pretty(&schema).unwrap()));
     }
 }

@@ -35,7 +35,17 @@ pub struct ContextBlock {
 pub trait TurnContextProvider: Send + Sync {
     /// Retorna blocos de contexto opacos para o turn atual.
     ///
+    /// `persona` é o nome da persona ativa resolvida pelo router (ou `None` quando
+    /// nenhuma casou). Providers que fazem recall de memória devem escopá-lo por
+    /// persona: `retrieve_tagged(owner, persona)` traz os beliefs desta persona +
+    /// os globais (untagged), nunca os de outra persona.
+    ///
     /// Retornar `Vec::new()` é válido (ex: sem identidade no primeiro uso = onboarding).
     /// Implementações devem ser rápidas (sem I/O pesado) — são chamadas em todo turn.
-    async fn context_for_turn(&self, owner: &str, turn_msg: &str) -> Vec<ContextBlock>;
+    async fn context_for_turn(
+        &self,
+        owner: &str,
+        turn_msg: &str,
+        persona: Option<&str>,
+    ) -> Vec<ContextBlock>;
 }

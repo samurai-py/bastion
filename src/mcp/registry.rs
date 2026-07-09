@@ -52,8 +52,15 @@ impl ToolRegistry {
         }
     }
 
+    /// SORTED by tool name (COST-01/D-14b prerequisite, twin of
+    /// `CapabilityRegistry::list_tool_defs`): `self.tool_index` is a `HashMap`, whose
+    /// iteration order is unspecified and can shift turn-over-turn even when the
+    /// registered tool set is unchanged — an unsorted listing would silently
+    /// invalidate Plan 08-10's byte-stable cache-prefix guarantee.
     pub fn list_tool_names(&self) -> Vec<&str> {
-        self.tool_index.keys().map(String::as_str).collect()
+        let mut names: Vec<&str> = self.tool_index.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
     }
 
     pub fn server_for(&self, tool_name: &str) -> Option<&str> {
@@ -78,5 +85,38 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_tool_names_returns_registered_tools_sorted() {
+        let mut registry = ToolRegistry::new();
+        registry.register_with_schema(
+            "server-a",
+            "z_tool".into(),
+            serde_json::json!({}),
+            "z".into(),
+        );
+        registry.register_with_schema(
+            "server-a",
+            "a_tool".into(),
+            serde_json::json!({}),
+            "a".into(),
+        );
+        registry.register_with_schema(
+            "server-a",
+            "m_tool".into(),
+            serde_json::json!({}),
+            "m".into(),
+        );
+
+        assert_eq!(
+            registry.list_tool_names(),
+            vec!["a_tool", "m_tool", "z_tool"]
+        );
     }
 }

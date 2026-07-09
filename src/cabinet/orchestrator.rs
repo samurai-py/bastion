@@ -90,6 +90,7 @@ pub async fn deliberate(
                     system_prompt: system_prompt.clone(),
                     max_tokens: 2048,
                     tools,
+                    ..Default::default()
                 };
 
                 // Build a single-message history from the constructed prompt.

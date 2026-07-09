@@ -156,6 +156,7 @@ fn make_test_config() -> BastionConfig {
         agent: AgentConfig {
             default_model: "test".into(),
             daily_budget_usd: 0.01,
+            fallback_models: vec![],
         },
         session: SessionConfig {
             db_path: ":memory:".into(),
@@ -175,6 +176,7 @@ fn make_test_config() -> BastionConfig {
         },
         mesh: MeshConfig::default(),
         mcp_server: McpServerConfig::default(),
+        reflector: ReflectorConfig::default(),
     }
 }
 

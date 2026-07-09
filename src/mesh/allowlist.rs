@@ -42,7 +42,7 @@ pub fn filter_for_mesh(beliefs: Vec<Belief>, allowlist: &OwnerAllowlist) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{Belief, PrivacyTier};
+    use crate::memory::{Belief, BeliefKind, PrivacyTier};
 
     fn make_belief(tag: Option<&str>, tier: Option<PrivacyTier>) -> Belief {
         Belief {
@@ -53,6 +53,12 @@ mod tests {
             weight: 1.0,
             is_core: false,
             tier,
+            kind: BeliefKind::Factual,
+            keywords: vec![],
+            issue: None,
+            helpful_count: 0,
+            harmful_count: 0,
+            neutral_count: 0,
         }
     }
 
@@ -96,5 +102,29 @@ mod tests {
         let beliefs = vec![make_belief(Some("mercado"), None)];
         let result = filter_for_mesh(beliefs, &allowlist(&["mercado"]));
         assert!(result.is_empty());
+    }
+
+    // LEARN-06: filter_for_mesh destructures Belief but never reads `.kind` — these two
+    // tests are a literal one-line diff from `cloudok_with_allowed_tag_passes` /
+    // `localonly_always_filtered_even_if_tag_allowed` (kind overridden to Procedural),
+    // proving the mesh filter is kind-agnostic today and catching a regression if anyone
+    // ever adds a kind-aware branch to the mesh path.
+    #[test]
+    fn procedural_kind_belief_passes_filter_for_mesh_identically_to_factual() {
+        let mut belief = make_belief(Some("mercado"), Some(PrivacyTier::CloudOk));
+        belief.kind = BeliefKind::Procedural;
+        let result = filter_for_mesh(vec![belief], &allowlist(&["mercado", "calendario"]));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn procedural_kind_local_only_always_filtered() {
+        let mut belief = make_belief(Some("mercado"), Some(PrivacyTier::LocalOnly));
+        belief.kind = BeliefKind::Procedural;
+        let result = filter_for_mesh(vec![belief], &allowlist(&["mercado"]));
+        assert!(
+            result.is_empty(),
+            "LocalOnly must never leave the node, regardless of belief kind"
+        );
     }
 }

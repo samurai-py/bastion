@@ -35,6 +35,52 @@ fn default_sync_interval() -> u64 {
     15
 }
 
+/// Config section for the offline Reflector (LEARN-02/LEARN-05).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReflectorConfig {
+    /// Hard cost cap per Reflector tick (ADR D-4 "budget duro"). Default: $0.10.
+    #[serde(default = "default_reflector_budget_usd")]
+    pub budget_usd: f64,
+    /// Hours between offline Reflector runs. 0 = disabled (no periodic run). Default: 24.
+    #[serde(default = "default_reflector_interval_hours")]
+    pub interval_hours: u64,
+    /// Cheap/local model id for reflection. None = fall back to `[agent].default_model`
+    /// (never silently default to a fixed paid tier — RESEARCH Assumption A5).
+    pub model: Option<String>,
+    /// Run semantic dedup every N accepted deltas. Default: 10.
+    #[serde(default = "default_dedup_every_n")]
+    pub dedup_every_n: u32,
+    /// Opt-in: allow the Reflector's LLM candidate generation to send the raw daemon
+    /// log tail to a NON-local (cloud) provider. Default: false (deny-on-ambiguity —
+    /// the log tail is treated as LocalOnly, so a cloud Reflector provider is refused
+    /// by the egress chokepoint). Set true ONLY after accepting that log content
+    /// (which may contain LocalOnly context) leaves the node to the configured cloud model.
+    #[serde(default)]
+    pub allow_cloud: bool,
+}
+
+impl Default for ReflectorConfig {
+    fn default() -> Self {
+        Self {
+            budget_usd: default_reflector_budget_usd(),
+            interval_hours: default_reflector_interval_hours(),
+            model: None,
+            dedup_every_n: default_dedup_every_n(),
+            allow_cloud: false,
+        }
+    }
+}
+
+fn default_reflector_budget_usd() -> f64 {
+    0.10
+}
+fn default_reflector_interval_hours() -> u64 {
+    24
+}
+fn default_dedup_every_n() -> u32 {
+    10
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct BastionConfig {
     pub agent: AgentConfig,
@@ -46,12 +92,21 @@ pub struct BastionConfig {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub mesh: MeshConfig,
+    #[serde(default)]
+    pub reflector: ReflectorConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentConfig {
     pub default_model: String,
     pub daily_budget_usd: f64,
+    /// D-11: ordered list of model-name strings, using the same naming convention
+    /// `resolve_provider()` (src/provider/registry.rs) already accepts (e.g.
+    /// `"groq/llama-3.1-8b-instant"`, `"gemini-2.0-flash"`). Tried in order when the
+    /// primary provider suffers a hard/persistent failure (SO-03/D-10 rung 3, wired
+    /// in Plan 08-08). Empty = no provider-switching (today's exact behavior).
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

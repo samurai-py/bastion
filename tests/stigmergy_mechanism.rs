@@ -9,7 +9,7 @@ use anyhow::Result;
 use bastion::agent::context::TurnContextProvider;
 use bastion::agent::memory_rag::MemoryRagProvider;
 use bastion::memory::sqlite::SqliteMemory;
-use bastion::memory::{Memory, PrivacyTier, SharedMemory};
+use bastion::memory::{BeliefDraft, Memory, PrivacyTier, SharedMemory};
 use bastion::session::SessionManager;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -34,17 +34,22 @@ async fn make_shared_memory() -> Result<(NamedTempFile, SharedMemory)> {
     ))
 }
 
-async fn store_belief(memory: &dyn Memory, owner: &str, content: &str) -> Result<i64> {
+/// reinforce_belief/evaporate_beliefs are scoped to the untagged procedural
+/// playbook (kind='procedural', persona_tag IS NULL) — the trail set the
+/// Reflector's stigmergic deposit targets (ORCH-05). A plain `store_belief`
+/// (kind='factual') is untouched by either method, by design.
+async fn store_procedural_trail(memory: &dyn Memory, owner: &str, insight: &str) -> Result<i64> {
     memory
-        .store_belief(
-            owner,
-            None,
-            content,
-            "stigmergy-test-session",
-            "stigmergy_test",
-            false,
-            Some(PrivacyTier::CloudOk),
-        )
+        .store_procedural_belief(BeliefDraft {
+            owner_id: owner.to_string(),
+            persona_tag: None,
+            issue: None,
+            insight: insight.to_string(),
+            keywords: vec![],
+            session_id: "stigmergy-test-session".to_string(),
+            source: "stigmergy_test".to_string(),
+            tier: Some(PrivacyTier::CloudOk),
+        })
         .await
 }
 
@@ -60,7 +65,7 @@ async fn weight(memory: &dyn Memory, owner: &str, id: i64) -> Result<f64> {
 #[tokio::test]
 async fn test_reinforce_belief_increases_weight() -> Result<()> {
     let (_file, memory) = make_memory().await?;
-    let id = store_belief(&memory, "alice", "procedural trail").await?;
+    let id = store_procedural_trail(&memory, "alice", "procedural trail").await?;
 
     let before = weight(&memory, "alice", id).await?;
     memory.reinforce_belief("alice", id, 0.75).await?;
@@ -77,22 +82,25 @@ async fn test_reinforce_belief_increases_weight() -> Result<()> {
 #[tokio::test]
 async fn reinforce_belief_is_owner_scoped() -> Result<()> {
     let (_file, memory) = make_memory().await?;
-    let id = store_belief(&memory, "alice", "private procedural trail").await?;
+    let id = store_procedural_trail(&memory, "alice", "private procedural trail").await?;
 
-    let err = memory
-        .reinforce_belief("bob", id, 1.0)
-        .await
-        .expect_err("wrong owner must not reinforce");
-    assert!(err.to_string().contains("not found for owner"));
-    assert_eq!(weight(&memory, "alice", id).await?, 1.0);
+    // Best-effort/no-op by design (WHERE owner_id=? on the UPDATE), not a hard
+    // error — the trail may legitimately have been revoked between selection
+    // and deposit, and this is a background stigmergic op, not a user action.
+    memory.reinforce_belief("bob", id, 1.0).await?;
+    assert_eq!(
+        weight(&memory, "alice", id).await?,
+        1.0,
+        "wrong owner must not reinforce alice's trail"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn test_evaporate_beliefs_reduces_weight_without_crossing_floor() -> Result<()> {
     let (_file, memory) = make_memory().await?;
-    let first = store_belief(&memory, "alice", "first trail").await?;
-    let second = store_belief(&memory, "alice", "second trail").await?;
+    let first = store_procedural_trail(&memory, "alice", "first trail").await?;
+    let second = store_procedural_trail(&memory, "alice", "second trail").await?;
 
     memory.reinforce_belief("alice", second, 1.0).await?;
     let first_before = weight(&memory, "alice", first).await?;
@@ -119,13 +127,18 @@ async fn retrieval_bias_prefers_reinforced_equal_overlap() -> Result<()> {
     let high_id;
     {
         let mem = memory.read().await;
-        low_id = store_belief(mem.as_ref(), "alice", "alpha routine low priority trail").await?;
-        high_id = store_belief(mem.as_ref(), "alice", "alpha routine high priority trail").await?;
+        low_id = store_procedural_trail(mem.as_ref(), "alice", "alpha routine low priority trail")
+            .await?;
+        high_id =
+            store_procedural_trail(mem.as_ref(), "alice", "alpha routine high priority trail")
+                .await?;
         mem.reinforce_belief("alice", high_id, 3.0).await?;
     }
 
     let provider = MemoryRagProvider::new(memory);
-    let blocks = provider.context_for_turn("alice", "alpha routine").await;
+    let blocks = provider
+        .context_for_turn("alice", "alpha routine", None)
+        .await;
     let block = blocks
         .iter()
         .find(|block| block.max_tier == PrivacyTier::CloudOk)

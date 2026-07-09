@@ -10,6 +10,7 @@
 
 pub mod adapters;
 pub mod registry;
+pub mod structured_output;
 
 pub use adapters::{DirectFnAdapter, McpToolAdapter, NlCommandAdapter};
-pub use registry::{Capability, CapabilityRegistry, InvokeCtx};
+pub use registry::{Capability, CapabilityRegistry, InvokeCtx, TurnCapabilityScope};

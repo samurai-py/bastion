@@ -1,0 +1,58 @@
+# bastion.local.toml — HOST-DEV profile (run the daemon via `cargo run`, not docker-compose).
+#
+# Select it with:  BASTION_CONFIG=bastion.local.toml cargo run -- daemon
+# (or just use scripts/run-local.sh, which sets it for you and starts the MCP servers).
+#
+# Differences vs the committed bastion.toml (which is the docker-compose deploy profile):
+#   - session/log paths point at ./.local-data instead of the /bastion-data docker volume
+#     (that volume path gives `os error 13` on a bare host).
+#   - MCP server URLs point at localhost instead of the compose-internal hostnames
+#     (memupalace/skill-writer/self-improving only resolve inside the compose network).
+# Safe to commit: no secrets. Secrets still come from .env (GEMINI_API_KEY, etc.).
+
+[agent]
+default_model         = "gemini-2.0-flash"
+daily_budget_usd      = 5.0
+
+[session]
+db_path               = "./.local-data/sessions.db"
+autocompact_threshold = 0.80
+keep_last_n           = 20
+
+[logging]
+log_path              = "./.local-data/bastion.log"
+
+[mcp]
+tool_call_timeout_secs = 30
+
+# --- MCP servers on the host (localhost, not compose hostnames) ---
+# memupalace embeds LOCALLY (onnxruntime) — no cloud key, no egress. It is the ONLY
+# server you need for live memory (and therefore for the stigmergy fitness-signal spike).
+[mcp.servers.memupalace]
+url   = "http://localhost:8001/mcp"
+label = "memupalace"
+
+# skill-writer / self-improving are secondary (skill-writing-by-NL, reflection).
+# Leave them here so the daemon can reach them IF scripts/run-local.sh --with-skills
+# started them; if they are not running the daemon just logs a connect error and
+# continues (these tools are then absent, memory still works).
+[mcp.servers.skill-writer]
+url   = "http://localhost:8002/mcp"
+label = "skill-writer"
+
+[mcp.servers.self-improving]
+url   = "http://localhost:8003/mcp"
+label = "self-improving"
+
+[mcp.servers.content]
+url   = "http://localhost:8010/mcp"
+label = "content"
+
+# Host-dev: interact via `bastion agent -m "..."` or the infer API, so no channel
+# tokens are required to boot. Flip to true (and set the token in .env) if you want
+# to exercise a channel locally.
+[channels.telegram]
+enabled = false
+
+[channels.webhook]
+enabled = false

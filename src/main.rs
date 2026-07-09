@@ -197,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
         registry,
         memory.clone(),
         goals,
+        cfg.agent.fallback_models.clone(),
     );
 
     match cli.command {
@@ -550,6 +551,60 @@ async fn daemon_loop(
             cron.run_heartbeat(std::time::Duration::from_secs(86_400), &owner)
                 .await;
         });
+    }
+
+    // LEARN-02/LEARN-05: spawn the offline Reflector. Budget/interval/model/dedup-cadence
+    // come from bastion.toml [reflector] (defaults if absent). Never reachable from a
+    // user-facing turn (ADR D-4) — this is a separate tokio::spawn, same idiom as
+    // CronService::run_heartbeat and spawn_mesh_sync_job above.
+    {
+        // Minimal registry scoped to exactly what the Reflector's dedup leg needs
+        // (memupalace's memory_embed tool) — avoids refactoring AgentLoop.capability_registry's
+        // field type just to share it across a separately-spawned task.
+        let mut reflector_registry = bastion::capability::CapabilityRegistry::new();
+        if let Err(e) = reflector_registry.register(Arc::new(
+            bastion::capability::adapters::McpToolAdapter {
+                tool_name: "memory_embed".to_string(),
+                server_label: "memupalace".to_string(),
+                description: "Return the embedding vector for a text (dedup similarity)"
+                    .to_string(),
+                schema: serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}),
+                mcp: agent.mcp.clone(),
+            },
+        )) {
+            tracing::warn!(event = "reflector_registry_register_failed", error = %e);
+        }
+
+        // LEARN-05 gap fix: an explicit [reflector].model must actually select the
+        // Reflector's provider, not just be threaded through inertly. Unset/empty falls
+        // back to the exact same default-agent provider instance (safe pre-fix behavior).
+        let reflector_provider = bastion::provider::registry::resolve_reflector_provider(
+            cfg.reflector.model.as_deref(),
+            &cfg.agent.default_model,
+            agent.provider.clone(),
+        )?;
+
+        let generator: Arc<dyn bastion::learn::CandidateGenerator> =
+            Arc::new(bastion::learn::LlmCandidateGenerator::new(
+                reflector_provider,
+                cfg.reflector.model.clone(),
+                cfg.reflector.allow_cloud,
+            ));
+
+        let reflector = bastion::learn::Reflector::new(
+            agent.memory.clone(),
+            generator,
+            Arc::new(reflector_registry),
+            cfg.reflector.clone(),
+            cfg.session.db_path.clone(),
+            cfg.logging.log_path.clone(),
+        );
+        let owner = bastion::agent::loop_::DEFAULT_OWNER.to_string();
+        let interval_hours = cfg.reflector.interval_hours;
+        tokio::spawn(async move {
+            reflector.run(&owner).await;
+        });
+        tracing::info!(event = "reflector_scheduled", interval_hours);
     }
 
     // CONC-1: session mutex per owner — serializes turns from the same owner so a

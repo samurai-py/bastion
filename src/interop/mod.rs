@@ -194,6 +194,7 @@ mod tests {
             agent: AgentConfig {
                 default_model: "test".into(),
                 daily_budget_usd: 0.01,
+                fallback_models: vec![],
             },
             session: SessionConfig {
                 db_path: ":memory:".into(),
@@ -213,6 +214,7 @@ mod tests {
             },
             mesh: crate::config::MeshConfig::default(),
             mcp_server: crate::config::McpServerConfig::default(),
+            reflector: crate::config::ReflectorConfig::default(),
         };
 
         // --- Export ---

@@ -39,7 +39,12 @@ impl IdentityProvider {
 
 #[async_trait::async_trait]
 impl TurnContextProvider for IdentityProvider {
-    async fn context_for_turn(&self, owner: &str, _turn_msg: &str) -> Vec<ContextBlock> {
+    async fn context_for_turn(
+        &self,
+        owner: &str,
+        _turn_msg: &str,
+        _persona: Option<&str>,
+    ) -> Vec<ContextBlock> {
         let mem = self.memory.read().await;
 
         match mem.load_core(owner).await {
@@ -117,7 +122,7 @@ mod tests {
         let memory = make_memory(&path).await;
         let provider = IdentityProvider::new(memory);
 
-        let blocks = provider.context_for_turn("_local", "hello").await;
+        let blocks = provider.context_for_turn("_local", "hello", None).await;
         assert_eq!(blocks.len(), 1);
         assert!(
             blocks[0].content.contains("memory_store"),
@@ -150,7 +155,7 @@ mod tests {
         }
 
         let provider = IdentityProvider::new(memory);
-        let blocks = provider.context_for_turn("_local", "hello").await;
+        let blocks = provider.context_for_turn("_local", "hello", None).await;
         assert_eq!(blocks.len(), 1);
         assert!(
             blocks[0].content.contains("Sou Bastion"),

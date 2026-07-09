@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 // SpyProvider
 // ---------------------------------------------------------------------------
 
-/// Records every `complete` / `complete_simple` / `complete_structured` call
-/// by pushing `self.name` into `calls`. Never makes a network request.
+/// Records every `complete` / `complete_simple` call by pushing `self.name`
+/// into `calls`. Never makes a network request.
 pub struct SpyProvider {
     /// The provider name this spy impersonates (e.g. "openai", "ollama").
     pub name: &'static str,
@@ -52,18 +52,6 @@ impl Provider for SpyProvider {
         Ok("spy-simple-response".into())
     }
 
-    async fn complete_structured(
-        &self,
-        _system: &str,
-        _user: &str,
-        _response_schema: serde_json::Value,
-        _max_tokens: u32,
-        _temperature: f32,
-    ) -> anyhow::Result<String> {
-        self.record();
-        Ok(r#"{"spy": true}"#.into())
-    }
-
     fn context_limit(&self) -> usize {
         8192
     }
@@ -81,7 +69,7 @@ impl Provider for SpyProvider {
 // MockProvider: scripted structured-completion responses for Cabinet evals
 // ---------------------------------------------------------------------------
 
-/// Returns pre-scripted JSON strings for `complete_structured`.
+/// Returns pre-scripted JSON strings via `complete()`.
 /// When the script has one entry it repeats; otherwise removes and returns front.
 pub struct MockProvider {
     pub name: &'static str,
@@ -103,9 +91,20 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
+    /// D-04 (Plan 08-07): `synthesize()` now calls `complete()` with
+    /// `response_format` set (this mock's default `supports_json_schema()==true`
+    /// takes the direct path, never the forced-tool-call fallback) — serve the
+    /// SAME scripted JSON responses `complete_structured` used to return, so
+    /// existing eval assertions on the parsed `CabinetVerdict` still hold.
     async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
+        let mut responses = self.responses.lock().unwrap();
+        let text = if responses.len() > 1 {
+            responses.remove(0)
+        } else {
+            responses[0].clone()
+        };
         Ok(LlmResponse {
-            text: "mock-response".into(),
+            text,
             tool_calls: None,
             usage: TokenUsage::default(),
         })
@@ -113,22 +112,6 @@ impl Provider for MockProvider {
 
     async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
         Ok("mock-simple".into())
-    }
-
-    async fn complete_structured(
-        &self,
-        _system: &str,
-        _user: &str,
-        _schema: serde_json::Value,
-        _max_tokens: u32,
-        _temperature: f32,
-    ) -> anyhow::Result<String> {
-        let mut responses = self.responses.lock().unwrap();
-        if responses.len() > 1 {
-            Ok(responses.remove(0))
-        } else {
-            Ok(responses[0].clone())
-        }
     }
 
     fn context_limit(&self) -> usize {

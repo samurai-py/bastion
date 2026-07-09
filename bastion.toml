@@ -10,6 +10,7 @@
 # Requires GEMINI_API_KEY in .env. Override per-deployment via env BASTION__AGENT__DEFAULT_MODEL.
 default_model         = "gemini-2.0-flash"
 daily_budget_usd      = 5.0
+# fallback_models = ["groq/llama-3.1-8b-instant"]  # D-11: tried in order on hard provider failure
 
 [session]
 db_path               = "/bastion-data/sessions.db"

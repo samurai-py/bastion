@@ -16,6 +16,55 @@ pub enum PrivacyTier {
     CloudOk,
 }
 
+/// Belief kind — factual (default, Phase 1-6 behavior) or procedural (LEARN-01).
+/// Defaults to `Factual` so every pre-Phase-7 row (DB default `'factual'`) decodes
+/// identically to before this column existed — zero behavior change for existing data.
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BeliefKind {
+    #[default]
+    Factual,
+    Procedural,
+}
+
+/// Outcome signal for a procedural belief's helpful/harmful/neutral counters.
+/// Maps 1:1 onto `record_belief_outcome`'s counter-increment column choice.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Outcome {
+    Helpful,
+    Harmful,
+    Neutral,
+}
+
+/// Builder-style draft for a new procedural belief. Used by `store_procedural_belief`
+/// instead of widening `store_belief`'s already-7-argument signature (Pitfall 5).
+/// `insight` maps onto the existing `content` column (ACE terminology overlay) —
+/// there is no parallel content field.
+pub struct BeliefDraft {
+    pub owner_id: String,
+    pub persona_tag: Option<String>,
+    pub issue: Option<String>,
+    pub insight: String,
+    pub keywords: Vec<String>,
+    pub session_id: String,
+    pub source: String,
+    pub tier: Option<PrivacyTier>,
+}
+
+/// A queued, metadata-only "this belief needs a corrected re-learn" signal (LEARN-04
+/// edit half). NEVER carries raw correction text — content lives only in the
+/// tier-gated life-log/OTel stream the Reflector (07-05) already reads; this row
+/// only points at WHICH belief and WHAT tier.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PendingCorrection {
+    pub id: i64,
+    pub belief_id: i64,
+    pub owner_id: String,
+    pub tier: Option<PrivacyTier>,
+    pub created_at: i64,
+}
+
 /// A retrieved belief (read-only view of the beliefs table row).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Belief {
@@ -27,6 +76,16 @@ pub struct Belief {
     pub is_core: bool,
     /// Privacy tier — None if column absent or unset in DB (treated as LocalOnly by egress gate).
     pub tier: Option<PrivacyTier>,
+    /// Factual (default) or procedural (LEARN-01). Never `Option` — decodes to
+    /// `Factual` on NULL/unrecognized column value, matching the SQL `DEFAULT 'factual'`.
+    pub kind: BeliefKind,
+    /// Procedural skill-matching tags. Empty vec on NULL or malformed JSON — never panics.
+    pub keywords: Vec<String>,
+    /// The problem/context a procedural belief addresses (ACE "issue" terminology).
+    pub issue: Option<String>,
+    pub helpful_count: i64,
+    pub harmful_count: i64,
+    pub neutral_count: i64,
 }
 
 /// Core memory abstraction. Every subsystem reads/writes beliefs through this trait.
@@ -66,22 +125,6 @@ pub trait Memory: Send + Sync {
     /// Retrieve ALL non-revoked beliefs for an owner (regardless of persona_tag), for .af export.
     async fn retrieve_all_beliefs(&self, owner_id: &str) -> anyhow::Result<Vec<Belief>>;
 
-    /// Stigmergic reinforcement: increase one active belief's weight for its owner.
-    ///
-    /// Owner-scoped (IDOR guard): a wrong owner must not modify the belief.
-    async fn reinforce_belief(&self, owner_id: &str, id: i64, delta: f64) -> anyhow::Result<()>;
-
-    /// Stigmergic evaporation: decay active, non-core beliefs for an owner.
-    ///
-    /// Weights are multiplied by `factor` and clamped to `floor`; revoked and core
-    /// beliefs are left untouched. Returns the number of affected beliefs.
-    async fn evaporate_beliefs(
-        &self,
-        owner_id: &str,
-        factor: f64,
-        floor: f64,
-    ) -> anyhow::Result<u64>;
-
     /// Return (session_id, source) provenance rows for a belief.
     /// Owner-scoped (IDOR guard): provenance is only returned when the belief is
     /// owned by `owner_id`; cross-owner probes get an empty vec (indistinguishable
@@ -91,6 +134,58 @@ pub trait Memory: Send + Sync {
         owner_id: &str,
         belief_id: i64,
     ) -> anyhow::Result<Vec<(String, String)>>;
+
+    /// Store a procedural belief (kind='procedural') + its provenance row. Mirrors
+    /// store_belief's atomic belief+provenance transaction; does NOT widen
+    /// store_belief (Pitfall 5).
+    async fn store_procedural_belief(&self, draft: BeliefDraft) -> anyhow::Result<i64>;
+
+    /// Increment exactly one counter (helpful/harmful/neutral) on an existing belief.
+    /// Content untouched. Owner-scoped (IDOR guard) — errors on cross-owner no-op,
+    /// same discipline as revoke_belief.
+    async fn record_belief_outcome(
+        &self,
+        owner_id: &str,
+        id: i64,
+        outcome: Outcome,
+    ) -> anyhow::Result<()>;
+
+    /// Stigmergic reinforcement (ACO pheromone deposit): add `delta` to ONE untagged
+    /// procedural belief's `weight` — the retrieval-ranking factor the RAG multiplies by
+    /// lexical relevance — capped to bound a runaway trail. Owner-scoped and best-effort:
+    /// a no-match (wrong owner, revoked, factual, or persona-tagged) is a silent no-op,
+    /// since a trail may be revoked between selection and deposit.
+    async fn reinforce_belief(&self, owner_id: &str, id: i64, delta: f64) -> anyhow::Result<()>;
+
+    /// Stigmergic evaporation: multiply every non-revoked UNTAGGED procedural belief's
+    /// `weight` by `factor` (= 1 - ρ), floored at `floor` (> 0, so a decayed trail stays
+    /// faintly retrievable and NEVER reaches the revoked-sentinel weight of 0). Scoped to the
+    /// global procedural playbook (persona_tag IS NULL) — the set the Reflector reinforces —
+    /// so no trail decays without ever being reinforceable. Returns the number of trails decayed.
+    async fn evaporate_beliefs(
+        &self,
+        owner_id: &str,
+        factor: f64,
+        floor: f64,
+    ) -> anyhow::Result<u64>;
+
+    /// Enqueue a metadata-only pending-correction signal for `belief_id` (LEARN-04
+    /// edit half). Called synchronously right after a contestation revoke — never
+    /// carries raw text. Drained by the offline Reflector (07-05) via
+    /// `take_pending_corrections`.
+    async fn record_pending_correction(
+        &self,
+        owner_id: &str,
+        belief_id: i64,
+        tier: Option<PrivacyTier>,
+    ) -> anyhow::Result<i64>;
+
+    /// Dequeue (read + delete, one transaction) all pending corrections for
+    /// `owner_id`. Owner-scoped (IDOR guard) — a caller can only drain its own queue.
+    async fn take_pending_corrections(
+        &self,
+        owner_id: &str,
+    ) -> anyhow::Result<Vec<PendingCorrection>>;
 }
 
 /// Clonable shared-handle alias — mirrors SharedProvider from provider/mod.rs.

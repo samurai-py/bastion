@@ -1,37 +1,35 @@
-//! SEAM #2 — `MemoryRagProvider`: recall de beliefs por INJEÇÃO de contexto.
+//! LEARN-03 — `ProceduralBeliefProvider`: recall de beliefs PROCEDURAIS por injeção
+//! de contexto (SEAM #2), mirroring `MemoryRagProvider` (SEAM #2 / BIG-1 "RAG" leg).
 //!
-//! A perna "injeção RAG" da decisão pendente do BIG-1 (tool-calling vs injeção
-//! vs híbrido). Recupera beliefs relevantes pro turn e injeta como bloco opaco no
-//! system prompt — funciona com QUALQUER provider, incluindo terminal-agents
-//! (PROV-09) que nunca emitem `tool_calls`, e permanece egress-safe: os blocos
-//! saem separados por tier, então `build_system_prompt` derruba só o bloco
-//! LocalOnly quando o provider é cloud (Pitfall 5).
+//! Mesma mecânica já testada de `MemoryRagProvider`: recall léxico barato, blocos
+//! separados por tier (deny-on-ambiguity para tier `None`), egress-safe por
+//! construção (`build_system_prompt` derruba só o bloco LocalOnly quando o provider
+//! é cloud). A ÚNICA diferença de substância é o predicado de filtro: aqui é
+//! INCLUSÃO por `kind == Procedural` (não exclusão por `persona_tag == "identity"`),
+//! porque procedural e factual são canais de recall paralelos e não devem duplicar.
 //!
-//! Relevância é LÉXICA e barata (overlap de termos + weight + recência) — de
-//! propósito: recall semântico de verdade é papel do memupalace (embedding
-//! local), acessível via tool ou apontando o terminal-agent pro MCP dele.
-//! Este provider cobre o caminho que não depende do modelo decidir chamar tool.
-//!
-//! Opt-in via env `BASTION_MEMORY_RAG=1` (wiring em `AgentLoop::new`) até a
-//! decisão do híbrido: default-on duplicaria a exposição de memória em providers
-//! com function-calling (que já recebem as tools de memória) e cresce o prompt.
+//! Always-on (não gated por env, ao contrário de `BASTION_MEMORY_RAG`): beliefs
+//! procedurais são um entregável de primeira classe da Fase 7 (LEARN-03), não uma
+//! perna experimental do RAG híbrido ainda pendente de decisão (BIG-1).
 
 use crate::agent::context::{ContextBlock, TurnContextProvider};
-use crate::memory::{Belief, PrivacyTier, SharedMemory};
+use crate::memory::{Belief, BeliefKind, PrivacyTier, SharedMemory};
 
-/// Máximo de beliefs injetados por turn (após ranking).
+/// Máximo de beliefs procedurais injetados por turn (após ranking). Constante
+/// separada de `memory_rag::DEFAULT_MAX_BELIEFS` de propósito — os dois canais de
+/// recall devem ser tunáveis independentemente.
 const DEFAULT_MAX_BELIEFS: usize = 8;
 
 /// Termos do turn com menos caracteres que isso não contam pro overlap
 /// (artigos/preposições dominariam o score).
 const MIN_TERM_LEN: usize = 4;
 
-pub struct MemoryRagProvider {
+pub struct ProceduralBeliefProvider {
     memory: SharedMemory,
     max_beliefs: usize,
 }
 
-impl MemoryRagProvider {
+impl ProceduralBeliefProvider {
     pub fn new(memory: SharedMemory) -> Self {
         Self {
             memory,
@@ -50,10 +48,10 @@ impl MemoryRagProvider {
 
 /// Overlap léxico: quantos termos (≥ MIN_TERM_LEN chars, case-insensitive) do
 /// turn aparecem no conteúdo do belief. Zero = sem relação detectável.
-/// `pub(crate)`: o Reflector reusa a MESMA métrica de relevância pra escolher quais
-/// trilhas (beliefs procedurais) reforçar por Δτ (estigmergia), garantindo que o depósito
-/// mira as trilhas que este ranking de fato surfacaria.
-pub(crate) fn lexical_overlap(turn_msg: &str, content: &str) -> usize {
+///
+/// Duplicado de `memory_rag::lexical_overlap` de propósito — o idioma do
+/// codebase prefere helper local por provider a um utils compartilhado aqui.
+fn lexical_overlap(turn_msg: &str, content: &str) -> usize {
     let content_lower = content.to_lowercase();
     turn_msg
         .split(|c: char| !c.is_alphanumeric())
@@ -62,21 +60,23 @@ pub(crate) fn lexical_overlap(turn_msg: &str, content: &str) -> usize {
         .count()
 }
 
-/// Formata um grupo de beliefs como bloco opaco. O id entra no texto de
-/// propósito: é o handle de contestação por NL (`/contest <id>`, D-14).
+/// Formata um grupo de beliefs procedurais como bloco opaco. O id entra no texto
+/// de propósito: é o handle de contestação por NL (`/contest <id>`, D-14). O
+/// core NUNCA interpreta este conteúdo como instrução (SEAM #2 boundary rule) —
+/// é sempre dado opaco dentro das tags de guidance procedural.
 fn render_block(beliefs: &[&Belief]) -> String {
     let mut s = String::from(
-        "<memory_recall>\nLong-term memories about this owner (contest with /contest <id> if wrong):\n",
+        "<procedural_guidance>\nLearned strategies for this owner (contest with /contest <id>):\n",
     );
     for b in beliefs {
         s.push_str(&format!("- [id {}] {}\n", b.id, b.content));
     }
-    s.push_str("</memory_recall>");
+    s.push_str("</procedural_guidance>");
     s
 }
 
 #[async_trait::async_trait]
-impl TurnContextProvider for MemoryRagProvider {
+impl TurnContextProvider for ProceduralBeliefProvider {
     async fn context_for_turn(
         &self,
         owner: &str,
@@ -87,41 +87,40 @@ impl TurnContextProvider for MemoryRagProvider {
             let mem = self.memory.read().await;
             // Recall ESCOPADO pela persona ativa: `retrieve_tagged(owner, Some(persona))`
             // traz os beliefs desta persona OU globais (untagged) — nunca os de outra
-            // persona (o SQL é `persona_tag = ?2 OR persona_tag IS NULL`). `None` (nenhuma
-            // persona casou) mantém o recall global-only, que é o fail-safe correto.
+            // persona (o SQL é `persona_tag = ?2 OR persona_tag IS NULL`).
             match mem.retrieve_tagged(owner, persona).await {
                 Ok(b) => b,
                 Err(e) => {
                     // Recall é enriquecimento, nunca bloqueia o turn (fail-open aqui é
                     // correto: sem memória o agente ainda responde; o erro fica visível).
-                    tracing::warn!(event = "memory_rag_retrieve_failed", error = %e);
+                    tracing::warn!(event = "procedural_belief_retrieve_failed", error = %e);
                     return vec![];
                 }
             }
         };
 
-        // Identidade já é injetada pelo IdentityProvider — não duplicar. Com recall
-        // persona-scoped, um belief "identity" só chega aqui quando a persona ativa
-        // for a própria "identity"; este filtro garante que nunca duplique.
+        // Só beliefs PROCEDURAIS — o canal factual já é coberto por MemoryRagProvider
+        // e não deve ser duplicado aqui (inclusão, não exclusão, ao contrário do
+        // filtro "identity" de memory_rag.rs).
         let mut candidates: Vec<&Belief> = beliefs
             .iter()
-            .filter(|b| b.persona_tag.as_deref() != Some("identity"))
+            .filter(|b| b.kind == BeliefKind::Procedural)
             .collect();
         if candidates.is_empty() {
             return vec![];
         }
 
-        // Ranking estigmérgico: relevância MODULADA pelo feromônio (weight). Entre beliefs de
-        // relevância léxica parecida, a trilha reforçada (weight maior) é preferida; um belief com
-        // overlap zero pontua zero por mais alto que seja o weight (feromônio nunca fabrica
-        // relevância). Com weight=1.0 (default, pré-reforço) reduz a overlap puro — retrocompatível.
-        // Desempate: id desc (mais recente primeiro).
+        // Rank: overlap léxico desc → weight desc → id desc (mais recente primeiro).
         candidates.sort_by(|a, b| {
-            let score_a = lexical_overlap(turn_msg, &a.content) as f64 * a.weight;
-            let score_b = lexical_overlap(turn_msg, &b.content) as f64 * b.weight;
+            let score_a = lexical_overlap(turn_msg, &a.content);
+            let score_b = lexical_overlap(turn_msg, &b.content);
             score_b
-                .partial_cmp(&score_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .cmp(&score_a)
+                .then(
+                    b.weight
+                        .partial_cmp(&a.weight)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
                 .then(b.id.cmp(&a.id))
         });
         candidates.truncate(self.max_beliefs);
@@ -150,14 +149,14 @@ impl TurnContextProvider for MemoryRagProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Tests (offline — temp-DB SqliteMemory, pattern from agent/command.rs)
+// Tests (offline — temp-DB SqliteMemory, mirrors memory_rag.rs's test suite)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory::sqlite::SqliteMemory;
-    use crate::memory::Memory;
+    use crate::memory::{BeliefDraft, Memory};
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio::sync::RwLock;
@@ -170,7 +169,34 @@ mod tests {
         ))
     }
 
-    async fn store(
+    /// Stores a `kind='procedural'` belief via `store_procedural_belief` — the only
+    /// path that sets `kind` to `Procedural` (`store_belief` always defaults to
+    /// `Factual`, exercised separately by `factual_beliefs_are_excluded`).
+    async fn store_procedural(
+        mem: &SharedMemory,
+        owner: &str,
+        content: &str,
+        tag: Option<&str>,
+        tier: Option<PrivacyTier>,
+    ) -> i64 {
+        let m = mem.read().await;
+        m.store_procedural_belief(BeliefDraft {
+            owner_id: owner.to_string(),
+            persona_tag: tag.map(|t| t.to_string()),
+            issue: None,
+            insight: content.to_string(),
+            keywords: vec![],
+            session_id: "sess1".to_string(),
+            source: "test".to_string(),
+            tier,
+        })
+        .await
+        .expect("store_procedural_belief")
+    }
+
+    /// Stores a `kind='factual'` (default) belief via `store_belief` — used to prove
+    /// the procedural filter excludes it.
+    async fn store_factual(
         mem: &SharedMemory,
         owner: &str,
         content: &str,
@@ -180,14 +206,14 @@ mod tests {
         let m = mem.read().await;
         m.store_belief(owner, tag, content, "sess1", "test", false, tier)
             .await
-            .expect("store")
+            .expect("store_belief")
     }
 
     #[tokio::test]
     async fn empty_memory_returns_no_blocks() {
         let f = NamedTempFile::new().unwrap();
         let mem = make_memory(f.path().to_str().unwrap()).await;
-        let provider = MemoryRagProvider::new(mem);
+        let provider = ProceduralBeliefProvider::new(mem);
         let blocks = provider.context_for_turn("_local", "hello", None).await;
         assert!(blocks.is_empty());
     }
@@ -196,25 +222,32 @@ mod tests {
     async fn blocks_are_split_by_tier_and_none_is_local_only() {
         let f = NamedTempFile::new().unwrap();
         let mem = make_memory(f.path().to_str().unwrap()).await;
-        store(
+        store_procedural(
             &mem,
             "_local",
-            "likes coffee",
+            "always rebase onto origin/main before pushing",
             None,
             Some(PrivacyTier::CloudOk),
         )
         .await;
-        store(
+        store_procedural(
             &mem,
             "_local",
-            "medical condition X",
+            "internal deploy key rotation procedure",
             None,
             Some(PrivacyTier::LocalOnly),
         )
         .await;
-        store(&mem, "_local", "untagged legacy belief", None, None).await;
+        store_procedural(
+            &mem,
+            "_local",
+            "untagged legacy procedural belief",
+            None,
+            None,
+        )
+        .await;
 
-        let provider = MemoryRagProvider::new(mem);
+        let provider = ProceduralBeliefProvider::new(mem);
         let blocks = provider.context_for_turn("_local", "hello", None).await;
 
         assert_eq!(blocks.len(), 2, "one CloudOk block + one LocalOnly block");
@@ -226,12 +259,12 @@ mod tests {
             .iter()
             .find(|b| b.max_tier == PrivacyTier::LocalOnly)
             .expect("local block");
-        assert!(cloud.content.contains("likes coffee"));
-        assert!(!cloud.content.contains("medical condition"));
-        assert!(local.content.contains("medical condition X"));
+        assert!(cloud.content.contains("always rebase"));
+        assert!(!cloud.content.contains("deploy key rotation"));
+        assert!(local.content.contains("deploy key rotation"));
         // Deny-on-ambiguity: NULL tier must land in the LocalOnly block, never CloudOk.
-        assert!(local.content.contains("untagged legacy belief"));
-        assert!(!cloud.content.contains("untagged legacy belief"));
+        assert!(local.content.contains("untagged legacy procedural belief"));
+        assert!(!cloud.content.contains("untagged legacy procedural belief"));
     }
 
     #[tokio::test]
@@ -239,16 +272,16 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         let mem = make_memory(f.path().to_str().unwrap()).await;
         for i in 0..12 {
-            store(
+            store_procedural(
                 &mem,
                 "_local",
-                &format!("fact number {i}"),
+                &format!("procedural strategy number {i}"),
                 None,
                 Some(PrivacyTier::CloudOk),
             )
             .await;
         }
-        let provider = MemoryRagProvider::with_max(mem, 5);
+        let provider = ProceduralBeliefProvider::with_max(mem, 5);
         let blocks = provider.context_for_turn("_local", "hello", None).await;
         assert_eq!(blocks.len(), 1);
         let bullets = blocks[0].content.matches("- [id ").count();
@@ -260,59 +293,54 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         let mem = make_memory(f.path().to_str().unwrap()).await;
         // Relevant belief stored FIRST (oldest, lowest id)…
-        store(
+        store_procedural(
             &mem,
             "_local",
-            "the dog is called Rex",
+            "always squash commits before merging",
             None,
             Some(PrivacyTier::CloudOk),
         )
         .await;
         // …then bury it under newer irrelevant ones, past the cap.
         for i in 0..6 {
-            store(
+            store_procedural(
                 &mem,
                 "_local",
-                &format!("unrelated note {i}"),
+                &format!("unrelated strategy {i}"),
                 None,
                 Some(PrivacyTier::CloudOk),
             )
             .await;
         }
-        let provider = MemoryRagProvider::with_max(mem, 3);
+        let provider = ProceduralBeliefProvider::with_max(mem, 3);
         let blocks = provider
-            .context_for_turn("_local", "what is my dog called?", None)
+            .context_for_turn("_local", "should I squash commits before merging?", None)
             .await;
         assert_eq!(blocks.len(), 1);
         assert!(
-            blocks[0].content.contains("Rex"),
+            blocks[0].content.contains("squash commits"),
             "keyword-matching belief must survive the cap: {}",
             blocks[0].content
         );
     }
 
     #[tokio::test]
-    async fn identity_beliefs_are_excluded() {
+    async fn factual_beliefs_are_excluded() {
         let f = NamedTempFile::new().unwrap();
         let mem = make_memory(f.path().to_str().unwrap()).await;
-        store(
+        store_factual(
             &mem,
             "_local",
-            "I am Bastion, warm and direct",
-            Some("identity"),
+            "the owner's favorite color is blue",
+            None,
             Some(PrivacyTier::CloudOk),
         )
         .await;
-        // Passa persona=Some("identity") DE PROPÓSITO: assim o `retrieve_tagged` de fato
-        // devolve o belief tagged "identity" e o teste exercita o FILTRO (antes passava
-        // vazio só porque o SQL não retornava beliefs tagged — verde pelo motivo errado).
-        let provider = MemoryRagProvider::new(mem);
-        let blocks = provider
-            .context_for_turn("_local", "hello", Some("identity"))
-            .await;
+        let provider = ProceduralBeliefProvider::new(mem);
+        let blocks = provider.context_for_turn("_local", "hello", None).await;
         assert!(
             blocks.is_empty(),
-            "identity is IdentityProvider's job — the filter must drop it even when recalled"
+            "factual beliefs are MemoryRagProvider's job — the kind filter must drop them"
         );
     }
 
@@ -320,15 +348,15 @@ mod tests {
     async fn owner_scoping_holds() {
         let f = NamedTempFile::new().unwrap();
         let mem = make_memory(f.path().to_str().unwrap()).await;
-        store(
+        store_procedural(
             &mem,
             "alice",
-            "alice secret",
+            "alice's private deploy procedure",
             None,
             Some(PrivacyTier::CloudOk),
         )
         .await;
-        let provider = MemoryRagProvider::new(mem);
+        let provider = ProceduralBeliefProvider::new(mem);
         let blocks = provider.context_for_turn("bob", "hello", None).await;
         assert!(blocks.is_empty(), "bob must never see alice's beliefs");
     }
@@ -337,24 +365,25 @@ mod tests {
     async fn recall_is_scoped_to_active_persona_plus_global() {
         let f = NamedTempFile::new().unwrap();
         let mem = make_memory(f.path().to_str().unwrap()).await;
-        // A belief for persona "work", one for persona "home", and one global (untagged).
-        store(
+        // A procedural belief for persona "work", one for persona "home", and one
+        // global (untagged).
+        store_procedural(
             &mem,
             "_local",
-            "the office wifi password is hunter2",
+            "always run cargo fmt before committing",
             Some("work"),
             Some(PrivacyTier::CloudOk),
         )
         .await;
-        store(
+        store_procedural(
             &mem,
             "_local",
-            "the kids go to bed at 8pm",
+            "put the kids' bikes away before dinner",
             Some("home"),
             Some(PrivacyTier::CloudOk),
         )
         .await;
-        store(
+        store_procedural(
             &mem,
             "_local",
             "the owner prefers concise answers",
@@ -363,7 +392,7 @@ mod tests {
         )
         .await;
 
-        let provider = MemoryRagProvider::new(mem);
+        let provider = ProceduralBeliefProvider::new(mem);
         let blocks = provider
             .context_for_turn("_local", "hello", Some("work"))
             .await;
@@ -372,7 +401,7 @@ mod tests {
         let content = &blocks[0].content;
         // This persona's belief + the global one are recalled…
         assert!(
-            content.contains("office wifi"),
+            content.contains("cargo fmt"),
             "work belief must be recalled"
         );
         assert!(
@@ -381,8 +410,59 @@ mod tests {
         );
         // …but the OTHER persona's belief must never leak across the boundary.
         assert!(
-            !content.contains("kids go to bed"),
+            !content.contains("kids' bikes"),
             "home-persona belief must not leak into a work-persona turn"
+        );
+    }
+
+    /// LEARN-03's concrete end-to-end proof: a `LocalOnly` procedural belief's
+    /// `ContextBlock` is dropped by `check_egress` when the active provider is a
+    /// cloud provider, while a co-existing `CloudOk` procedural belief's content
+    /// still makes it through — the same mechanism `build_system_prompt` (SEAM #2)
+    /// already applies per-block, unchanged by this plan.
+    #[tokio::test]
+    async fn a_local_only_procedural_belief_never_reaches_cloud_prompt() {
+        let f = NamedTempFile::new().unwrap();
+        let mem = make_memory(f.path().to_str().unwrap()).await;
+        store_procedural(
+            &mem,
+            "_local",
+            "safe cloud-shareable git workflow tip",
+            None,
+            Some(PrivacyTier::CloudOk),
+        )
+        .await;
+        store_procedural(
+            &mem,
+            "_local",
+            "internal-only production credential rotation steps",
+            None,
+            Some(PrivacyTier::LocalOnly),
+        )
+        .await;
+
+        let provider = ProceduralBeliefProvider::new(mem);
+        let blocks = provider.context_for_turn("_local", "hello", None).await;
+        assert_eq!(blocks.len(), 2, "one CloudOk block + one LocalOnly block");
+
+        // Simulate build_system_prompt's per-block egress check for a cloud provider.
+        let cloud_provider_name = "openrouter";
+        let mut prompt_parts: Vec<String> = vec![];
+        for block in &blocks {
+            if crate::hooks::egress::check_egress(Some(block.max_tier), cloud_provider_name).is_ok()
+            {
+                prompt_parts.push(block.content.clone());
+            }
+        }
+        let system_prompt = prompt_parts.join("\n\n");
+
+        assert!(
+            system_prompt.contains("safe cloud-shareable git workflow tip"),
+            "CloudOk procedural belief must reach the cloud-provider system prompt"
+        );
+        assert!(
+            !system_prompt.contains("internal-only production credential rotation steps"),
+            "LocalOnly procedural belief must NEVER reach a cloud-provider system prompt"
         );
     }
 }

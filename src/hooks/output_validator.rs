@@ -16,6 +16,16 @@
 //! stored non-revoked belief for the owner whose content shares keyword overlap with the
 //! user's message. If no belief matches, the call is a no-op — the explicit `/contest <id>`
 //! command can be used instead (D-14).
+//!
+//! # LEARN-04 — edit is reachable, not a dead-end claim
+//! Revoke stays synchronous (unchanged). The SAME call site that revokes ALSO enqueues
+//! a metadata-only `pending_correction` row (belief_id + owner_id + tier + timestamp,
+//! NEVER raw correction text) into a new Contestable Memory DB table. The offline
+//! Reflector (07-05) drains that queue every tick and synthesizes the corrected
+//! procedural belief as a normal, `verify_delta`-gated `DeltaOp` — "edit" is delivered
+//! end-to-end across the sync/offline boundary, not a hot-path call and not an unbuilt
+//! claim. This call site also grows the EVAL-01 regression set (tier-gated — see
+//! `crate::eval::capture`).
 
 use crate::memory::SharedMemory;
 
@@ -125,6 +135,13 @@ impl OutputValidator {
             if overlap > 0 {
                 let mem = memory.write().await;
                 mem.revoke_belief(owner, belief.id).await?;
+                crate::eval::capture::record_failure(
+                    crate::eval::capture::FailureKind::Contestation,
+                    belief.tier,
+                    "belief_revoked_on_nl_contestation",
+                );
+                mem.record_pending_correction(owner, belief.id, belief.tier)
+                    .await?;
             }
         }
 

@@ -59,6 +59,12 @@ pub enum ContentPart {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Opaque, provider-specific metadata tied to this tool call — e.g. Gemini's
+        /// `extra_content.google.thought_signature` (SO-05). Never interpreted by
+        /// Bastion core: stored and re-serialized verbatim on history replay only.
+        /// Every provider besides Gemini leaves this `None` and ignores it entirely.
+        #[serde(default)]
+        extra: Option<serde_json::Value>,
     },
     ToolResult {
         tool_use_id: String,
@@ -71,6 +77,11 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Opaque, provider-specific metadata (mirrors `ContentPart::ToolUse.extra`) —
+    /// copied through 1:1 when a `ToolCall` becomes a `ContentPart::ToolUse` on
+    /// history persistence (`src/agent/loop_.rs`). Data, never instructions.
+    #[serde(default)]
+    pub extra: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,11 +99,41 @@ pub struct LlmResponse {
     pub usage: TokenUsage,
 }
 
+/// How a provider call should resolve tool selection (D-01/D-09 unification).
+///
+/// `Forced(String)` carries the target tool/capability name — either a real MCP tool
+/// name or the sentinel `"__structured_output"` (Plan 08-03's forced-tool-call helper
+/// for providers that don't support `response_format` natively, see
+/// `Provider::supports_json_schema`). This is pure request-shaping data: it carries no
+/// capability-registry lookup or invocation logic itself (that dispatch lives in the
+/// provider `complete()` impls and Plan 08-03).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolChoice {
+    /// Provider decides whether/which tool to call (today's implicit default).
+    Auto,
+    /// Provider must call some tool, but may choose which one.
+    Required,
+    /// Provider must call the named tool specifically.
+    Forced(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct CallConfig {
     pub system_prompt: String,
     pub max_tokens: u32,
     pub tools: Vec<serde_json::Value>,
+    /// JSON-schema payload for a structured-output request. `None` = no structured
+    /// output requested. Replaces the schema argument `complete_structured` used to
+    /// take positionally (D-01 unification, removed in Plan 08-09).
+    pub response_format: Option<serde_json::Value>,
+    /// Forces (or requires/leaves auto) tool selection for this call. `None` =
+    /// provider default/auto — unchanged behavior from today.
+    pub tool_choice: Option<ToolChoice>,
+    /// Per-call sampling temperature override. `None` = provider's own hardcoded
+    /// default (unchanged from today). `complete_structured`'s removed overrides all
+    /// took an explicit `temperature: f32` argument that must not silently vanish
+    /// once callers migrate to `CallConfig.temperature` (Plan 08-07).
+    pub temperature: Option<f32>,
 }
 
 impl Default for CallConfig {
@@ -101,6 +142,9 @@ impl Default for CallConfig {
             system_prompt: String::new(),
             max_tokens: 4096,
             tools: vec![],
+            response_format: None,
+            tool_choice: None,
+            temperature: None,
         }
     }
 }
@@ -189,5 +233,64 @@ mod tests {
         assert_eq!("assistant".parse::<Role>().unwrap(), Role::Assistant);
         assert_eq!(Role::Tool.to_string(), "tool");
         assert_eq!("system".parse::<Role>().unwrap(), Role::System);
+    }
+
+    #[test]
+    fn call_config_default_has_no_structured_output_request() {
+        let cfg = CallConfig::default();
+        assert_eq!(cfg.system_prompt, "");
+        assert_eq!(cfg.max_tokens, 4096);
+        assert!(cfg.tools.is_empty());
+        assert!(cfg.response_format.is_none());
+        assert!(cfg.tool_choice.is_none());
+        assert!(cfg.temperature.is_none());
+    }
+
+    #[test]
+    fn tool_use_extra_field_roundtrips_through_serde_when_none_and_some() {
+        let none_variant = ContentPart::ToolUse {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "/tmp/x"}),
+            extra: None,
+        };
+        let json = serde_json::to_value(&none_variant).unwrap();
+        let back: ContentPart = serde_json::from_value(json).unwrap();
+        match back {
+            ContentPart::ToolUse { extra, .. } => assert_eq!(extra, None),
+            _ => panic!("expected ToolUse"),
+        }
+
+        let some_variant = ContentPart::ToolUse {
+            id: "call_2".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "/tmp/y"}),
+            extra: Some(serde_json::json!({"a": 1})),
+        };
+        let json = serde_json::to_value(&some_variant).unwrap();
+        let back: ContentPart = serde_json::from_value(json).unwrap();
+        match back {
+            ContentPart::ToolUse { extra, .. } => {
+                assert_eq!(extra, Some(serde_json::json!({"a": 1})))
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn tool_call_extra_defaults_to_none_when_absent_from_json() {
+        // #[serde(default)] must let older/other-provider payloads without an
+        // `extra` key deserialize without error.
+        let json = serde_json::json!({"id": "1", "name": "x", "arguments": {}});
+        let call: ToolCall = serde_json::from_value(json).unwrap();
+        assert_eq!(call.extra, None);
+    }
+
+    #[test]
+    fn tool_choice_forced_roundtrips_through_debug_and_clone() {
+        let choice = ToolChoice::Forced("__structured_output".into());
+        let cloned = choice.clone();
+        assert_eq!(choice, cloned);
+        assert_eq!(format!("{choice:?}"), "Forced(\"__structured_output\")");
     }
 }
