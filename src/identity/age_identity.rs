@@ -17,9 +17,9 @@ use crate::identity::AgentCard;
 use anyhow::Context;
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use std::fmt;
 
 /// Agent identity backed by an age X25519 keypair + Ed25519 signing key.
-#[derive(Debug)]
 pub struct AgeIdentity {
     /// Bech32-encoded age X25519 secret key (AGE-SECRET-KEY-1…).
     age_key_bech32: String,
@@ -27,6 +27,19 @@ pub struct AgeIdentity {
     signing_key: SigningKey,
     /// Corresponding Ed25519 verifying key.
     verifying_key: VerifyingKey,
+}
+
+/// 09-REVIEW.md WR-02: manual `Debug` so `{:?}`/`dbg!`/error-message formatting can
+/// never print the raw age secret key — `#[derive(Debug)]` would have contradicted
+/// this module's own "the age secret key is never logged" claim the moment any
+/// future call site did `tracing::debug!("{:?}", identity)` or similar.
+impl fmt::Debug for AgeIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgeIdentity")
+            .field("age_key_bech32", &"[redacted]")
+            .field("pubkey_ed25519", &self.pubkey_ed25519())
+            .finish()
+    }
 }
 
 impl AgeIdentity {
@@ -210,9 +223,12 @@ fn canonical_json_string(value: &serde_json::Value) -> String {
 
 /// Assemble the error message for public consumption.
 /// T-09-01-02: never log secret key bytes; only generic "identity error".
+///
+/// The detailed error goes to a `debug` span (not `warn`/`error`, so it's off by
+/// default) — the caller-facing message is always the generic string, in case a
+/// future error variant here ever carries secret material.
 #[inline]
-#[allow(dead_code)]
-pub(crate) fn sanitised_identity_error(detail: &str) -> String {
+pub fn sanitised_identity_error(detail: &str) -> String {
     tracing::debug!(event = "identity_error_detail", %detail);
     "Identity error".to_string()
 }

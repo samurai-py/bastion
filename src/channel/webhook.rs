@@ -599,6 +599,82 @@ async fn mesh_pair_handler(
                 }
             }
 
+            // WR-01: verify the peer actually controls the age/Ed25519 keypair it
+            // claims before trusting it — a valid OTC only proves the caller is the
+            // intended pairing target, not that `body.age_pubkey` is genuine. Fetch
+            // the peer's own signed Agent Card and check the signature + pubkey match
+            // BEFORE registering. Without this, signing an Agent Card is pure theater:
+            // nothing in the mesh trust flow ever verifies one.
+            {
+                let client = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .expect("failed to build reqwest client");
+                let card_url = format!("{}/agent-card", body.peer_url.trim_end_matches('/'));
+
+                let card: crate::identity::AgentCard = match client.get(&card_url).send().await {
+                    Ok(resp) => match resp.json().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(event = "mesh_pair_agent_card_parse_failed", url = %card_url, error = %e);
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer /agent-card returned an invalid Agent Card" }))).into_response();
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(event = "mesh_pair_agent_card_fetch_failed", url = %card_url, error = %e);
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(
+                                serde_json::json!({ "error": "could not fetch peer /agent-card" }),
+                            ),
+                        )
+                            .into_response();
+                    }
+                };
+
+                if card.pubkey_age != body.age_pubkey {
+                    tracing::warn!(event = "mesh_pair_agent_card_pubkey_mismatch", claimed = %body.age_pubkey, card = %card.pubkey_age);
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer /agent-card pubkey_age does not match the pairing request" }))).into_response();
+                }
+
+                let sig_b64 = match card.signature.as_deref() {
+                    Some(s) => s,
+                    None => {
+                        tracing::warn!(event = "mesh_pair_agent_card_unsigned", url = %card_url);
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": "peer /agent-card is unsigned" })),
+                        )
+                            .into_response();
+                    }
+                };
+                let sig_bytes = match base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(sig_b64)
+                {
+                    Ok(b) => b,
+                    Err(_) => {
+                        tracing::warn!(event = "mesh_pair_agent_card_bad_signature_encoding", url = %card_url);
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer /agent-card signature is not valid base64url" }))).into_response();
+                    }
+                };
+
+                match crate::identity::age_identity::AgeIdentity::verify_agent_card(
+                    &card, &sig_bytes,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(event = "mesh_pair_agent_card_signature_invalid", url = %card_url);
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer /agent-card signature is invalid" }))).into_response();
+                    }
+                    Err(e) => {
+                        tracing::warn!(event = "mesh_pair_agent_card_verify_error", url = %card_url, error = %e);
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer /agent-card could not be verified" }))).into_response();
+                    }
+                }
+
+                tracing::info!(event = "mesh_pair_agent_card_verified", url = %card_url);
+            }
+
             // Register peer in MeshPeerMap
             let peer = MeshPeer {
                 peer_url: body.peer_url.clone(),
@@ -659,16 +735,21 @@ async fn agent_card_handler(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let identity = state.agent_identity.as_ref().ok_or(StatusCode::NOT_FOUND)?;
 
-    let webhook_addr = std::env::var("BASTION_WEBHOOK_ADDR").unwrap_or_default();
-    let mesh_url = if webhook_addr.is_empty() {
+    // WR-07: BASTION_WEBHOOK_ADDR is a bind address (e.g. "0.0.0.0:8080") — not a
+    // scheme-qualified, externally-routable URL. Publishing it verbatim on a SIGNED
+    // Agent Card means any peer that trusted it would dial an address nobody can
+    // reach. BASTION_PUBLIC_URL is the operator-declared externally-reachable base
+    // (e.g. "https://bastion.example.com"), independent of the socket bind address.
+    let public_url = std::env::var("BASTION_PUBLIC_URL").unwrap_or_default();
+    let mesh_url = if public_url.is_empty() {
         None
     } else {
-        Some(webhook_addr.clone())
+        Some(public_url.clone())
     };
-    let mcp_url = if webhook_addr.is_empty() {
+    let mcp_url = if public_url.is_empty() {
         None
     } else {
-        Some(format!("{}/mcp", webhook_addr))
+        Some(format!("{}/mcp", public_url))
     };
 
     let mut card = crate::identity::AgentCard {

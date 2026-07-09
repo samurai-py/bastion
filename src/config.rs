@@ -142,6 +142,13 @@ pub struct McpServerTokenConfig {
     pub read_only: bool,
     /// Owner identity bound to this token.
     pub owner_id: String,
+    /// 09-REVIEW.md CR-03: opt this token into invoking capabilities that require
+    /// leaving the host (`CapabilityRegistry::invoke`'s `external` egress check).
+    /// Default `false` — tools invoked with this token get `PrivacyTier::LocalOnly`
+    /// (fail-closed: only capabilities with `is_local() == true` will run) unless the
+    /// operator explicitly sets this to `true`.
+    #[serde(default)]
+    pub cloud_ok: bool,
 }
 
 /// Config section for the MCP server (not the client — D-08).

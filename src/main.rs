@@ -179,7 +179,12 @@ async fn main() -> anyhow::Result<()> {
                     Some(Arc::new(id))
                 }
                 Err(e) => {
-                    tracing::warn!(event = "agent_identity_init_failed", error = %e);
+                    // WR-03: route through the sanitizer instead of logging `e` directly —
+                    // keeps the public-facing message generic even if a future error
+                    // variant here ever carries secret material.
+                    let sanitized =
+                        bastion::identity::age_identity::sanitised_identity_error(&e.to_string());
+                    tracing::warn!(event = "agent_identity_init_failed", error = %sanitized);
                     None
                 }
             }
@@ -272,6 +277,15 @@ async fn main() -> anyhow::Result<()> {
 
             let json = serde_json::to_string_pretty(&af)?;
             tokio::fs::write(&output, &json).await?;
+            // WR-04: --with-identity embeds the age + Ed25519 SECRET keys in plaintext —
+            // this file is the trust root for the entire mesh identity. Restrict to
+            // owner-read-write before anything else touches it; the process umask alone
+            // (commonly 0644) would leave it group/world-readable on a shared host.
+            #[cfg(unix)]
+            if with_identity {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600)).await?;
+            }
             tracing::info!(event = "export_complete", mode = %mode, output = %output);
             println!("Exported agent to {output}");
         }
@@ -355,10 +369,21 @@ async fn daemon_loop(
         let (events_tx, _) = tokio::sync::broadcast::channel::<String>(128);
         let peer_map_initial = bastion::config::load_mesh_peers(cfg);
         let mesh_peer_map = Arc::new(RwLock::new(peer_map_initial));
-        // WR-01: APP_JWT_SECRET must be set — no insecure fallback.
-        // serve_with_mesh will also fail-closed, but reading it here gives a clearer startup error.
-        let jwt_secret = std::env::var("APP_JWT_SECRET")
-            .unwrap_or_else(|_| "change-me-in-production".to_string()); // webhook channel enforces this
+        // WR-01/CR-04: APP_JWT_SECRET must be set — no insecure fallback. This is the
+        // actual `bastion daemon` startup path (serve_with_mesh performs no validation
+        // of its own); only `WebhookChannel::run`, which daemon_loop never calls, had
+        // the fail-closed check. Fail here instead of silently signing/verifying JWTs
+        // with a well-known default that anyone reading this public repo can use to
+        // impersonate any owner.
+        let jwt_secret = std::env::var("APP_JWT_SECRET").map_err(|_| {
+            tracing::error!(
+                event = "webhook_no_jwt_secret",
+                "APP_JWT_SECRET is not set — refusing to start"
+            );
+            anyhow::anyhow!(
+                "APP_JWT_SECRET must be set; refusing to start with a hardcoded default"
+            )
+        })?;
 
         // Phase 6 Wave 2: P2PTransport + MeshSliceProvider when MESH_IDENTITY_KEY is set.
         let (mesh_transport, mesh_slice_store) =
@@ -416,6 +441,16 @@ async fn daemon_loop(
             let local_owner = std::env::var("BASTION_OWNER_ID")
                 .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
             let token_perms = build_token_perms(cfg);
+            // WR-06: after CR-01's fail-closed auth fix, an empty token map means the
+            // server is enabled but permanently unreachable (no token can ever match) —
+            // the safe direction, but still a likely operator mistake worth surfacing
+            // instead of a silent "MCP server doesn't work" support report.
+            if token_perms.is_empty() {
+                tracing::warn!(
+                    event = "mcp_server_no_tokens_configured",
+                    "mcp_server.enabled=true but [mcp_server.tokens] is empty — no client can authenticate"
+                );
+            }
             let router = bastion::mcp::server::build_mcp_axum_router(
                 cap_registry,
                 mem,
@@ -758,6 +793,11 @@ fn build_token_perms(
                 bastion::mcp::server::TokenPermissions {
                     read_only: t.read_only,
                     owner_id: t.owner_id.clone(),
+                    privacy_tier: if t.cloud_ok {
+                        bastion::memory::PrivacyTier::CloudOk
+                    } else {
+                        bastion::memory::PrivacyTier::LocalOnly
+                    },
                 },
             )
         })
