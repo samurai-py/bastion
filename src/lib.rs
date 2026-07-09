@@ -7,6 +7,7 @@ pub mod config;
 pub mod goal;
 pub mod hooks;
 pub mod identity;
+pub mod interop;
 pub mod mcp;
 pub mod memory;
 pub mod mesh;

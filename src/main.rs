@@ -71,6 +71,23 @@ enum Command {
     /// Start MCP server over stdio (local subprocess transport).
     /// Used by local agents that control lifecycle (Claude Code, opencode, etc.).
     McpStdio,
+    /// Export agent identity, memories, goals, personas, and config to .af file
+    Export {
+        /// Export mode: full or template
+        #[arg(long, default_value = "full")]
+        mode: String,
+        /// Include identity secrets in full exports
+        #[arg(long)]
+        with_identity: bool,
+        /// Output path for the .af file
+        #[arg(short = 'o', long)]
+        output: String,
+    },
+    /// Import agent identity, memories, goals from .af file
+    Import {
+        /// Input path to the .af file (omit for stdin)
+        input: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -154,6 +171,23 @@ async fn main() -> anyhow::Result<()> {
         });
     opentelemetry::global::set_tracer_provider(_otel_provider.clone());
 
+    let agent_identity: Option<Arc<bastion::identity::age_identity::AgeIdentity>> =
+        if let Ok(identity_key) = std::env::var("MESH_IDENTITY_KEY") {
+            match bastion::identity::age_identity::AgeIdentity::from_bech32(&identity_key) {
+                Ok(id) => {
+                    tracing::info!(event = "agent_identity_enabled");
+                    Some(Arc::new(id))
+                }
+                Err(e) => {
+                    tracing::warn!(event = "agent_identity_init_failed", error = %e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!(event = "agent_identity_disabled");
+            None
+        };
+
     let mut agent = AgentLoop::new(
         provider.clone(),
         session,
@@ -171,7 +205,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", response);
         }
         Command::Daemon => {
-            daemon_loop(&mut agent, &cfg).await?;
+            daemon_loop(&mut agent, &cfg, agent_identity).await?;
         }
         Command::McpStdio => {
             use rmcp::ServiceExt;
@@ -199,6 +233,78 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("MCP stdio server terminated: {}", e))?;
         }
+        Command::Export {
+            mode,
+            with_identity,
+            output,
+        } => {
+            let owner_id = std::env::var("BASTION_OWNER_ID")
+                .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+
+            let af = match mode.as_str() {
+                "full" => {
+                    let identity = if with_identity {
+                        agent_identity.as_deref()
+                    } else {
+                        None
+                    };
+                    bastion::interop::export::export_full(
+                        &memory,
+                        &agent.registry,
+                        &agent.goals,
+                        &cfg,
+                        identity,
+                        &owner_id,
+                    )
+                    .await?
+                }
+                "template" => {
+                    if with_identity {
+                        anyhow::bail!("--with-identity is only valid with --mode full");
+                    }
+                    bastion::interop::export::export_template(&agent.registry, &cfg).await?
+                }
+                other => {
+                    anyhow::bail!("Invalid export mode '{}'. Use 'full' or 'template'.", other)
+                }
+            };
+
+            let json = serde_json::to_string_pretty(&af)?;
+            tokio::fs::write(&output, &json).await?;
+            tracing::info!(event = "export_complete", mode = %mode, output = %output);
+            println!("Exported agent to {output}");
+        }
+        Command::Import { input } => {
+            let owner_id = std::env::var("BASTION_OWNER_ID")
+                .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+
+            let json = match input {
+                Some(path) => tokio::fs::read_to_string(&path).await?,
+                None => {
+                    // Read from stdin
+                    let mut buf = String::new();
+                    use std::io::Read;
+                    std::io::stdin().read_to_string(&mut buf)?;
+                    buf
+                }
+            };
+            let af: bastion::interop::AgentFile = serde_json::from_str(&json)?;
+            let restored = bastion::interop::import::import(
+                af,
+                &memory,
+                &agent.registry,
+                &agent.goals,
+                &owner_id,
+            )
+            .await?;
+            if let Some(id) = restored {
+                let age_secret = id.age_secret_bech32();
+                println!("Import complete. Identity restored.");
+                println!("Set MESH_IDENTITY_KEY={age_secret} for mesh use.");
+            } else {
+                println!("Import complete (no identity in file).");
+            }
+        }
     }
 
     // SEAM #4: flush e shutdown do OTel para não perder spans buffered.
@@ -215,6 +321,7 @@ async fn main() -> anyhow::Result<()> {
 async fn daemon_loop(
     agent: &mut AgentLoop,
     cfg: &bastion::config::BastionConfig,
+    agent_identity: Option<Arc<bastion::identity::age_identity::AgeIdentity>>,
 ) -> anyhow::Result<()> {
     use bastion::agent::command::CommandResult;
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -294,25 +401,7 @@ async fn daemon_loop(
                 (None, None)
             };
 
-        // SEC-06: initialize agent identity from MESH_IDENTITY_KEY.
-        let agent_identity = if let Ok(identity_key) = std::env::var("MESH_IDENTITY_KEY") {
-            match bastion::identity::age_identity::AgeIdentity::from_bech32(&identity_key) {
-                Ok(id) => {
-                    tracing::info!(event = "agent_identity_enabled");
-                    Some(std::sync::Arc::new(id))
-                }
-                Err(e) => {
-                    tracing::warn!(event = "agent_identity_init_failed", error = %e);
-                    None
-                }
-            }
-        } else {
-            tracing::info!(
-                event = "agent_identity_disabled",
-                "MESH_IDENTITY_KEY not set"
-            );
-            None
-        };
+        // agent_identity was already loaded above (line ~170) — reuse outer scope.
         let agent_name =
             std::env::var("BASTION_AGENT_NAME").unwrap_or_else(|_| "bastion".to_string());
 

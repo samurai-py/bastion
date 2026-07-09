@@ -19,6 +19,7 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 /// Agent identity backed by an age X25519 keypair + Ed25519 signing key.
+#[derive(Debug)]
 pub struct AgeIdentity {
     /// Bech32-encoded age X25519 secret key (AGE-SECRET-KEY-1…).
     age_key_bech32: String,
@@ -66,18 +67,25 @@ impl AgeIdentity {
 
     /// Generate a fresh age keypair + Ed25519 keypair.
     ///
-    /// The Ed25519 key is generated independently (not from the age key) when
-    /// using this constructor.  Use [`from_bech32`](Self::from_bech32) when
-    /// restoring a persisted identity.
+    /// The Ed25519 key is deterministically derived from the age key via SHA-256,
+    /// matching [`from_bech32`](Self::from_bech32) — so a persisted identity can
+    /// be fully restored from the age secret alone.
     pub fn generate() -> Self {
         use age::secrecy::ExposeSecret;
-        use rand::rngs::OsRng;
 
         let age_identity = age::x25519::Identity::generate();
         let age_key = age_identity.to_string().expose_secret().to_owned();
 
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
+        // Derive Ed25519 from the age key, matching from_bech32's derivation
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"bastion-agent-card-ed25519");
+        hasher.update(age_key.as_bytes());
+        let hash = hasher.finalize();
+
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&hash);
+        let signing_key = SigningKey::from_bytes(&seed);
         let verifying_key = signing_key.verifying_key();
 
         Self {
@@ -85,6 +93,19 @@ impl AgeIdentity {
             signing_key,
             verifying_key,
         }
+    }
+
+    /// Return age secret key in bech32 format (AGE-SECRET-KEY-...).
+    /// SECURITY: only call during --with-identity export; never log.
+    pub fn age_secret_bech32(&self) -> &str {
+        &self.age_key_bech32
+    }
+
+    /// Return Ed25519 secret key as base64url-encoded bytes (no padding).
+    /// SECURITY: only call during --with-identity export; never log.
+    pub fn ed25519_secret_base64(&self) -> String {
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        engine.encode(self.signing_key.to_bytes())
     }
 
     /// Return the age X25519 public key in bech32 format.

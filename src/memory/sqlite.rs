@@ -164,6 +164,41 @@ impl Memory for SqliteMemory {
         .await?
     }
 
+    async fn retrieve_all_beliefs(&self, owner_id: &str) -> anyhow::Result<Vec<Belief>> {
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let mut stmt = conn.prepare(
+                "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier \
+                 FROM beliefs \
+                 WHERE owner_id = ?1 AND revoked = 0 AND weight > 0",
+            )?;
+            let beliefs = stmt
+                .query_map(rusqlite::params![owner_id], |row| {
+                    let tier_str: Option<String> = row.get(6)?;
+                    let tier = tier_str.as_deref().and_then(|s| match s {
+                        "cloud-ok" => Some(PrivacyTier::CloudOk),
+                        "local-only" => Some(PrivacyTier::LocalOnly),
+                        _ => None,
+                    });
+                    Ok(Belief {
+                        id: row.get(0)?,
+                        owner_id: row.get(1)?,
+                        persona_tag: row.get(2)?,
+                        content: row.get(3)?,
+                        weight: row.get(4)?,
+                        is_core: row.get::<_, i32>(5)? != 0,
+                        tier,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<Vec<Belief>, anyhow::Error>(beliefs)
+        })
+        .await?
+    }
+
     async fn provenance_for(
         &self,
         owner_id: &str,

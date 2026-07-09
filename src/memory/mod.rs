@@ -63,6 +63,9 @@ pub trait Memory: Send + Sync {
     /// Load frozen-core beliefs (is_core=1, revoked=0) once at session start.
     async fn load_core(&self, owner_id: &str) -> anyhow::Result<Vec<Belief>>;
 
+    /// Retrieve ALL non-revoked beliefs for an owner (regardless of persona_tag), for .af export.
+    async fn retrieve_all_beliefs(&self, owner_id: &str) -> anyhow::Result<Vec<Belief>>;
+
     /// Return (session_id, source) provenance rows for a belief.
     /// Owner-scoped (IDOR guard): provenance is only returned when the belief is
     /// owned by `owner_id`; cross-owner probes get an empty vec (indistinguishable
