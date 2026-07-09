@@ -5,6 +5,7 @@
 //!
 //! Secrets (API keys, tokens) NEVER appear in bastion.toml — they come from .env only.
 
+use crate::channel::OwnerMap;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -136,15 +137,15 @@ pub struct IdentityConfig {
     pub identity: Vec<IdentityEntry>,
 }
 
+/// Column-extractor function pointer type, factored out to satisfy
+/// `clippy::type_complexity` on the `columns` array below.
+type IdentityColumnExtractor = fn(&IdentityEntry) -> &Option<String>;
+
 /// Fail loud (T-10-02-01) on any misconfiguration that would create an ambiguous
 /// owner mapping: an empty `owner_id`, or a channel-identifier value repeated
 /// across two or more `[[identity]]` rows. Two rows both OMITTING the same column
 /// (both `None`) is NOT a collision — only `Some(x) == Some(x)` across DIFFERENT
 /// rows is ambiguous.
-/// Column-extractor function pointer type, factored out to satisfy
-/// `clippy::type_complexity` on the `columns` array below.
-type IdentityColumnExtractor = fn(&IdentityEntry) -> &Option<String>;
-
 fn validate_identity_table(cfg: &IdentityConfig) -> anyhow::Result<()> {
     for entry in &cfg.identity {
         if entry.owner_id.is_empty() {
@@ -178,6 +179,91 @@ fn validate_identity_table(cfg: &IdentityConfig) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Project the `telegram_chat_id` column of the identity table into the plain
+/// `OwnerMap` shape `telegram.rs` already consumes — telegram.rs is NOT modified.
+pub fn owner_map_for_telegram(cfg: &IdentityConfig) -> OwnerMap {
+    OwnerMap(
+        cfg.identity
+            .iter()
+            .filter_map(|e| {
+                e.telegram_chat_id
+                    .as_ref()
+                    .map(|id| (id.clone(), e.owner_id.clone()))
+            })
+            .collect(),
+    )
+}
+
+/// Project the `webhook_token` column into an `OwnerMap` — webhook.rs unchanged.
+pub fn owner_map_for_webhook(cfg: &IdentityConfig) -> OwnerMap {
+    OwnerMap(
+        cfg.identity
+            .iter()
+            .filter_map(|e| {
+                e.webhook_token
+                    .as_ref()
+                    .map(|id| (id.clone(), e.owner_id.clone()))
+            })
+            .collect(),
+    )
+}
+
+/// Project the `whatsapp_phone` column into an `OwnerMap` (CHAN-01).
+pub fn owner_map_for_whatsapp(cfg: &IdentityConfig) -> OwnerMap {
+    OwnerMap(
+        cfg.identity
+            .iter()
+            .filter_map(|e| {
+                e.whatsapp_phone
+                    .as_ref()
+                    .map(|id| (id.clone(), e.owner_id.clone()))
+            })
+            .collect(),
+    )
+}
+
+/// Project the `discord_user_id` column into an `OwnerMap` (CHAN-03).
+pub fn owner_map_for_discord(cfg: &IdentityConfig) -> OwnerMap {
+    OwnerMap(
+        cfg.identity
+            .iter()
+            .filter_map(|e| {
+                e.discord_user_id
+                    .as_ref()
+                    .map(|id| (id.clone(), e.owner_id.clone()))
+            })
+            .collect(),
+    )
+}
+
+/// Project the `slack_user_id` column into an `OwnerMap` (CHAN-03).
+pub fn owner_map_for_slack(cfg: &IdentityConfig) -> OwnerMap {
+    OwnerMap(
+        cfg.identity
+            .iter()
+            .filter_map(|e| {
+                e.slack_user_id
+                    .as_ref()
+                    .map(|id| (id.clone(), e.owner_id.clone()))
+            })
+            .collect(),
+    )
+}
+
+/// Project the `email_address` column into an `OwnerMap` (CHAN-03).
+pub fn owner_map_for_email(cfg: &IdentityConfig) -> OwnerMap {
+    OwnerMap(
+        cfg.identity
+            .iter()
+            .filter_map(|e| {
+                e.email_address
+                    .as_ref()
+                    .map(|id| (id.clone(), e.owner_id.clone()))
+            })
+            .collect(),
+    )
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -643,5 +729,100 @@ telegram_chat_id = "222"
             "two rows both omitting discord_user_id must not collide: {:?}",
             result.err()
         );
+    }
+
+    // ── CHAN-02/D-05 owner_map_for_* projection tests ────────────────────────
+
+    fn two_entries_one_with(field_setter: impl Fn(&mut IdentityEntry)) -> IdentityConfig {
+        let mut with_value = IdentityEntry {
+            owner_id: "alice".to_string(),
+            telegram_chat_id: None,
+            webhook_token: None,
+            whatsapp_phone: None,
+            discord_user_id: None,
+            slack_user_id: None,
+            email_address: None,
+        };
+        field_setter(&mut with_value);
+        let without_value = IdentityEntry {
+            owner_id: "bob".to_string(),
+            telegram_chat_id: None,
+            webhook_token: None,
+            whatsapp_phone: None,
+            discord_user_id: None,
+            slack_user_id: None,
+            email_address: None,
+        };
+        IdentityConfig {
+            identity: vec![with_value, without_value],
+        }
+    }
+
+    /// Test 1: owner_map_for_telegram — 2 entries (one Some, one None), resolves
+    /// the Some row's identifier and produces exactly 1 inner map entry.
+    #[test]
+    fn test_owner_map_for_telegram() {
+        let cfg = two_entries_one_with(|e| e.telegram_chat_id = Some("42".to_string()));
+        let map = owner_map_for_telegram(&cfg);
+        assert_eq!(map.resolve("42"), Some("alice"));
+        assert_eq!(map.0.len(), 1);
+    }
+
+    /// Test 2: owner_map_for_whatsapp keyed on whatsapp_phone.
+    #[test]
+    fn test_owner_map_for_whatsapp() {
+        let cfg = two_entries_one_with(|e| e.whatsapp_phone = Some("+5511900000000".to_string()));
+        let map = owner_map_for_whatsapp(&cfg);
+        assert_eq!(map.resolve("+5511900000000"), Some("alice"));
+        assert_eq!(map.0.len(), 1);
+    }
+
+    /// Test 3: owner_map_for_discord keyed on discord_user_id.
+    #[test]
+    fn test_owner_map_for_discord() {
+        let cfg = two_entries_one_with(|e| e.discord_user_id = Some("111222333".to_string()));
+        let map = owner_map_for_discord(&cfg);
+        assert_eq!(map.resolve("111222333"), Some("alice"));
+        assert_eq!(map.0.len(), 1);
+    }
+
+    /// Test 4: owner_map_for_slack keyed on slack_user_id.
+    #[test]
+    fn test_owner_map_for_slack() {
+        let cfg = two_entries_one_with(|e| e.slack_user_id = Some("U01ABCDEF".to_string()));
+        let map = owner_map_for_slack(&cfg);
+        assert_eq!(map.resolve("U01ABCDEF"), Some("alice"));
+        assert_eq!(map.0.len(), 1);
+    }
+
+    /// Test 5: owner_map_for_email keyed on email_address.
+    #[test]
+    fn test_owner_map_for_email() {
+        let cfg = two_entries_one_with(|e| e.email_address = Some("alice@example.com".to_string()));
+        let map = owner_map_for_email(&cfg);
+        assert_eq!(map.resolve("alice@example.com"), Some("alice"));
+        assert_eq!(map.0.len(), 1);
+    }
+
+    /// Test 6: owner_map_for_webhook keyed on webhook_token.
+    #[test]
+    fn test_owner_map_for_webhook() {
+        let cfg = two_entries_one_with(|e| e.webhook_token = Some("token-alice".to_string()));
+        let map = owner_map_for_webhook(&cfg);
+        assert_eq!(map.resolve("token-alice"), Some("alice"));
+        assert_eq!(map.0.len(), 1);
+    }
+
+    /// Test 7: an empty IdentityConfig produces an empty OwnerMap from every
+    /// projection function.
+    #[test]
+    fn test_owner_map_for_all_channels_empty_identity_config() {
+        let cfg = IdentityConfig { identity: vec![] };
+        assert_eq!(owner_map_for_telegram(&cfg).resolve("anything"), None);
+        assert_eq!(owner_map_for_webhook(&cfg).resolve("anything"), None);
+        assert_eq!(owner_map_for_whatsapp(&cfg).resolve("anything"), None);
+        assert_eq!(owner_map_for_discord(&cfg).resolve("anything"), None);
+        assert_eq!(owner_map_for_slack(&cfg).resolve("anything"), None);
+        assert_eq!(owner_map_for_email(&cfg).resolve("anything"), None);
     }
 }
