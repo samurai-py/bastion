@@ -173,10 +173,16 @@ fn make_test_config() -> BastionConfig {
         channels: ChannelsConfig {
             telegram: ChannelConfig { enabled: false },
             webhook: ChannelConfig { enabled: false },
+            whatsapp: None,
+            discord: None,
+            slack: None,
+            email: None,
+            voice: VoiceChannelConfig::default(),
         },
         mesh: MeshConfig::default(),
         mcp_server: McpServerConfig::default(),
         reflector: ReflectorConfig::default(),
+        identity: IdentityConfig::default(),
     }
 }
 

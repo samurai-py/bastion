@@ -94,6 +94,90 @@ pub struct BastionConfig {
     pub mesh: MeshConfig,
     #[serde(default)]
     pub reflector: ReflectorConfig,
+    /// CHAN-02/D-05: unified owner-identity table — resolves one canonical owner_id
+    /// from any of 6 channel-specific identifiers. Replaces scattered per-channel
+    /// env-var parsing (BASTION_TELEGRAM_OWNERS, BASTION_WEBHOOK_OWNERS) as the
+    /// source of truth for OwnerMap construction (see `owner_map_for_*` below).
+    #[serde(default)]
+    pub identity: IdentityConfig,
+}
+
+/// Single `[[identity]]` entry from bastion.toml — one row per human owner.
+///
+/// Mirrors `MeshPeerConfig`'s array-of-tables shape. One optional column per
+/// supported channel identifier; `owner_id` is the only required field.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct IdentityEntry {
+    pub owner_id: String,
+    #[serde(default)]
+    pub telegram_chat_id: Option<String>,
+    #[serde(default)]
+    pub webhook_token: Option<String>,
+    #[serde(default)]
+    pub whatsapp_phone: Option<String>,
+    #[serde(default)]
+    pub discord_user_id: Option<String>,
+    #[serde(default)]
+    pub slack_user_id: Option<String>,
+    #[serde(default)]
+    pub email_address: Option<String>,
+}
+
+/// Config section holding the full `[[identity]]` array-of-tables (CHAN-02/D-05).
+///
+/// `#[serde(transparent)]`: this single-field wrapper deserializes directly from
+/// the bare TOML array `[[identity]]` (a sequence) rather than requiring the
+/// redundant nested `[[identity.identity]]` shape — the wrapper only exists so
+/// `owner_map_for_*` functions take a named `&IdentityConfig` type (matching
+/// 10-RESEARCH.md Pattern 2), not to introduce an extra TOML nesting level.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct IdentityConfig {
+    pub identity: Vec<IdentityEntry>,
+}
+
+/// Fail loud (T-10-02-01) on any misconfiguration that would create an ambiguous
+/// owner mapping: an empty `owner_id`, or a channel-identifier value repeated
+/// across two or more `[[identity]]` rows. Two rows both OMITTING the same column
+/// (both `None`) is NOT a collision — only `Some(x) == Some(x)` across DIFFERENT
+/// rows is ambiguous.
+/// Column-extractor function pointer type, factored out to satisfy
+/// `clippy::type_complexity` on the `columns` array below.
+type IdentityColumnExtractor = fn(&IdentityEntry) -> &Option<String>;
+
+fn validate_identity_table(cfg: &IdentityConfig) -> anyhow::Result<()> {
+    for entry in &cfg.identity {
+        if entry.owner_id.is_empty() {
+            anyhow::bail!("identity table validation failed: empty owner_id in [[identity]] entry");
+        }
+    }
+
+    // (column name, extractor) pairs — checked independently, first duplicate wins.
+    let columns: [(&str, IdentityColumnExtractor); 6] = [
+        ("telegram_chat_id", |e| &e.telegram_chat_id),
+        ("webhook_token", |e| &e.webhook_token),
+        ("whatsapp_phone", |e| &e.whatsapp_phone),
+        ("discord_user_id", |e| &e.discord_user_id),
+        ("slack_user_id", |e| &e.slack_user_id),
+        ("email_address", |e| &e.email_address),
+    ];
+
+    for (column_name, extract) in columns {
+        let mut seen = std::collections::HashSet::new();
+        for entry in &cfg.identity {
+            if let Some(value) = extract(entry) {
+                if !seen.insert(value.clone()) {
+                    anyhow::bail!(
+                        "identity table validation failed: duplicate {} value '{}' across [[identity]] rows",
+                        column_name,
+                        value
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -173,11 +257,42 @@ fn default_mcp_server_path() -> String {
 pub struct ChannelsConfig {
     pub telegram: ChannelConfig,
     pub webhook: ChannelConfig,
+    /// CHAN-01/CHAN-03: new channel sections are optional — absent from bastion.toml
+    /// today, `#[serde(default)]` keeps existing deployments parsing unchanged.
+    #[serde(default)]
+    pub whatsapp: Option<ChannelConfig>,
+    #[serde(default)]
+    pub discord: Option<ChannelConfig>,
+    #[serde(default)]
+    pub slack: Option<ChannelConfig>,
+    #[serde(default)]
+    pub email: Option<ChannelConfig>,
+    /// VOICE-01: voice needs extra fields (wake-word opt-in, voice id) beyond the
+    /// plain enabled toggle, so it gets a dedicated struct instead of `ChannelConfig`.
+    #[serde(default)]
+    pub voice: VoiceChannelConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChannelConfig {
     pub enabled: bool,
+}
+
+/// VOICE-01 config section: local voice channel (push-to-talk default, D-10).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VoiceChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// D-10: wake-word ("modo aberto") is opt-in — off by default (push-to-talk only).
+    #[serde(default)]
+    pub wake_word_enabled: bool,
+    /// Kokoro voice id. Default `pf_dora` — confirmed pt-BR voice (10-RESEARCH.md).
+    #[serde(default = "default_voice_id")]
+    pub voice: String,
+}
+
+fn default_voice_id() -> String {
+    "pf_dora".to_string()
 }
 
 /// Load [[mesh.peer]] entries from bastion.toml into a MeshPeerMap.
@@ -299,7 +414,10 @@ pub fn load_config(path: &str) -> anyhow::Result<BastionConfig> {
         .add_source(config::File::with_name(path))
         .add_source(config::Environment::with_prefix("BASTION").separator("__"))
         .build()?;
-    Ok(cfg.try_deserialize()?)
+    let cfg: BastionConfig = cfg.try_deserialize()?;
+    // T-10-02-01: fail loud on ambiguous identity mapping before the daemon can start.
+    validate_identity_table(&cfg.identity)?;
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -375,5 +493,155 @@ mod tests {
     async fn test_validate_age_pubkey_rejects_uppercase() {
         let result = validate_age_pubkey("AGE1UPPERCASE");
         assert!(result.is_err(), "uppercase age_pubkey must be rejected");
+    }
+
+    // ── CHAN-02/D-05 identity table validation tests ─────────────────────────
+
+    /// Minimal valid bastion.toml required-sections boilerplate, with `{extra}`
+    /// substituted in for the `[[identity]]` rows under test.
+    fn minimal_toml_with_identity(extra: &str) -> String {
+        format!(
+            r#"
+[agent]
+default_model = "test-model"
+daily_budget_usd = 1.0
+
+[session]
+db_path = "/tmp/test-sessions.db"
+autocompact_threshold = 0.8
+keep_last_n = 20
+
+[logging]
+log_path = "/tmp/test.log"
+
+[mcp]
+tool_call_timeout_secs = 30
+
+[channels.telegram]
+enabled = true
+
+[channels.webhook]
+enabled = false
+
+{extra}
+"#,
+            extra = extra
+        )
+    }
+
+    /// Write `contents` to a fresh temp file and return its path (kept alive by the
+    /// returned `NamedTempFile` guard — caller must hold it for the test's duration).
+    /// `config::File::with_name` appends its own extension resolution, so we write a
+    /// `.toml` file and pass the path WITHOUT the extension, matching `load_config`'s
+    /// existing convention (`load_config("bastion.toml")` in the test above resolves
+    /// via a bare filename too — but config-rs also accepts an explicit full path
+    /// with extension). We pass the full path with `.toml` extension directly.
+    fn write_temp_toml(contents: &str) -> tempfile::TempPath {
+        use std::io::Write;
+        let mut file = tempfile::Builder::new()
+            .suffix(".toml")
+            .tempfile()
+            .expect("failed to create temp file");
+        file.write_all(contents.as_bytes())
+            .expect("failed to write temp toml");
+        file.into_temp_path()
+    }
+
+    /// Test 1: duplicate `telegram_chat_id` across two `[[identity]]` rows fails.
+    #[test]
+    fn test_validate_identity_table_rejects_duplicate_telegram_chat_id() {
+        let toml = minimal_toml_with_identity(
+            r#"
+[[identity]]
+owner_id = "alice"
+telegram_chat_id = "111"
+
+[[identity]]
+owner_id = "bob"
+telegram_chat_id = "111"
+"#,
+        );
+        let path = write_temp_toml(&toml);
+        let path_str = path.to_str().unwrap().to_string();
+        let result = load_config(&path_str);
+        assert!(
+            result.is_err(),
+            "duplicate telegram_chat_id must fail load_config"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("duplicate"),
+            "error must mention 'duplicate': {msg}"
+        );
+    }
+
+    /// Test 2: empty `owner_id` in an `[[identity]]` row fails.
+    #[test]
+    fn test_validate_identity_table_rejects_empty_owner_id() {
+        let toml = minimal_toml_with_identity(
+            r#"
+[[identity]]
+owner_id = ""
+telegram_chat_id = "111"
+"#,
+        );
+        let path = write_temp_toml(&toml);
+        let path_str = path.to_str().unwrap().to_string();
+        let result = load_config(&path_str);
+        assert!(result.is_err(), "empty owner_id must fail load_config");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("empty owner_id"),
+            "error must mention 'empty owner_id': {msg}"
+        );
+    }
+
+    /// Test 3: N distinct rows (including columns entirely absent) load fine.
+    #[test]
+    fn test_validate_identity_table_accepts_distinct_entries() {
+        let toml = minimal_toml_with_identity(
+            r#"
+[[identity]]
+owner_id = "alice"
+telegram_chat_id = "111"
+whatsapp_phone = "+5511900000001"
+
+[[identity]]
+owner_id = "bob"
+discord_user_id = "222"
+
+[[identity]]
+owner_id = "carol"
+"#,
+        );
+        let path = write_temp_toml(&toml);
+        let path_str = path.to_str().unwrap().to_string();
+        let cfg = load_config(&path_str).expect("distinct identity rows must load");
+        assert_eq!(cfg.identity.identity.len(), 3);
+    }
+
+    /// Test 4: two rows both omitting `discord_user_id` (both `None`) is NOT a
+    /// duplicate — only `Some(x) == Some(x)` across DIFFERENT rows is ambiguous.
+    #[test]
+    fn test_validate_identity_table_absent_column_is_not_a_collision() {
+        let toml = minimal_toml_with_identity(
+            r#"
+[[identity]]
+owner_id = "alice"
+telegram_chat_id = "111"
+
+[[identity]]
+owner_id = "bob"
+telegram_chat_id = "222"
+"#,
+        );
+        let path = write_temp_toml(&toml);
+        let path_str = path.to_str().unwrap().to_string();
+        let result = load_config(&path_str);
+        assert!(
+            result.is_ok(),
+            "two rows both omitting discord_user_id must not collide: {:?}",
+            result.err()
+        );
     }
 }

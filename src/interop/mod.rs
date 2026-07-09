@@ -211,10 +211,16 @@ mod tests {
             channels: crate::config::ChannelsConfig {
                 telegram: ChannelConfig { enabled: false },
                 webhook: ChannelConfig { enabled: false },
+                whatsapp: None,
+                discord: None,
+                slack: None,
+                email: None,
+                voice: crate::config::VoiceChannelConfig::default(),
             },
             mesh: crate::config::MeshConfig::default(),
             mcp_server: crate::config::McpServerConfig::default(),
             reflector: crate::config::ReflectorConfig::default(),
+            identity: crate::config::IdentityConfig::default(),
         };
 
         // --- Export ---
