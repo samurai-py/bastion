@@ -555,6 +555,12 @@ async fn mesh_pair_handler(
             }
 
             // SEC-02: validate peer_url before registering — prevent SSRF to loopback/RFC1918/link-local.
+            // The validated address is captured (`pinned_addr`) and reused below to build the
+            // WR-01 fetch client — resolving DNS a second time at request time would reopen
+            // exactly the SSRF window this block closes (DNS rebinding: the attacker's
+            // nameserver answers a public IP here, then a private one on the real connect).
+            let pinned_addr: std::net::SocketAddr;
+            let host: String;
             {
                 use url::Url;
                 let parsed = Url::parse(&body.peer_url).ok().and_then(|u| {
@@ -572,9 +578,10 @@ async fn mesh_pair_handler(
                     }
                 };
                 // DNS-resolve and reject private/loopback/link-local addresses
-                let host = parsed.host_str().unwrap_or("").to_string();
+                host = parsed.host_str().unwrap_or("").to_string();
                 match tokio::net::lookup_host(format!("{}:443", host)).await {
                     Ok(addrs) => {
+                        let mut chosen: Option<std::net::SocketAddr> = None;
                         for addr in addrs {
                             let ip = addr.ip();
                             if is_private_ip(ip) {
@@ -585,7 +592,17 @@ async fn mesh_pair_handler(
                                 );
                                 return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer_url resolves to a private/loopback address" }))).into_response();
                             }
+                            if chosen.is_none() {
+                                chosen = Some(addr);
+                            }
                         }
+                        pinned_addr = match chosen {
+                            Some(a) => a,
+                            None => {
+                                tracing::warn!(event = "mesh_pair_dns_empty", url = %body.peer_url);
+                                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "peer_url DNS resolution returned no addresses" }))).into_response();
+                            }
+                        };
                     }
                     Err(e) => {
                         // DNS failure — reject (fail-closed; attacker might be testing internal names)
@@ -606,8 +623,12 @@ async fn mesh_pair_handler(
             // BEFORE registering. Without this, signing an Agent Card is pure theater:
             // nothing in the mesh trust flow ever verifies one.
             {
+                // Pin the hostname to the exact address SEC-02 just validated — prevents
+                // a DNS-rebinding SSRF where a second, independent resolution at connect
+                // time returns a private/internal address instead.
                 let client = reqwest::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
+                    .resolve(&host, pinned_addr)
                     .build()
                     .expect("failed to build reqwest client");
                 let card_url = format!("{}/agent-card", body.peer_url.trim_end_matches('/'));
