@@ -3,6 +3,11 @@ use std::collections::HashMap;
 
 pub mod telegram;
 pub mod webhook;
+pub mod whatsapp;
+pub mod discord;
+pub mod slack;
+pub mod email;
+pub mod voice;
 
 /// Per-channel configuration (CHAN-04).
 pub struct ChannelConfig {
