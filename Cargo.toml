@@ -74,6 +74,20 @@ unicode-width = "0.2.2"
 # 07-04: src/eval/verifier.rs constructs a scratch SqliteMemory at RUNTIME (the
 # Reflector's merge gate, 07-05) — tempfile is no longer test-only.
 tempfile     = "3"
+# Phase 10 — channel transports (plan 10-01): Discord/Slack/Email/Voice deps.
+serenity       = { version = "0.12.5", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "cache"] }
+# NOTE (10-RESEARCH.md A3): "socket-mode" is not a real feature flag on this
+# crate (verified via crates.io Cargo.toml — features are default/signature-verifier/
+# hyper-base/axum-base/rustls-native-certs/hyper/axum). Socket Mode itself has no
+# gate; it needs an HTTP client feature to build SlackHyperClient. "hyper" is what
+# the crate's own `examples/socket_mode.rs` uses (SlackHyperClient) — use that.
+slack-morphism = { version = "2.22.0", features = ["hyper"] }
+lettre         = { version = "0.11.22", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+async-imap     = "0.11.2"
+hmac           = "0.12"
+cpal           = "0.18.1"
+hound          = "3.5.1"
+mailparse      = "0.16.1"
 
 [dev-dependencies]
 tokio-test   = "0.4"
