@@ -66,6 +66,22 @@ pub trait Memory: Send + Sync {
     /// Retrieve ALL non-revoked beliefs for an owner (regardless of persona_tag), for .af export.
     async fn retrieve_all_beliefs(&self, owner_id: &str) -> anyhow::Result<Vec<Belief>>;
 
+    /// Stigmergic reinforcement: increase one active belief's weight for its owner.
+    ///
+    /// Owner-scoped (IDOR guard): a wrong owner must not modify the belief.
+    async fn reinforce_belief(&self, owner_id: &str, id: i64, delta: f64) -> anyhow::Result<()>;
+
+    /// Stigmergic evaporation: decay active, non-core beliefs for an owner.
+    ///
+    /// Weights are multiplied by `factor` and clamped to `floor`; revoked and core
+    /// beliefs are left untouched. Returns the number of affected beliefs.
+    async fn evaporate_beliefs(
+        &self,
+        owner_id: &str,
+        factor: f64,
+        floor: f64,
+    ) -> anyhow::Result<u64>;
+
     /// Return (session_id, source) provenance rows for a belief.
     /// Owner-scoped (IDOR guard): provenance is only returned when the belief is
     /// owned by `owner_id`; cross-owner probes get an empty vec (indistinguishable

@@ -199,6 +199,61 @@ impl Memory for SqliteMemory {
         .await?
     }
 
+    async fn reinforce_belief(&self, owner_id: &str, id: i64, delta: f64) -> anyhow::Result<()> {
+        if !delta.is_finite() || delta < 0.0 {
+            anyhow::bail!("reinforcement delta must be finite and non-negative");
+        }
+
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let changed = conn.execute(
+                "UPDATE beliefs SET weight = weight + ?3 \
+                 WHERE id = ?1 AND owner_id = ?2 AND revoked = 0",
+                rusqlite::params![id, owner_id, delta],
+            )?;
+            if changed == 0 {
+                anyhow::bail!("belief {id} not found for owner (no row reinforced)");
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?
+    }
+
+    async fn evaporate_beliefs(
+        &self,
+        owner_id: &str,
+        factor: f64,
+        floor: f64,
+    ) -> anyhow::Result<u64> {
+        if !factor.is_finite() || !floor.is_finite() {
+            anyhow::bail!("evaporation factor and floor must be finite");
+        }
+        if !(0.0..=1.0).contains(&factor) {
+            anyhow::bail!("evaporation factor must be between 0.0 and 1.0");
+        }
+        if floor < 0.0 {
+            anyhow::bail!("evaporation floor must be non-negative");
+        }
+
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            let changed = conn.execute(
+                "UPDATE beliefs \
+                 SET weight = CASE WHEN weight * ?2 < ?3 THEN ?3 ELSE weight * ?2 END \
+                 WHERE owner_id = ?1 AND revoked = 0 AND is_core = 0 AND weight > ?3",
+                rusqlite::params![owner_id, factor, floor],
+            )?;
+            Ok::<u64, anyhow::Error>(changed as u64)
+        })
+        .await?
+    }
+
     async fn provenance_for(
         &self,
         owner_id: &str,
