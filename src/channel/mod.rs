@@ -1,13 +1,13 @@
 use crate::agent::handle::AgentHandle;
 use std::collections::HashMap;
 
+pub mod discord;
+pub mod email;
+pub mod slack;
 pub mod telegram;
+pub mod voice;
 pub mod webhook;
 pub mod whatsapp;
-pub mod discord;
-pub mod slack;
-pub mod email;
-pub mod voice;
 
 /// Per-channel configuration (CHAN-04).
 pub struct ChannelConfig {
