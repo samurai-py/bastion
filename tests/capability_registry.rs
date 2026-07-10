@@ -35,7 +35,6 @@ async fn capability_registry_policy_local_only_blocked() {
     let ctx = InvokeCtx {
         owner: "test".into(),
         privacy_tier: Some(PrivacyTier::LocalOnly),
-        needs_approval: false,
     };
     let result = registry.invoke("echo", serde_json::json!({}), &ctx).await;
     // LocalOnly tier: EchoCapability is not local (is_local()==false) → "external" → blocked.
@@ -53,7 +52,6 @@ async fn capability_registry_unknown_capability_returns_error() {
     let ctx = InvokeCtx {
         owner: "test".into(),
         privacy_tier: Some(PrivacyTier::CloudOk),
-        needs_approval: false,
     };
     let result = registry
         .invoke("does_not_exist", serde_json::json!({}), &ctx)
@@ -78,7 +76,6 @@ async fn capability_registry_cloud_ok_dispatches_successfully() {
     let ctx = InvokeCtx {
         owner: "test".into(),
         privacy_tier: Some(PrivacyTier::CloudOk),
-        needs_approval: false,
     };
     let args = serde_json::json!({"msg": "hello"});
     let result = registry.invoke("echo", args.clone(), &ctx).await;
@@ -113,7 +110,6 @@ async fn capability_registry_nl_command_allowed_for_local_only() {
     let ctx = InvokeCtx {
         owner: "test".into(),
         privacy_tier: Some(PrivacyTier::LocalOnly),
-        needs_approval: false,
     };
     let result = registry
         .invoke("cmd:model", serde_json::json!({}), &ctx)

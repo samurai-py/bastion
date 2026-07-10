@@ -373,10 +373,15 @@ mod tests {
         }
     }
 
+    /// SEC-01 approval-gate tests exercise Policy 2 — they must clear Policy 1
+    /// (egress) first. `None` is deny-on-ambiguity fail-closed (same as
+    /// `LocalOnly` for a non-local stub), which would block these tests before
+    /// the approval gate is ever reached; `CloudOk` always clears Policy 1
+    /// (`check_egress`) so the assertions below actually test Policy 2.
     fn ctx_for(owner: &str) -> InvokeCtx {
         InvokeCtx {
             owner: owner.to_string(),
-            privacy_tier: None,
+            privacy_tier: Some(PrivacyTier::CloudOk),
         }
     }
 
