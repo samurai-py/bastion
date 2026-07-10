@@ -567,13 +567,9 @@ async fn mesh_pair_handler(
             let host: String;
             {
                 use url::Url;
-                let parsed = Url::parse(&body.peer_url).ok().and_then(|u| {
-                    if u.scheme() == "https" {
-                        Some(u)
-                    } else {
-                        None
-                    }
-                });
+                let parsed = Url::parse(&body.peer_url)
+                    .ok()
+                    .filter(|u| u.scheme() == "https");
                 let parsed = match parsed {
                     Some(u) => u,
                     None => {
