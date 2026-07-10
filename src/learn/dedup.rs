@@ -142,7 +142,6 @@ mod tests {
         InvokeCtx {
             owner: "owner1".to_owned(),
             privacy_tier: Some(PrivacyTier::CloudOk),
-            needs_approval: false,
         }
     }
 

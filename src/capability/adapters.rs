@@ -200,7 +200,6 @@ mod mcp_tool_adapter_tests {
         let ctx = crate::capability::registry::InvokeCtx {
             owner: "test-owner".to_string(),
             privacy_tier: Some(PrivacyTier::LocalOnly),
-            needs_approval: false,
         };
         let result = registry
             .invoke("voice_transcribe", serde_json::json!({}), &ctx)
@@ -232,7 +231,6 @@ mod mcp_tool_adapter_tests {
         let ctx = crate::capability::registry::InvokeCtx {
             owner: "test-owner".to_string(),
             privacy_tier: Some(PrivacyTier::LocalOnly),
-            needs_approval: false,
         };
         let result = registry
             .invoke("voice_transcribe", serde_json::json!({}), &ctx)

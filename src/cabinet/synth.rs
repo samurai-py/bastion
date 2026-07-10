@@ -107,7 +107,6 @@ pub async fn synthesize_in_language(
             let ctx = crate::capability::InvokeCtx {
                 owner: "cabinet_synthesis".to_owned(),
                 privacy_tier: Some(crate::memory::PrivacyTier::LocalOnly),
-                needs_approval: false,
             };
             crate::provider::complete_structured_via_forced_tool_call(
                 provider,

@@ -189,7 +189,6 @@ impl ServerHandler for BastionMcpServer {
             let ctx = crate::capability::InvokeCtx {
                 owner: perms.owner_id,
                 privacy_tier: Some(perms.privacy_tier),
-                needs_approval: false,
             };
 
             match registry.invoke(&name, Value::Object(args), &ctx).await {

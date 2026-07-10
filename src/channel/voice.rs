@@ -32,9 +32,10 @@ use std::sync::{Arc, Mutex};
 /// `CapabilityRegistry::invoke` like any other capability caller.
 ///
 /// SECURITY (T-10-07-01): both invocations below are tagged
-/// `PrivacyTier::LocalOnly` and `needs_approval: false` — the entire privacy
-/// promise of this channel. Returns `Err` (never panics) on a malformed
-/// `voice_transcribe`/`voice_speak` response.
+/// `PrivacyTier::LocalOnly` — the entire privacy promise of this channel.
+/// Neither `voice_transcribe` nor `voice_speak` sets `needs_approval()==true`
+/// (SEC-01), so the approval gate is not a factor here. Returns `Err` (never
+/// panics) on a malformed `voice_transcribe`/`voice_speak` response.
 pub async fn handle_voice_turn(
     audio_b64_in: String,
     registry: &CapabilityRegistry,
@@ -45,7 +46,6 @@ pub async fn handle_voice_turn(
     let ctx = InvokeCtx {
         owner: owner.to_string(),
         privacy_tier: Some(PrivacyTier::LocalOnly),
-        needs_approval: false,
     };
 
     let transcribe_result = registry
@@ -660,8 +660,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
 
-    /// One recorded `(privacy_tier, needs_approval)` pair per stub invocation.
-    type RecordedCalls = Arc<Mutex<Vec<(Option<PrivacyTier>, bool)>>>;
+    /// One recorded `privacy_tier` per stub invocation.
+    type RecordedCalls = Arc<Mutex<Vec<Option<PrivacyTier>>>>;
 
     /// Stub `voice_transcribe`/`voice_speak` capability — records every `InvokeCtx`
     /// it was called with (Test 2's load-bearing LocalOnly assertion) and returns a
@@ -689,10 +689,7 @@ mod tests {
             &self.schema
         }
         async fn invoke(&self, _args: Value, ctx: &InvokeCtx) -> anyhow::Result<Value> {
-            self.recorded
-                .lock()
-                .unwrap()
-                .push((ctx.privacy_tier, ctx.needs_approval));
+            self.recorded.lock().unwrap().push(ctx.privacy_tier);
             Ok(self.response.clone())
         }
         fn is_local(&self) -> bool {
@@ -765,7 +762,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_voice_turn_tags_both_invocations_local_only_no_approval() {
+    async fn handle_voice_turn_tags_both_invocations_local_only() {
         let audio_b64 = base64::engine::general_purpose::STANDARD.encode(b"x");
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let registry = registry_with(
@@ -793,9 +790,8 @@ mod tests {
             2,
             "both voice_transcribe and voice_speak must invoke"
         );
-        for (tier, needs_approval) in calls.iter() {
+        for tier in calls.iter() {
             assert_eq!(*tier, Some(PrivacyTier::LocalOnly));
-            assert!(!needs_approval);
         }
     }
 

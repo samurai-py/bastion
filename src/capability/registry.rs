@@ -1,3 +1,4 @@
+use crate::capability::approval::{ApprovalOutcome, ApprovalQueue};
 use crate::memory::PrivacyTier;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -8,8 +9,6 @@ use std::sync::Arc;
 pub struct InvokeCtx {
     pub owner: String,
     pub privacy_tier: Option<PrivacyTier>,
-    /// If true, the approval queue gate is activated (Phase 3 approval flow).
-    pub needs_approval: bool,
 }
 
 /// A capability is anything the agent can invoke through the registry.
@@ -31,6 +30,20 @@ pub trait Capability: Send + Sync {
     fn is_local(&self) -> bool {
         false
     }
+
+    /// Whether this capability requires explicit owner approval before it may
+    /// dispatch (SEC-01 — irreversible/destructive actions).
+    ///
+    /// SECURITY: exactly like `is_local()`, this is a TYPED property of the
+    /// capability itself, decided by whoever implements it — never derived
+    /// from a runtime flag passed in by the caller (the removed
+    /// `InvokeCtx.needs_approval` was dead scaffolding: hardcoded `false` at
+    /// every construction site, never actually set `true` by any caller). The
+    /// default is `false` — the overwhelming majority of capabilities are
+    /// unaffected by the approval gate.
+    fn needs_approval(&self) -> bool {
+        false
+    }
 }
 
 /// Unified capability registry.
@@ -40,13 +53,25 @@ pub trait Capability: Send + Sync {
 #[derive(Clone)]
 pub struct CapabilityRegistry {
     inner: HashMap<String, Arc<dyn Capability>>,
+    /// The real SEC-01 approval gate backing store. `None` means no queue is
+    /// wired — see `invoke()`'s Policy 2 for why that is a fail-closed deny,
+    /// never a silent allow, for any capability with `needs_approval()==true`.
+    approval_queue: Option<Arc<ApprovalQueue>>,
 }
 
 impl CapabilityRegistry {
     pub fn new() -> Self {
         Self {
             inner: HashMap::new(),
+            approval_queue: None,
         }
+    }
+
+    /// Wire a real `ApprovalQueue` so Policy 2 can actually queue/idempotent-resume
+    /// instead of fail-closed-denying every `needs_approval()==true` capability.
+    pub fn with_approval_queue(mut self, queue: Arc<ApprovalQueue>) -> Self {
+        self.approval_queue = Some(queue);
+        self
     }
 
     /// Register a capability under its `name()`.
@@ -120,7 +145,9 @@ impl CapabilityRegistry {
     ///
     /// Policy order:
     /// 1. Egress check — fail-closed on LocalOnly or None tier for non-local adapters
-    /// 2. Approval gate — if ctx.needs_approval, gate on Phase 3 queue
+    /// 2. Approval gate (SEC-01) — if `cap.needs_approval()`, gate on the real
+    ///    `ApprovalQueue` (queue/idempotent-resume/cache), or fail-closed deny if
+    ///    no queue is wired
     /// 3. Dispatch to capability adapter
     pub async fn invoke(&self, name: &str, args: Value, ctx: &InvokeCtx) -> anyhow::Result<Value> {
         let cap = self
@@ -137,15 +164,48 @@ impl CapabilityRegistry {
         let provider_for_policy = if cap.is_local() { "ollama" } else { "external" };
         crate::hooks::egress::check_egress(ctx.privacy_tier, provider_for_policy)?;
 
-        // Policy 2: approval gate. Fail-closed until the Phase 3 approval queue is wired.
-        // The documented invariant is "no call path bypasses the approval queue"; logging
-        // and proceeding would silently violate it. When the queue lands in Phase 3, replace
-        // this bail with the actual await on the queue.
-        if ctx.needs_approval {
-            anyhow::bail!(
-                "capability '{}' requires approval but the approval queue is not yet available (Phase 3) — denying fail-closed",
-                name
-            );
+        // Policy 2: approval gate (SEC-01). `needs_approval()` is the SOLE decision
+        // source — a typed property of the capability itself, never a caller-supplied
+        // flag (T-11-02-01: the removed `InvokeCtx.needs_approval` was exactly that
+        // kind of unwired, trust-me flag, and is gone, not left dead alongside this).
+        if cap.needs_approval() {
+            return match &self.approval_queue {
+                // No queue wired: preserve the ORIGINAL fail-closed behavior. A
+                // capability requiring approval is unusable (denied) until a queue
+                // is attached — never silently allowed just because the gate isn't
+                // wired (T-11-02-04, e.g. the Reflector's minimal registry).
+                None => {
+                    anyhow::bail!(
+                        "capability '{}' requires approval but no approval queue is wired — denying fail-closed",
+                        name
+                    );
+                }
+                Some(queue) => {
+                    let outcome = queue.enqueue_or_reuse(&ctx.owner, name, &args).await?;
+                    match outcome {
+                        // D-03 idempotent-resume: already ran to completion — return the
+                        // cached result, never re-dispatch.
+                        ApprovalOutcome::AlreadyExecuted(cached) => Ok(cached),
+                        // Not yet approved (freshly queued or still pending): the
+                        // capability has NOT run — Dispatch below is structurally
+                        // unreachable from this branch (T-11-02-02).
+                        ApprovalOutcome::AlreadyPending | ApprovalOutcome::NewlyQueued(_) => {
+                            Ok(serde_json::json!({
+                                "awaiting_approval": true,
+                                "capability": name,
+                            }))
+                        }
+                        // Approved but not yet executed: this invoke() call IS the
+                        // resolution (triggered by Plan 11-04's NL intercept) — dispatch
+                        // now and record the result for future idempotent-resume.
+                        ApprovalOutcome::ApprovedPendingExecution(id) => {
+                            let result = cap.invoke(args, ctx).await?;
+                            queue.record_executed(id, &result).await?;
+                            Ok(result)
+                        }
+                    }
+                }
+            };
         }
 
         // Dispatch
@@ -278,5 +338,184 @@ mod tests {
             before, after,
             "an intervening register+remove cycle must not perturb list_tool_defs() ordering"
         );
+    }
+
+    // --- Plan 11-02 (SEC-01): approval gate ------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Stub capability with a configurable `needs_approval()` and a call
+    /// counter — proves whether the underlying `invoke()` actually dispatched.
+    struct ApprovalStubCap {
+        name: String,
+        schema: Value,
+        approval_required: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Capability for ApprovalStubCap {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "approval stub"
+        }
+        fn input_schema(&self) -> &Value {
+            &self.schema
+        }
+        async fn invoke(&self, _args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"dispatched": true}))
+        }
+        fn needs_approval(&self) -> bool {
+            self.approval_required
+        }
+    }
+
+    fn ctx_for(owner: &str) -> InvokeCtx {
+        InvokeCtx {
+            owner: owner.to_string(),
+            privacy_tier: None,
+        }
+    }
+
+    /// Registry wired with a real ApprovalQueue (temp sqlite db) plus one
+    /// `needs_approval()==true` capability registered under "dangerous_action".
+    async fn make_queue_registry() -> (
+        tempfile::NamedTempFile,
+        CapabilityRegistry,
+        Arc<ApprovalQueue>,
+        Arc<AtomicUsize>,
+    ) {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        crate::session::SessionManager::new(&path)
+            .init_schema()
+            .await
+            .expect("init_schema");
+        let queue = Arc::new(ApprovalQueue::new(path));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = CapabilityRegistry::new().with_approval_queue(queue.clone());
+        registry
+            .register(Arc::new(ApprovalStubCap {
+                name: "dangerous_action".to_string(),
+                schema: serde_json::json!({}),
+                approval_required: true,
+                calls: calls.clone(),
+            }))
+            .unwrap();
+        (f, registry, queue, calls)
+    }
+
+    #[tokio::test]
+    async fn needs_approval_true_without_queue_fails_closed() {
+        let mut registry = CapabilityRegistry::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry
+            .register(Arc::new(ApprovalStubCap {
+                name: "dangerous_action".to_string(),
+                schema: serde_json::json!({}),
+                approval_required: true,
+                calls: calls.clone(),
+            }))
+            .unwrap();
+
+        let result = registry
+            .invoke("dangerous_action", serde_json::json!({}), &ctx_for("alice"))
+            .await;
+        assert!(
+            result.is_err(),
+            "no queue wired must fail-closed deny, never silently dispatch"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "must never dispatch when denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn needs_approval_true_with_queue_queues_instead_of_dispatching() {
+        let (_f, registry, _queue, calls) = make_queue_registry().await;
+
+        let result = registry
+            .invoke(
+                "dangerous_action",
+                serde_json::json!({"x": 1}),
+                &ctx_for("alice"),
+            )
+            .await
+            .expect("first invoke must succeed with an awaiting-approval signal");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "must not dispatch on first call"
+        );
+        assert_eq!(result["awaiting_approval"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn needs_approval_true_dispatches_after_approval_and_records_executed() {
+        let (_f, registry, queue, calls) = make_queue_registry().await;
+        let args = serde_json::json!({"x": 1});
+
+        registry
+            .invoke("dangerous_action", args.clone(), &ctx_for("alice"))
+            .await
+            .expect("first invoke queues");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let pending = queue
+            .pending_for_owner("alice")
+            .await
+            .expect("pending_for_owner");
+        assert_eq!(pending.len(), 1);
+        let id = pending[0].id;
+        queue.approve("alice", id).await.expect("approve");
+
+        let result = registry
+            .invoke("dangerous_action", args, &ctx_for("alice"))
+            .await
+            .expect("second invoke after approval must dispatch");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "must dispatch exactly once after approval"
+        );
+        assert_eq!(result, serde_json::json!({"dispatched": true}));
+
+        let still_pending = queue
+            .pending_for_owner("alice")
+            .await
+            .expect("pending_for_owner 2");
+        assert!(
+            still_pending.is_empty(),
+            "row must no longer be pending after execution (record_executed ran)"
+        );
+    }
+
+    #[tokio::test]
+    async fn needs_approval_false_default_dispatches_immediately_unaffected() {
+        let mut registry = CapabilityRegistry::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry
+            .register(Arc::new(ApprovalStubCap {
+                name: "safe_action".to_string(),
+                schema: serde_json::json!({}),
+                approval_required: false,
+                calls: calls.clone(),
+            }))
+            .unwrap();
+
+        let result = registry
+            .invoke("safe_action", serde_json::json!({}), &ctx_for("alice"))
+            .await
+            .expect("default needs_approval()==false must dispatch immediately");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result, serde_json::json!({"dispatched": true}));
     }
 }

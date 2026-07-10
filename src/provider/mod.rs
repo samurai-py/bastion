@@ -529,7 +529,6 @@ mod tests {
         InvokeCtx {
             owner: "test-owner".into(),
             privacy_tier: Some(crate::memory::PrivacyTier::LocalOnly),
-            needs_approval: false,
         }
     }
 
