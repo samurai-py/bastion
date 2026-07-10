@@ -103,6 +103,35 @@ impl SessionManager {
                     last_watermark INTEGER NOT NULL DEFAULT 0,
                     updated_at     INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS approval_queue (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id          TEXT    NOT NULL,
+                    capability_name   TEXT    NOT NULL,
+                    args_json         TEXT    NOT NULL,
+                    idempotency_hash  TEXT    NOT NULL,
+                    status            TEXT    NOT NULL DEFAULT 'pending',
+                    result_json       TEXT,
+                    created_at        INTEGER NOT NULL,
+                    resolved_at       INTEGER,
+                    executed_at       INTEGER
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_queue_hash
+                    ON approval_queue(idempotency_hash);
+                CREATE INDEX IF NOT EXISTS idx_approval_queue_owner_status
+                    ON approval_queue(owner_id, status);
+
+                CREATE TABLE IF NOT EXISTS composio_connections (
+                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id             TEXT    NOT NULL,
+                    toolkit              TEXT    NOT NULL,
+                    connected_account_id TEXT    NOT NULL,
+                    status               TEXT    NOT NULL DEFAULT 'pending',
+                    created_at           INTEGER NOT NULL,
+                    updated_at           INTEGER NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_composio_connections_owner_toolkit
+                    ON composio_connections(owner_id, toolkit);
             ",
             )?;
             // Additive migration for pre-existing single-user DBs (idempotent —
@@ -419,4 +448,126 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 
 fn is_leap(y: u64) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    async fn make_db() -> (NamedTempFile, SessionManager) {
+        let f = NamedTempFile::new().expect("tempfile");
+        let path = f.path().to_str().unwrap().to_owned();
+        let sm = SessionManager::new(&path);
+        sm.init_schema().await.expect("init_schema");
+        (f, sm)
+    }
+
+    #[tokio::test]
+    async fn test_init_schema_idempotent_rerun() {
+        let (_f, sm) = make_db().await;
+        // Re-running init_schema against the same DB must not error.
+        sm.init_schema().await.expect("second init_schema call");
+    }
+
+    #[tokio::test]
+    async fn test_approval_queue_table_columns() {
+        let (_f, sm) = make_db().await;
+        let path = sm.db_path.clone();
+        let conn = open_conn(&path).expect("open_conn");
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(approval_queue)")
+            .expect("prepare");
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query_map")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        for expected in [
+            "id",
+            "owner_id",
+            "capability_name",
+            "args_json",
+            "idempotency_hash",
+            "status",
+            "result_json",
+            "created_at",
+            "resolved_at",
+            "executed_at",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "approval_queue missing column {expected}, has {cols:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_composio_connections_table_columns() {
+        let (_f, sm) = make_db().await;
+        let path = sm.db_path.clone();
+        let conn = open_conn(&path).expect("open_conn");
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(composio_connections)")
+            .expect("prepare");
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query_map")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        for expected in [
+            "id",
+            "owner_id",
+            "toolkit",
+            "connected_account_id",
+            "status",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "composio_connections missing column {expected}, has {cols:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_composio_connections_unique_owner_toolkit() {
+        let (_f, sm) = make_db().await;
+        let path = sm.db_path.clone();
+        let conn = open_conn(&path).expect("open_conn");
+        conn.execute(
+            "INSERT INTO composio_connections (owner_id, toolkit, connected_account_id, status, created_at, updated_at) VALUES ('owner1', 'gmail', 'acct1', 'active', 1, 1)",
+            [],
+        )
+        .expect("first insert");
+        let second = conn.execute(
+            "INSERT INTO composio_connections (owner_id, toolkit, connected_account_id, status, created_at, updated_at) VALUES ('owner1', 'gmail', 'acct2', 'active', 2, 2)",
+            [],
+        );
+        assert!(
+            second.is_err(),
+            "duplicate (owner_id, toolkit) must violate UNIQUE index"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_approval_queue_unique_idempotency_hash() {
+        let (_f, sm) = make_db().await;
+        let path = sm.db_path.clone();
+        let conn = open_conn(&path).expect("open_conn");
+        conn.execute(
+            "INSERT INTO approval_queue (owner_id, capability_name, args_json, idempotency_hash, created_at) VALUES ('owner1', 'cap.send_email', '{}', 'hash1', 1)",
+            [],
+        )
+        .expect("first insert");
+        let second = conn.execute(
+            "INSERT INTO approval_queue (owner_id, capability_name, args_json, idempotency_hash, created_at) VALUES ('owner1', 'cap.send_email', '{}', 'hash1', 2)",
+            [],
+        );
+        assert!(
+            second.is_err(),
+            "duplicate idempotency_hash must violate UNIQUE constraint"
+        );
+    }
 }
