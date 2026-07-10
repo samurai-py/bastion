@@ -155,24 +155,228 @@ pub async fn handle_email_message(
 
 /// IMAP IDLE-with-poll-fallback receive loop + SMTP reply send.
 ///
-/// Signature only in this commit (Task 2) — `run()` already delegates to it per the
-/// plan's declared call shape. The real IDLE/poll loop + SMTP send body is implemented
-/// in Task 3 of this plan.
+/// Connects IMAPS, gates on `IDLE` capability (25-minute internal timeout re-issue vs
+/// 60s poll fallback, Pitfall 5), fetches UNSEEN messages, routes each through
+/// [`handle_email_message`], and replies via a single reused `lettre` SMTP transport.
+/// Wraps the connect+login step in the same bounded exponential backoff
+/// (`telegram_loop`'s shape: 1s → 2s → 4s → … capped at 30s, reset on first success)
+/// so a transient IMAP/SMTP outage does not busy-loop or crash the channel.
 // EmailChannel has more config fields (imap/smtp host+port, username, password) than any
 // other channel in this phase — the 8-arg signature mirrors those fields 1:1 (per the
 // plan's own call shape) rather than introducing a config struct for a single call site.
 #[allow(clippy::too_many_arguments)]
 async fn email_loop(
-    _imap_host: &str,
-    _imap_port: u16,
-    _smtp_host: &str,
-    _smtp_port: u16,
-    _username: &str,
-    _password: &str,
-    _agent: AgentHandle,
-    _owner_map: &OwnerMap,
+    imap_host: &str,
+    imap_port: u16,
+    smtp_host: &str,
+    smtp_port: u16,
+    username: &str,
+    password: &str,
+    agent: AgentHandle,
+    owner_map: &OwnerMap,
 ) -> anyhow::Result<()> {
-    anyhow::bail!("email_loop not yet implemented (Task 3 of 10-06-PLAN.md)")
+    use futures_util::TryStreamExt;
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+    use tokio::time::{sleep, Duration};
+
+    // Built once, reused for every reply. `starttls_relay` matches the documented
+    // default port 587 (STARTTLS) — see EMAIL_SMTP_PORT's "Defaults to 587 (STARTTLS)"
+    // contract; `relay()` would pair the wrong Tls mode (implicit TLS / port 465) with
+    // this port, per lettre's own builder docs warning about mismatched port+Tls combos.
+    let mailer: AsyncSmtpTransport<Tokio1Executor> =
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(smtp_host)?
+            .port(smtp_port)
+            .credentials(Credentials::new(username.to_owned(), password.to_owned()))
+            .build();
+
+    // CR-06-style bounded exponential backoff on connect/login errors (1s -> 2s -> 4s ->
+    // ... capped at 30s). Reset to 0 on the first successful login.
+    let mut backoff_secs: u64 = 0;
+
+    loop {
+        let mut session = match connect_and_login(imap_host, imap_port, username, password).await {
+            Ok(session) => {
+                backoff_secs = 0;
+                session
+            }
+            Err(e) => {
+                // T-10-06-02: password is NEVER interpolated into this message — connect
+                // errors only ever carry host/transport-level detail.
+                tracing::warn!(
+                    event = "email_connect_error",
+                    error = %e,
+                    backoff_secs,
+                );
+                let wait = backoff_secs.max(1);
+                sleep(Duration::from_secs(wait)).await;
+                backoff_secs = (wait * 2).min(30);
+                continue;
+            }
+        };
+
+        if let Err(e) = session.select("INBOX").await {
+            tracing::warn!(event = "email_select_inbox_error", error = %e);
+            continue;
+        }
+
+        let supports_idle = match session.capabilities().await {
+            Ok(caps) => caps.has_str("IDLE"),
+            Err(e) => {
+                tracing::warn!(event = "email_capabilities_error", error = %e);
+                false
+            }
+        };
+
+        // Reuse the same authenticated session across many IDLE/poll cycles until a
+        // hard error forces a reconnect (breaks out to the outer loop).
+        'session: loop {
+            if supports_idle {
+                let mut idle_handle = session.idle();
+                if let Err(e) = idle_handle.init().await {
+                    tracing::warn!(event = "email_idle_init_error", error = %e);
+                    break 'session;
+                }
+                // Pitfall 5: re-issue IDLE every 25 minutes, safely under the ~29-minute
+                // server-side drop. Both the Timeout and NewData outcomes fall through to
+                // the same UNSEEN search below.
+                let (idle_wait, _stop) =
+                    idle_handle.wait_with_timeout(Duration::from_secs(25 * 60));
+                if let Err(e) = idle_wait.await {
+                    tracing::warn!(event = "email_idle_wait_error", error = %e);
+                }
+                session = match idle_handle.done().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(event = "email_idle_done_error", error = %e);
+                        break 'session;
+                    }
+                };
+            } else {
+                sleep(Duration::from_secs(60)).await;
+            }
+
+            let uids = match session.search("UNSEEN").await {
+                Ok(uids) => uids,
+                Err(e) => {
+                    tracing::warn!(event = "email_search_unseen_error", error = %e);
+                    break 'session;
+                }
+            };
+
+            for seq in uids {
+                let messages: Vec<async_imap::types::Fetch> = match session
+                    .fetch(seq.to_string(), "RFC822")
+                    .await
+                {
+                    Ok(stream) => match stream.try_collect().await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(event = "email_fetch_collect_error", seq, error = %e);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(event = "email_fetch_error", seq, error = %e);
+                        continue;
+                    }
+                };
+
+                for fetched in &messages {
+                    let Some(raw) = fetched.body() else {
+                        continue;
+                    };
+
+                    let (from_address, text) = match parse_email_message(raw) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            tracing::warn!(event = "email_parse_error", seq, error = %e);
+                            continue;
+                        }
+                    };
+
+                    let reply = match handle_email_message(
+                        from_address.clone(),
+                        text,
+                        &agent,
+                        owner_map,
+                    )
+                    .await
+                    {
+                        Ok(reply) => reply,
+                        Err(e) => {
+                            // CR-03: unknown sender — warn and skip silently (no reply).
+                            if e.to_string().contains("not in owner map") {
+                                tracing::warn!(
+                                    event = "email_handle_message_error",
+                                    from = %from_address,
+                                    error = %e
+                                );
+                                continue;
+                            }
+                            // M3: log turn_error WITHOUT conversation content.
+                            tracing::error!(event = "turn_error", from = %from_address);
+                            match e.downcast_ref::<crate::types::BastionError>() {
+                                Some(crate::types::BastionError::PrivacyEgressBlocked) => {
+                                    "Não posso responder com este provider (restrição de privacidade)."
+                                        .to_owned()
+                                }
+                                _ => "Tive um problema neste turn. Use /logs para detalhes.".to_owned(),
+                            }
+                        }
+                    };
+
+                    let email = match Message::builder()
+                        .from(username.parse()?)
+                        .to(from_address.parse()?)
+                        .subject("Re: Bastion")
+                        .body(reply)
+                    {
+                        Ok(email) => email,
+                        Err(e) => {
+                            tracing::warn!(event = "email_build_error", error = %e);
+                            continue;
+                        }
+                    };
+
+                    if let Err(e) = mailer.send(email).await {
+                        tracing::warn!(event = "email_send_error", error = %e);
+                    }
+                }
+
+                // Mark processed so it is not reprocessed on the next UNSEEN search.
+                match session.store(seq.to_string(), "+FLAGS (\\Seen)").await {
+                    Ok(stream) => {
+                        if let Err(e) = stream.try_collect::<Vec<_>>().await {
+                            tracing::warn!(event = "email_store_seen_error", seq, error = %e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(event = "email_store_seen_error", seq, error = %e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Connect over IMAPS and log in, returning an authenticated `Session`.
+async fn connect_and_login(
+    imap_host: &str,
+    imap_port: u16,
+    username: &str,
+    password: &str,
+) -> anyhow::Result<async_imap::Session<async_native_tls::TlsStream<tokio::net::TcpStream>>> {
+    let tcp_stream = tokio::net::TcpStream::connect((imap_host, imap_port)).await?;
+    let tls_stream = async_native_tls::TlsConnector::new()
+        .connect(imap_host, tcp_stream)
+        .await?;
+    let client = async_imap::Client::new(tls_stream);
+    let session = client
+        .login(username, password)
+        .await
+        .map_err(|(e, _)| anyhow::anyhow!("imap login failed: {e}"))?;
+    Ok(session)
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────────
