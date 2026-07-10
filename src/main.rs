@@ -6,7 +6,6 @@ use tracing_subscriber::fmt;
 
 use bastion::agent::handle;
 use bastion::agent::loop_::AgentLoop;
-use bastion::channel::OwnerMap;
 use bastion::goal::{GoalEngine, ScoringConfig};
 use bastion::mcp::McpClient;
 use bastion::memory::sqlite::SqliteMemory;
@@ -355,11 +354,17 @@ async fn daemon_loop(
     // The select! arm below serializes all channel turns through the SAME agent as stdin/proactive.
     let (agent_handle, mut inbound_rx) = handle::channel();
 
-    // Build OwnerMap from environment (mirrors how the provider is built above).
-    // Format: BASTION_WEBHOOK_OWNERS=token1:owner1,token2:owner2
-    //         BASTION_TELEGRAM_OWNERS=chat_id1:owner1,chat_id2:owner2
-    let webhook_owner_map = parse_owner_map_env("BASTION_WEBHOOK_OWNERS");
-    let telegram_owner_map = parse_owner_map_env("BASTION_TELEGRAM_OWNERS");
+    // CHAN-02/D-05: OwnerMaps for ALL 7 channels are now projected from the single
+    // `[[identity]]` table (bastion::config::owner_map_for_*) instead of the old
+    // scattered per-channel env vars (BASTION_WEBHOOK_OWNERS/BASTION_TELEGRAM_OWNERS).
+    // This is the plan 10-09 deliverable that makes CHAN-02's "unified owner-based
+    // routing" claim literally true — one mechanism, not N.
+    let webhook_owner_map = bastion::config::owner_map_for_webhook(&cfg.identity);
+    let telegram_owner_map = bastion::config::owner_map_for_telegram(&cfg.identity);
+    let whatsapp_owner_map = bastion::config::owner_map_for_whatsapp(&cfg.identity);
+    let discord_owner_map = bastion::config::owner_map_for_discord(&cfg.identity);
+    let slack_owner_map = bastion::config::owner_map_for_slack(&cfg.identity);
+    let email_owner_map = bastion::config::owner_map_for_email(&cfg.identity);
 
     // Spawn webhook channel if BASTION_WEBHOOK_ADDR is set.
     if let Ok(addr) = std::env::var("BASTION_WEBHOOK_ADDR") {
@@ -476,6 +481,25 @@ async fn daemon_loop(
         // writes codes the webhook server reads (06-08 OTC-writer wiring).
         let otc_store = bastion::channel::webhook::new_otc_store();
         agent.set_otc_store(otc_store.clone());
+
+        // WhatsApp (CHAN-01): reuses this same webhook router (10-RESEARCH.md
+        // Pattern 1) — no second axum server. `WHATSAPP_PHONE_NUMBER_ID` presence
+        // gates whether we attempt to build a sender at all.
+        let whatsapp_config = if std::env::var("WHATSAPP_PHONE_NUMBER_ID").is_ok() {
+            match bastion::channel::whatsapp::WhatsAppSender::from_env() {
+                Ok(sender) => Some(bastion::channel::whatsapp::WhatsAppConfig {
+                    owner_map: whatsapp_owner_map,
+                    sender: std::sync::Arc::new(sender),
+                }),
+                Err(e) => {
+                    tracing::warn!(event = "whatsapp_start_failed", error = %e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         tokio::spawn(async move {
             if let Err(e) = bastion::channel::webhook::serve_with_mesh(
                 h,
@@ -490,8 +514,7 @@ async fn daemon_loop(
                 agent_identity,
                 agent_name,
                 mcp_routes,
-                // WhatsApp (CHAN-01) daemon-startup wiring lands in Plan 10-09.
-                None,
+                whatsapp_config,
             )
             .await
             {
@@ -499,6 +522,11 @@ async fn daemon_loop(
             }
         });
         tracing::info!(event = "webhook_started", addr = %std::env::var("BASTION_WEBHOOK_ADDR").unwrap_or_default());
+    } else if std::env::var("WHATSAPP_PHONE_NUMBER_ID").is_ok() {
+        tracing::warn!(
+            event = "whatsapp_requires_webhook_addr",
+            "WHATSAPP_PHONE_NUMBER_ID is set but BASTION_WEBHOOK_ADDR is not — WhatsApp mounts on the webhook router and cannot start without it"
+        );
     }
 
     // Spawn Telegram channel if TELEGRAM_BOT_TOKEN is set.
@@ -519,6 +547,89 @@ async fn daemon_loop(
                 tracing::warn!(event = "telegram_start_failed", error = %e);
             }
         }
+    }
+
+    // Spawn Discord channel if DISCORD_BOT_TOKEN is set (CHAN-03).
+    if std::env::var("DISCORD_BOT_TOKEN").is_ok() {
+        match bastion::channel::discord::DiscordChannel::from_env() {
+            Ok(ch) => {
+                let ch = ch.with_owner_map(discord_owner_map);
+                let h = agent_handle.clone();
+                tokio::spawn(async move {
+                    use bastion::channel::Channel;
+                    if let Err(e) = Box::new(ch).run(h).await {
+                        tracing::error!(event = "discord_error", error = %e, "discord channel terminated");
+                    }
+                });
+                tracing::info!(event = "discord_started");
+            }
+            Err(e) => {
+                tracing::warn!(event = "discord_start_failed", error = %e);
+            }
+        }
+    }
+
+    // Spawn Slack channel if SLACK_BOT_TOKEN and SLACK_APP_TOKEN are set (CHAN-03).
+    if std::env::var("SLACK_BOT_TOKEN").is_ok() && std::env::var("SLACK_APP_TOKEN").is_ok() {
+        match bastion::channel::slack::SlackChannel::from_env() {
+            Ok(ch) => {
+                let ch = ch.with_owner_map(slack_owner_map);
+                let h = agent_handle.clone();
+                tokio::spawn(async move {
+                    use bastion::channel::Channel;
+                    if let Err(e) = Box::new(ch).run(h).await {
+                        tracing::error!(event = "slack_error", error = %e, "slack channel terminated");
+                    }
+                });
+                tracing::info!(event = "slack_started");
+            }
+            Err(e) => {
+                tracing::warn!(event = "slack_start_failed", error = %e);
+            }
+        }
+    }
+
+    // Spawn Email channel if EMAIL_ADDRESS is set (CHAN-03).
+    if std::env::var("EMAIL_ADDRESS").is_ok() {
+        match bastion::channel::email::EmailChannel::from_env() {
+            Ok(ch) => {
+                let ch = ch.with_owner_map(email_owner_map);
+                let h = agent_handle.clone();
+                tokio::spawn(async move {
+                    use bastion::channel::Channel;
+                    if let Err(e) = Box::new(ch).run(h).await {
+                        tracing::error!(event = "email_error", error = %e, "email channel terminated");
+                    }
+                });
+                tracing::info!(event = "email_started");
+            }
+            Err(e) => {
+                tracing::warn!(event = "email_start_failed", error = %e);
+            }
+        }
+    }
+
+    // Spawn Voice channel if [channels.voice].enabled (VOICE-01). No secret env var to
+    // gate on — voice authenticates via local mic/speaker hardware presence, not a
+    // remote credential. `voice_transcribe`/`voice_speak` are already present in the
+    // SAME registry AgentLoop::new() populated (auto-classified is_local_override=true
+    // by Plan 10-08's [mcp.servers.voice].is_local=true wiring) — no manual
+    // registration call is needed here.
+    if cfg.channels.voice.enabled {
+        let voice_registry = Arc::new(agent.capability_registry.clone());
+        let vc = bastion::channel::voice::VoiceChannel::new(
+            voice_registry,
+            cfg.channels.voice.voice.clone(),
+            cfg.channels.voice.wake_word_enabled,
+        );
+        let h = agent_handle.clone();
+        tokio::spawn(async move {
+            use bastion::channel::Channel;
+            if let Err(e) = Box::new(vc).run(h).await {
+                tracing::error!(event = "voice_error", error = %e, "voice channel terminated");
+            }
+        });
+        tracing::info!(event = "voice_started");
     }
 
     // Spawn /api/infer gateway for Python MCP containers (D-08 / D-09).
@@ -807,29 +918,4 @@ fn build_token_perms(
             )
         })
         .collect()
-}
-
-/// Parse a `KEY=val1:owner1,val2:owner2` env var into an [`OwnerMap`].
-/// Returns an empty map if the variable is absent or empty.
-/// Mirrors the CSV-pair format used by other Bastion env config (e.g. MCP servers).
-fn parse_owner_map_env(var: &str) -> OwnerMap {
-    let raw = match std::env::var(var) {
-        Ok(v) if !v.is_empty() => v,
-        _ => return OwnerMap::default(),
-    };
-    let pairs: Vec<(&str, &str)> = raw
-        .split(',')
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, ':');
-            let key = parts.next()?.trim();
-            let val = parts.next()?.trim();
-            if key.is_empty() || val.is_empty() {
-                // IN-08: log malformed pairs instead of silently dropping them.
-                tracing::warn!(event = "owner_map_malformed_pair", pair = pair.trim());
-                return None;
-            }
-            Some((key, val))
-        })
-        .collect();
-    OwnerMap::from_pairs(&pairs)
 }
