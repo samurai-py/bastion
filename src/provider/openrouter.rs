@@ -1,12 +1,7 @@
-use async_openai::{
-    config::OpenAIConfig,
-    types::chat::{
-        ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
-        ChatCompletionToolChoiceOption, CompletionUsage, CreateChatCompletionRequest,
-        CreateChatCompletionRequestArgs, FunctionName, ResponseFormat, ResponseFormatJsonSchema,
-        ToolChoiceOptions,
-    },
-    Client,
+use async_openai::types::chat::{
+    ChatCompletionNamedToolChoice, ChatCompletionToolChoiceOption, CreateChatCompletionRequest,
+    CreateChatCompletionRequestArgs, FunctionName, ResponseFormat, ResponseFormatJsonSchema,
+    ToolChoiceOptions,
 };
 
 use super::Provider;
@@ -19,8 +14,16 @@ use crate::types::{
 /// Unlocks dozens of models — including free ones — without a local GPU.
 /// Routed when the model name contains '/' (OpenRouter slugs, e.g.
 /// `meta-llama/llama-3.3-70b-instruct:free`).
+///
+/// Requests are built with `async-openai`'s request types (they serialize to the OpenAI
+/// wire format), but sent and parsed via raw `reqwest`, mirroring `groq.rs`: OpenRouter's
+/// response carries a non-standard `usage.cost` field — the real, per-request dollar cost
+/// (SEC-02) — that `async-openai`'s strict typed response deserializer has no slot for.
+/// We parse only the fields we need and ignore the rest.
 pub struct OpenRouterProvider {
-    client: Client<OpenAIConfig>,
+    http: reqwest::Client,
+    api_key: String,
+    base: String,
     model: String,
 }
 
@@ -35,20 +38,51 @@ impl OpenRouterProvider {
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_owned());
 
-        let config = OpenAIConfig::default()
-            .with_api_base(base)
-            .with_api_key(api_key);
-
         Self {
-            client: Client::with_config(config),
+            http: reqwest::Client::new(),
+            api_key,
+            base,
             model: model.to_owned(),
         }
+    }
+
+    /// POST a chat-completion body and return the parsed JSON, surfacing OpenRouter's
+    /// error message on non-2xx. Deliberately lenient: unknown response fields are
+    /// ignored. Mirrors `groq.rs::post_chat`.
+    async fn post_chat(&self, body: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{}/chat/completions", self.base);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("openrouter request failed: {e}"))?;
+
+        let status = resp.status();
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("openrouter response was not JSON: {e}"))?;
+
+        if !status.is_success() {
+            let msg = json
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            anyhow::bail!("openrouter API error ({}): {msg}", status.as_u16());
+        }
+        Ok(json)
     }
 
     /// Build the outgoing chat-completion request, folding in
     /// `CallConfig.response_format`/`.tool_choice`/`.temperature` (D-01 unification;
     /// `complete_structured` was removed from the trait entirely by Plan 08-09).
-    /// Mirrors `openai.rs`.
+    /// Mirrors `openai.rs`. Escaped to raw JSON via `serde_json::to_value` in
+    /// `complete()` — the *request* wire format is OpenAI-compatible even though the
+    /// *response* is not (module docs).
     fn build_request(
         &self,
         messages: &[Message],
@@ -97,22 +131,28 @@ impl OpenRouterProvider {
     }
 }
 
-/// Map an `async-openai` usage block into Bastion's `TokenUsage`, wiring the
-/// already-vendored `prompt_tokens_details.cached_tokens` into `cache_read`
-/// (COST-01/D-14a — previously silently discarded via `..Default::default()`).
-/// Mirrors `openai.rs`.
-fn map_usage(usage: Option<CompletionUsage>) -> TokenUsage {
-    usage
-        .map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cache_read: u
-                .prompt_tokens_details
-                .as_ref()
-                .and_then(|d| d.cached_tokens)
-                .unwrap_or(0),
-            cache_write: 0,
-        })
+/// Map OpenRouter's raw JSON `usage` block into Bastion's `TokenUsage`, wiring
+/// `prompt_tokens_details.cached_tokens` into `cache_read` (COST-01/D-14a, unchanged)
+/// AND the real per-request dollar cost (`usage.cost`, OpenRouter-specific) into
+/// `actual_cost_usd` (SEC-02) — `estimate_cost_usd` (`src/agent/loop_.rs`) prefers
+/// this real figure over its hardcoded per-provider table whenever it's present.
+fn map_usage(json: &serde_json::Value) -> TokenUsage {
+    TokenUsage {
+        input_tokens: json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+        output_tokens: json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+        cache_read: json["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32,
+        cache_write: 0,
+        actual_cost_usd: json["usage"]["cost"].as_f64(),
+    }
+}
+
+/// Extract the first choice's message content, stripping any `<think>` block.
+/// Mirrors `groq.rs::first_content`.
+fn first_content(json: &serde_json::Value) -> &str {
+    json["choices"][0]["message"]["content"]
+        .as_str()
         .unwrap_or_default()
 }
 
@@ -124,41 +164,34 @@ impl Provider for OpenRouterProvider {
         config: &CallConfig,
     ) -> anyhow::Result<LlmResponse> {
         let request = self.build_request(messages, config)?;
+        let body = serde_json::to_value(&request)?;
+        let json = self.post_chat(&body).await?;
 
-        let response = self
-            .client
-            .chat()
-            .create(request)
-            .await
-            .map_err(|e| super::clarify_openai_error(self.name(), e))?;
+        let text = strip_think(first_content(&json));
 
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("OpenRouter returned no choices"))?;
-
-        let raw_text = choice.message.content.unwrap_or_default();
-        let text = strip_think(&raw_text);
-
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|tc| match tc {
-                ChatCompletionMessageToolCalls::Function(f) => Some(ToolCall {
-                    id: f.id,
-                    name: f.function.name,
-                    arguments: serde_json::from_str(&f.function.arguments)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
-                    extra: None,
-                }),
-                _ => None,
+        let tool_calls: Vec<ToolCall> = json["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|tc| {
+                        let id = tc["id"].as_str()?.to_owned();
+                        let name = tc["function"]["name"].as_str()?.to_owned();
+                        let arguments = tc["function"]["arguments"]
+                            .as_str()
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                        Some(ToolCall {
+                            id,
+                            name,
+                            arguments,
+                            extra: None,
+                        })
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
-        let usage = map_usage(response.usage);
+        let usage = map_usage(&json);
 
         Ok(LlmResponse {
             text,
@@ -203,7 +236,9 @@ mod tests {
         // Bypass `new()`'s OPENROUTER_API_KEY env lookup — unit tests exercise
         // pure request-shaping logic only, never a live HTTP call.
         OpenRouterProvider {
-            client: Client::new(),
+            http: reqwest::Client::new(),
+            api_key: "test-key".into(),
+            base: "https://openrouter.ai/api/v1".into(),
             model: "or-test".into(),
         }
     }
@@ -262,21 +297,44 @@ mod tests {
 
     #[test]
     fn map_usage_wires_cached_tokens_into_cache_read() {
-        let usage = CompletionUsage {
-            prompt_tokens: 100,
-            completion_tokens: 20,
-            total_tokens: 120,
-            prompt_tokens_details: Some(async_openai::types::chat::PromptTokensDetails {
-                audio_tokens: None,
-                cached_tokens: Some(7),
-            }),
-            completion_tokens_details: None,
-        };
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_tokens_details": { "cached_tokens": 7 },
+            }
+        });
 
-        let mapped = map_usage(Some(usage));
+        let mapped = map_usage(&json);
 
         assert_eq!(mapped.cache_read, 7);
         assert_eq!(mapped.input_tokens, 100);
         assert_eq!(mapped.output_tokens, 20);
+    }
+
+    #[test]
+    fn map_usage_wires_real_cost_into_actual_cost_usd() {
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "cost": 0.00042,
+            }
+        });
+
+        let mapped = map_usage(&json);
+
+        assert_eq!(mapped.actual_cost_usd, Some(0.00042));
+    }
+
+    #[test]
+    fn map_usage_defaults_actual_cost_usd_to_none_when_absent() {
+        let json = serde_json::json!({
+            "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
+        });
+
+        let mapped = map_usage(&json);
+
+        assert_eq!(mapped.actual_cost_usd, None);
     }
 }
