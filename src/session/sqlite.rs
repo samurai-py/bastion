@@ -165,6 +165,22 @@ impl SessionManager {
                 "ALTER TABLE beliefs ADD COLUMN neutral_count INTEGER NOT NULL DEFAULT 0",
                 [],
             );
+            // Additive migration (MEM-01/D-10): bi-temporal validity columns.
+            // valid_from/valid_until describe the belief's real-world validity
+            // window: NULL valid_from = no asserted start, NULL valid_until =
+            // open/no expiry yet (PERMISSIVE-on-NULL).
+            //
+            // IMPORTANT: this is the OPPOSITE convention from `privacy_tier`
+            // above, where NULL means deny-on-ambiguity (restrictive). Do NOT
+            // "fix" valid_until's NULL handling to match privacy_tier's — an
+            // open-ended belief (valid_until IS NULL) must remain visible/valid
+            // by design; only an explicit past valid_until closes it out.
+            let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN valid_from INTEGER", []);
+            let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN valid_until INTEGER", []);
+            // superseded_by/supersedes_at: set only on the OLD/superseded row
+            // (never on the surviving belief) when a later belief replaces it.
+            let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN superseded_by INTEGER", []);
+            let _ = conn.execute("ALTER TABLE beliefs ADD COLUMN supersedes_at INTEGER", []);
             Ok::<_, anyhow::Error>(())
         })
         .await?
@@ -569,5 +585,61 @@ mod tests {
             second.is_err(),
             "duplicate idempotency_hash must violate UNIQUE constraint"
         );
+    }
+
+    #[tokio::test]
+    async fn test_init_schema_idempotent_rerun_after_beliefs_migration() {
+        let (_f, sm) = make_db().await;
+        // Re-running init_schema a second time (post bi-temporal ALTER TABLE
+        // additions) must still be a no-op — duplicate-column errors swallowed.
+        sm.init_schema().await.expect("second init_schema call");
+    }
+
+    #[tokio::test]
+    async fn test_beliefs_bitemporal_columns_nullable_and_default_null() {
+        let (_f, sm) = make_db().await;
+        let path = sm.db_path.clone();
+        let conn = open_conn(&path).expect("open_conn");
+
+        // Pre-existing-style insert that omits the new bi-temporal columns.
+        conn.execute(
+            "INSERT INTO beliefs (owner_id, persona_tag, content, weight, revoked, is_core, created_at) VALUES ('owner1', NULL, 'test belief', 1.0, 0, 0, 1)",
+            [],
+        )
+        .expect("insert belief");
+
+        let mut stmt = conn.prepare("PRAGMA table_info(beliefs)").expect("prepare");
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query_map")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        for expected in [
+            "valid_from",
+            "valid_until",
+            "superseded_by",
+            "supersedes_at",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "beliefs missing column {expected}, has {cols:?}"
+            );
+        }
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT valid_from, valid_until, superseded_by, supersedes_at FROM beliefs WHERE content = 'test belief'",
+            )
+            .expect("prepare select");
+        let mut rows = stmt.query([]).expect("query");
+        let row = rows.next().expect("row").expect("row present");
+        let valid_from: Option<i64> = row.get(0).expect("valid_from");
+        let valid_until: Option<i64> = row.get(1).expect("valid_until");
+        let superseded_by: Option<i64> = row.get(2).expect("superseded_by");
+        let supersedes_at: Option<i64> = row.get(3).expect("supersedes_at");
+        assert_eq!(valid_from, None);
+        assert_eq!(valid_until, None);
+        assert_eq!(superseded_by, None);
+        assert_eq!(supersedes_at, None);
     }
 }
