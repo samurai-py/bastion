@@ -99,6 +99,7 @@ fn map_usage(usage: Option<CompletionUsage>) -> TokenUsage {
                 .and_then(|d| d.cached_tokens)
                 .unwrap_or(0),
             cache_write: 0,
+            ..Default::default()
         })
         .unwrap_or_default()
 }

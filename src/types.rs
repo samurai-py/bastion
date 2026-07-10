@@ -90,6 +90,12 @@ pub struct TokenUsage {
     pub output_tokens: u32,
     pub cache_read: u32,
     pub cache_write: u32,
+    /// Real, provider-reported per-request cost in USD, when the provider's own API
+    /// exposes one (e.g. OpenRouter's `usage.cost`). `None` when the provider never
+    /// reports a cost field (Anthropic/OpenAI/Groq/Gemini/Ollama) — `estimate_cost_usd`
+    /// (`src/agent/loop_.rs`) falls back to a hardcoded per-provider table in that case
+    /// (SEC-02). Never (de)serialized — no `#[serde]` attribute needed.
+    pub actual_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

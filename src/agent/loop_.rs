@@ -1442,6 +1442,7 @@ mod cache_usage_attributes_tests {
             output_tokens: 20,
             cache_read: 0,
             cache_write: 0,
+            ..Default::default()
         };
         let attrs = cache_usage_attributes(&usage);
         assert_eq!(attrs.len(), 2);
@@ -1458,6 +1459,7 @@ mod cache_usage_attributes_tests {
             output_tokens: 20,
             cache_read: 1200,
             cache_write: 340,
+            ..Default::default()
         };
         let attrs = cache_usage_attributes(&usage);
         assert_eq!(attrs[0].value.to_string(), "1200");
@@ -1500,6 +1502,7 @@ mod tests {
                     output_tokens: 10,
                     cache_read: 0,
                     cache_write: 0,
+                    ..Default::default()
                 },
             })
         }
@@ -1707,6 +1710,7 @@ mod tests {
                             output_tokens: 1,
                             cache_read: 0,
                             cache_write: 0,
+                            ..Default::default()
                         },
                     })
                 } else {
@@ -1718,6 +1722,7 @@ mod tests {
                             output_tokens: 1,
                             cache_read: 0,
                             cache_write: 0,
+                            ..Default::default()
                         },
                     })
                 }
@@ -1842,6 +1847,7 @@ mod tests {
                         output_tokens: 5,
                         cache_read: 0,
                         cache_write: 0,
+                        ..Default::default()
                     },
                 })
             }

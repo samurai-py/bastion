@@ -241,6 +241,7 @@ mod tests {
                     output_tokens: 1,
                     cache_read: 0,
                     cache_write: 0,
+                    ..Default::default()
                 },
             })
         }

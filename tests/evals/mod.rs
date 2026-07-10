@@ -897,6 +897,7 @@ async fn cli_session_deterministic_across_turns() {
                     output_tokens: 1,
                     cache_read: 0,
                     cache_write: 0,
+                    ..Default::default()
                 },
             })
         }

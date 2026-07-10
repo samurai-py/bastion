@@ -151,6 +151,7 @@ fn map_usage(json: &serde_json::Value) -> TokenUsage {
             .as_u64()
             .unwrap_or(0) as u32,
         cache_write: 0,
+        ..Default::default()
     }
 }
 
