@@ -45,8 +45,53 @@ label = "self-improving"
 url   = "http://localhost:8010/mcp"
 label = "content"
 
+# VOICE-01: voice sidecar (mirrors memupalace 1:1 — own Dockerfile, port 8004,
+# models baked at build time). is_local=true is the ENTIRE mechanism Plan 10-08
+# built: without it voice_transcribe/voice_speak default to is_local=false and
+# every LocalOnly-tagged voice turn is blocked by the egress gate. Only set
+# is_local=true on a server that genuinely never sends data off-host.
+[mcp.servers.voice]
+url       = "http://voice:8004/mcp"
+label     = "voice"
+is_local  = true
+
 [channels.telegram]
 enabled = true
 
 [channels.webhook]
 enabled = false
+
+# CHAN-01/CHAN-03/VOICE-01: new channels default to disabled — each needs real
+# per-operator credentials (unlike the container-internal voice sidecar, nobody
+# should be silently exposed to an unconfigured external channel). See
+# docs/channels-setup.md for onboarding steps per channel.
+[channels.whatsapp]
+enabled = false
+
+[channels.discord]
+enabled = false
+
+[channels.slack]
+enabled = false
+
+[channels.email]
+enabled = false
+
+[channels.voice]
+enabled           = false
+wake_word_enabled = false
+voice             = "pf_dora"
+
+# CHAN-02/D-05: unified owner-identity table — one row per human owner, mapping
+# their canonical owner_id to every channel-specific identifier they use. Replaces
+# the old scattered per-channel env vars (BASTION_TELEGRAM_OWNERS/BASTION_WEBHOOK_OWNERS)
+# as the single source of truth for OwnerMap construction across ALL 7 channels.
+# Uncomment and fill in one block per owner:
+# [[identity]]
+# owner_id         = "mario"
+# telegram_chat_id = "12345678"
+# webhook_token    = "token-mario"
+# whatsapp_phone   = "+5511999999999"
+# discord_user_id  = "111222333444555"
+# slack_user_id    = "U01ABCDEF"
+# email_address    = "mario@example.com"
