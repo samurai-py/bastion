@@ -66,9 +66,12 @@ impl McpClient {
                 entry.label.clone()
             };
             // url-based servers (streamable-http / SSE); internal network, no auth header.
+            // is_local (Plan 10-08): threaded through so connect_from_servers_obj can pass
+            // it to ToolRegistry::register_with_schema — the typed locality flag flows
+            // config -> intermediate JSON -> registry, never re-derived from tool_name.
             obj.insert(
                 label,
-                serde_json::json!({ "url": entry.url, "transport": "sse" }),
+                serde_json::json!({ "url": entry.url, "transport": "sse", "is_local": entry.is_local }),
             );
         }
         Self::connect_from_servers_obj(&obj).await
@@ -86,6 +89,13 @@ impl McpClient {
                 .get("transport")
                 .and_then(|v| v.as_str())
                 .unwrap_or("sse");
+            // Plan 10-08: typed, operator-controlled locality flag from
+            // `[mcp.servers.*].is_local` — defaults to false (fail-closed) for any
+            // server config that omits it (legacy mcp-servers.json path).
+            let is_local = server_cfg
+                .get("is_local")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             let service_result = match transport {
                 "stdio" => {
@@ -160,6 +170,7 @@ impl McpClient {
                                     tool.name.to_string(),
                                     schema,
                                     description,
+                                    is_local,
                                 );
                             }
                             tracing::info!(server = %label, "MCP server connected and tools registered");

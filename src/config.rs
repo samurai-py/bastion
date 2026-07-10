@@ -302,6 +302,16 @@ pub struct McpConfig {
 pub struct McpServerEntry {
     pub url: String,
     pub label: String,
+    /// Operator-controlled, typed locality flag (Plan 10-08 / T-10-08-01,02,03).
+    ///
+    /// Defaults to `false` (`#[serde(default)]`) so every EXISTING `[mcp.servers.*]`
+    /// entry (memupalace, skill-writer, self-improving, content) is unaffected without
+    /// any bastion.toml edit — only a server that EXPLICITLY opts in (e.g. the voice
+    /// sidecar, Plan 10-03/10-09) gets its tools classified as local capabilities.
+    /// This is a TRUST-BOUNDARY setting: only set `true` on a server that genuinely
+    /// never sends data off-host — see 10-08-PLAN.md's threat register (T-10-08-01).
+    #[serde(default)]
+    pub is_local: bool,
 }
 
 /// Individual token entry for the MCP server (static token auth, D-05).
