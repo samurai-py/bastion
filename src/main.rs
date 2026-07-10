@@ -490,6 +490,8 @@ async fn daemon_loop(
                 agent_identity,
                 agent_name,
                 mcp_routes,
+                // WhatsApp (CHAN-01) daemon-startup wiring lands in Plan 10-09.
+                None,
             )
             .await
             {

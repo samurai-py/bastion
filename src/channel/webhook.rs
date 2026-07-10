@@ -73,7 +73,7 @@ impl Channel for WebhookChannel {
 // ─── axum handler ────────────────────────────────────────────────────────────
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::HeaderMap,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -85,6 +85,7 @@ use axum::{
 use base64::Engine;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -145,6 +146,9 @@ struct AppState {
     agent_identity: Option<std::sync::Arc<crate::identity::age_identity::AgeIdentity>>,
     /// Human-readable agent name for Agent Card.
     agent_name: String,
+    /// WhatsApp Cloud API config (CHAN-01). None = /whatsapp/webhook routes reject
+    /// with 404/403 rather than panicking — WhatsApp is opt-in per instance.
+    whatsapp: Option<crate::channel::whatsapp::WhatsAppConfig>,
 }
 
 /// Categorize an anyhow error for safe HTTP status mapping.
@@ -803,6 +807,127 @@ async fn agent_card_handler(
     ))
 }
 
+/// GET /whatsapp/webhook — Meta's one-time verification handshake (CHAN-01, D-04
+/// onboarding). Echoes `hub.challenge` verbatim only when `hub.mode == "subscribe"`
+/// AND `hub.verify_token` matches the configured token; 403 otherwise (including
+/// when WhatsApp isn't configured at all — T-10-04-03).
+async fn whatsapp_verify_handler(
+    State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let expected_token = state
+        .whatsapp
+        .as_ref()
+        .map(|w| w.sender.verify_token.clone());
+    match (
+        q.get("hub.mode"),
+        q.get("hub.verify_token"),
+        q.get("hub.challenge"),
+        expected_token,
+    ) {
+        (Some(mode), Some(token), Some(challenge), Some(expected))
+            if mode == "subscribe" && *token == expected =>
+        {
+            (StatusCode::OK, challenge.clone()).into_response()
+        }
+        _ => StatusCode::FORBIDDEN.into_response(),
+    }
+}
+
+/// POST /whatsapp/webhook — inbound WhatsApp message delivery (CHAN-01).
+///
+/// Follows the EXACT ordering of `ingest_handler` (Pitfall 1 / `#mesh-ingest-401`):
+/// raw `axum::body::Bytes` (never a `Json<T>` extractor) so the HMAC signature check
+/// runs BEFORE any JSON parsing — a forged payload never reaches `serde_json::from_slice`,
+/// `handle_whatsapp_message`, or the AgentLoop (T-10-04-01).
+///
+/// Always returns 200 to Meta once past signature verification (delivery-receipt
+/// `statuses` webhooks, non-text messages, unmapped senders, and turn errors are all
+/// swallowed here — Meta only cares that the webhook was received, not that a reply
+/// was sent, and a non-200 here would trigger Meta's retry-storm behavior).
+async fn whatsapp_receive_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let whatsapp = match state.whatsapp.as_ref() {
+        Some(w) => w,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let signature = headers
+        .get("X-Hub-Signature-256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !whatsapp.sender.verify_signature(&body, signature) {
+        tracing::warn!(event = "whatsapp_receive_bad_signature");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(event = "whatsapp_receive_bad_body", error = %e);
+            // Signature was valid but the body wasn't the JSON shape we expect —
+            // still 200 (Meta expects a fast ack for every webhook delivery).
+            return StatusCode::OK.into_response();
+        }
+    };
+
+    let message = payload
+        .get("entry")
+        .and_then(|e| e.get(0))
+        .and_then(|e| e.get("changes"))
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("value"))
+        .and_then(|v| v.get("messages"))
+        .and_then(|m| m.get(0));
+
+    let Some(message) = message else {
+        // e.g. a `statuses` delivery-receipt webhook — no `messages` key present.
+        // Meta expects a fast 200 for every webhook type, not just message events.
+        return StatusCode::OK.into_response();
+    };
+
+    let (Some(from), Some(text)) = (
+        message.get("from").and_then(|v| v.as_str()),
+        message
+            .get("text")
+            .and_then(|t| t.get("body"))
+            .and_then(|v| v.as_str()),
+    ) else {
+        // Non-text message type (image/audio/etc) — skip reply attempt, still 200.
+        return StatusCode::OK.into_response();
+    };
+
+    match crate::channel::whatsapp::handle_whatsapp_message(
+        from.to_string(),
+        text.to_string(),
+        &state.agent,
+        &whatsapp.owner_map,
+    )
+    .await
+    {
+        Ok(reply) => {
+            if let Err(e) = whatsapp.sender.send_text(from, &reply).await {
+                tracing::warn!(event = "whatsapp_send_failed", error = %e, "reply send failed");
+            }
+        }
+        Err(e) => {
+            if e.to_string().contains("not in owner map") {
+                // CR-03: unknown sender — warn and skip silently (no reply attempt).
+                tracing::warn!(event = "whatsapp_handle_message_error", from = %from, error = %e);
+            } else {
+                // M3: log turn_error WITHOUT conversation content.
+                tracing::error!(event = "whatsapp_turn_error", from = %from);
+            }
+        }
+    }
+
+    StatusCode::OK.into_response()
+}
+
 pub async fn serve(
     agent: AgentHandle,
     addr: &str,
@@ -823,6 +948,7 @@ pub async fn serve(
         new_otc_store(),
         None,
         "bastion".to_string(),
+        None,
         None,
     )
     .await
@@ -852,6 +978,10 @@ pub async fn serve_with_mesh(
     // Used by the MCP server to expose its Streamable HTTP service at the
     // configured mount path (e.g. `/mcp`).
     mcp_routes: Option<axum::Router>,
+    // WhatsApp Cloud API config (CHAN-01). None = WhatsApp routes are mounted but
+    // reject with 404/403 rather than panicking (daemon startup wiring lands in
+    // Plan 10-09).
+    whatsapp: Option<crate::channel::whatsapp::WhatsAppConfig>,
 ) -> anyhow::Result<()> {
     let state = AppState {
         agent,
@@ -864,6 +994,7 @@ pub async fn serve_with_mesh(
         mesh_slice_store,
         agent_identity,
         agent_name,
+        whatsapp,
     };
     let mut app = Router::new()
         .route("/webhook", post(handle))
@@ -872,6 +1003,10 @@ pub async fn serve_with_mesh(
         .route("/mesh/ingest", post(ingest_handler))
         .route("/auth/exchange", post(auth_exchange_handler))
         .route("/mesh/pair", post(mesh_pair_handler))
+        .route(
+            "/whatsapp/webhook",
+            get(whatsapp_verify_handler).post(whatsapp_receive_handler),
+        )
         .with_state(state);
     if let Some(mcp) = mcp_routes {
         app = app.merge(mcp);
@@ -901,9 +1036,22 @@ mod tests {
         });
     }
 
-    fn build_router_with_map(map: OwnerMap) -> Router {
-        let (h, rx) = handle::channel();
-        stub_consumer(rx);
+    /// Builds a full test Router + an atomic counter incremented once per turn the
+    /// stub agent consumer actually processes — used by the WhatsApp bad-signature
+    /// test to assert `handle_whatsapp_message`/`AgentHandle::ask` was never reached.
+    fn build_router_with_map_and_whatsapp(
+        map: OwnerMap,
+        whatsapp: Option<crate::channel::whatsapp::WhatsAppConfig>,
+    ) -> (Router, Arc<std::sync::atomic::AtomicUsize>) {
+        let (h, mut rx) = handle::channel();
+        let turn_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let turn_count_clone = turn_count.clone();
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                turn_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = req.reply.send(Ok(format!("echo:{}", req.text)));
+            }
+        });
         let (events_tx, _) = broadcast::channel::<String>(128);
         let mesh_peer_map = Arc::new(RwLock::new(MeshPeerMap::new()));
         let otc_store = Arc::new(RwLock::new(std::collections::HashMap::new()));
@@ -918,19 +1066,59 @@ mod tests {
             mesh_slice_store: None,
             agent_identity: None,
             agent_name: "test".to_string(),
+            whatsapp,
         };
-        Router::new()
+        let router = Router::new()
             .route("/webhook", post(handle))
             .route("/events", axum::routing::get(sse_handler))
             .route("/agent-card", get(agent_card_handler))
             .route("/mesh/ingest", post(ingest_handler))
             .route("/auth/exchange", post(auth_exchange_handler))
             .route("/mesh/pair", post(mesh_pair_handler))
-            .with_state(state)
+            .route(
+                "/whatsapp/webhook",
+                get(whatsapp_verify_handler).post(whatsapp_receive_handler),
+            )
+            .with_state(state);
+        (router, turn_count)
+    }
+
+    fn build_router_with_map(map: OwnerMap) -> Router {
+        build_router_with_map_and_whatsapp(map, None).0
     }
 
     fn build_router() -> Router {
         build_router_with_map(OwnerMap::from_pairs(&[("token-mario", "mario")]))
+    }
+
+    /// Test helper: a WhatsAppConfig with a known test app_secret/verify_token so
+    /// tests can compute matching signatures / verify tokens.
+    fn test_whatsapp_config(
+        map: OwnerMap,
+        app_secret: &str,
+        verify_token: &str,
+    ) -> crate::channel::whatsapp::WhatsAppConfig {
+        crate::channel::whatsapp::WhatsAppConfig {
+            owner_map: map,
+            sender: Arc::new(crate::channel::whatsapp::WhatsAppSender::new(
+                "test-phone-id",
+                "test-access-token",
+                app_secret,
+                verify_token,
+            )),
+        }
+    }
+
+    /// Test helper: compute a valid `sha256=<hex>` signature the same way Meta does.
+    fn sign_whatsapp(secret: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac key");
+        mac.update(body);
+        let digest = mac.finalize().into_bytes();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256={hex}")
     }
 
     #[tokio::test]
@@ -1161,6 +1349,7 @@ mod tests {
             mesh_slice_store: None,
             agent_identity: None,
             agent_name: "test".to_string(),
+            whatsapp: None,
         };
         Router::new()
             .route("/webhook", post(handle))
@@ -1168,6 +1357,10 @@ mod tests {
             .route("/agent-card", get(agent_card_handler))
             .route("/auth/exchange", post(auth_exchange_handler))
             .route("/mesh/pair", post(mesh_pair_handler))
+            .route(
+                "/whatsapp/webhook",
+                get(whatsapp_verify_handler).post(whatsapp_receive_handler),
+            )
             .with_state(state)
     }
 
@@ -1320,5 +1513,137 @@ mod tests {
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── CHAN-01 WhatsApp webhook tests ───────────────────────────────────────
+
+    /// Test 1: GET verify handshake with the correct verify_token echoes hub.challenge.
+    #[tokio::test]
+    async fn get_whatsapp_webhook_correct_verify_token_returns_challenge() {
+        let whatsapp =
+            test_whatsapp_config(OwnerMap::default(), "test-app-secret", "test-verify-token");
+        let (app, _turn_count) =
+            build_router_with_map_and_whatsapp(OwnerMap::default(), Some(whatsapp));
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=test-verify-token&hub.challenge=CHALLENGE123")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&bytes), "CHALLENGE123");
+    }
+
+    /// Test 2: GET verify handshake with a wrong verify_token returns 403.
+    #[tokio::test]
+    async fn get_whatsapp_webhook_wrong_verify_token_returns_403() {
+        let whatsapp =
+            test_whatsapp_config(OwnerMap::default(), "test-app-secret", "test-verify-token");
+        let (app, _turn_count) =
+            build_router_with_map_and_whatsapp(OwnerMap::default(), Some(whatsapp));
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=WRONG&hub.challenge=CHALLENGE123")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Test 3: correctly-signed POST with a text message from a phone in the
+    /// WhatsApp owner map returns 200.
+    #[tokio::test]
+    async fn post_whatsapp_webhook_valid_signature_known_phone_returns_200() {
+        let secret = "test-app-secret";
+        let map = OwnerMap::from_pairs(&[("+5511999999999", "mario")]);
+        let whatsapp = test_whatsapp_config(map, secret, "test-verify-token");
+        let (app, _turn_count) =
+            build_router_with_map_and_whatsapp(OwnerMap::default(), Some(whatsapp));
+
+        let body = serde_json::json!({
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "messages": [{
+                            "from": "+5511999999999",
+                            "text": { "body": "oi" }
+                        }]
+                    }
+                }]
+            }]
+        })
+        .to_string();
+        let sig = sign_whatsapp(secret, body.as_bytes());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/whatsapp/webhook")
+            .header("content-type", "application/json")
+            .header("X-Hub-Signature-256", sig)
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Test 4: an INCORRECT signature returns 403 and — via the turn counter — proves
+    /// the agent turn (and therefore serde_json::from_slice / handle_whatsapp_message)
+    /// was never reached (Pitfall 1 ordering).
+    #[tokio::test]
+    async fn post_whatsapp_webhook_bad_signature_returns_403_and_skips_turn() {
+        let map = OwnerMap::from_pairs(&[("+5511999999999", "mario")]);
+        let whatsapp = test_whatsapp_config(map, "test-app-secret", "test-verify-token");
+        let (app, turn_count) =
+            build_router_with_map_and_whatsapp(OwnerMap::default(), Some(whatsapp));
+
+        let body = serde_json::json!({
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "messages": [{
+                            "from": "+5511999999999",
+                            "text": { "body": "oi" }
+                        }]
+                    }
+                }]
+            }]
+        })
+        .to_string();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/whatsapp/webhook")
+            .header("content-type", "application/json")
+            .header("X-Hub-Signature-256", "sha256=deadbeef")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            turn_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "agent turn must never be reached when the signature is invalid"
+        );
+    }
+
+    /// Test 5: no WhatsApp configured (`state.whatsapp = None`) returns 404, not a panic.
+    #[tokio::test]
+    async fn post_whatsapp_webhook_not_configured_returns_404() {
+        let (app, _turn_count) = build_router_with_map_and_whatsapp(OwnerMap::default(), None);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/whatsapp/webhook")
+            .header("content-type", "application/json")
+            .header("X-Hub-Signature-256", "sha256=deadbeef")
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
