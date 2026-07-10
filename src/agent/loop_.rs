@@ -163,7 +163,7 @@ impl AgentLoop {
         // per tool makes ALL tool calls flow through capability_registry.invoke (D-13).
         // Snapshot tool metadata first (owned) so the agent.mcp borrow is released before we
         // mutably borrow agent.capability_registry.
-        let mcp_tools: Vec<(String, String, serde_json::Value, String)> = agent
+        let mcp_tools: Vec<(String, String, serde_json::Value, String, bool)> = agent
             .mcp
             .registry()
             .list_tool_names()
@@ -187,16 +187,28 @@ impl AgentLoop {
                     .get_tool_description(name)
                     .unwrap_or("")
                     .to_string();
-                (name.to_string(), server_label, schema, description)
+                // Plan 10-08: the load-bearing lookup — any tool whose owning MCP
+                // server is config-flagged `is_local = true` (e.g. the voice sidecar,
+                // Plan 10-03/10-09's `[mcp.servers.voice]`) is automatically registered
+                // as a local capability below, with zero tool-name string matching.
+                let is_local = agent.mcp.registry().is_local(name);
+                (
+                    name.to_string(),
+                    server_label,
+                    schema,
+                    description,
+                    is_local,
+                )
             })
             .collect();
-        for (tool_name, server_label, schema, description) in mcp_tools {
+        for (tool_name, server_label, schema, description, is_local) in mcp_tools {
             let adapter = crate::capability::McpToolAdapter {
                 tool_name: tool_name.clone(),
                 server_label,
                 description,
                 schema,
                 mcp: agent.mcp.clone(),
+                is_local_override: is_local,
             };
             if let Err(e) = agent.capability_registry.register(Arc::new(adapter)) {
                 tracing::warn!(event = "mcp_capability_register_failed", tool = %tool_name, err = %e);

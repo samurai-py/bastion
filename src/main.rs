@@ -607,6 +607,9 @@ async fn daemon_loop(
                     .to_string(),
                 schema: serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}),
                 mcp: agent.mcp.clone(),
+                // memupalace's memory_embed is NOT local (Plan 10-08) — preserves
+                // today's exact behavior unchanged.
+                is_local_override: false,
             },
         )) {
             tracing::warn!(event = "reflector_registry_register_failed", error = %e);
