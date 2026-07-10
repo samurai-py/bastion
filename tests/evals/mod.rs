@@ -960,6 +960,7 @@ async fn cli_session_deterministic_across_turns() {
         memory,
         GoalEngine::new(&path, ScoringConfig::default()),
         vec![],
+        &path,
     );
 
     // Two consecutive CLI turns — both must succeed.

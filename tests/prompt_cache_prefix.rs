@@ -112,6 +112,7 @@ async fn make_agent(db_path: &str) -> (AgentLoop, SharedMemory) {
         memory.clone(),
         GoalEngine::new(db_path, ScoringConfig::default()),
         vec![],
+        db_path,
     );
 
     (agent, memory)

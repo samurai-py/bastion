@@ -202,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
         memory.clone(),
         goals,
         cfg.agent.fallback_models.clone(),
+        &db_path,
     );
 
     match cli.command {

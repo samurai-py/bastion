@@ -97,6 +97,7 @@ impl AgentLoop {
         memory: SharedMemory,
         goals: GoalEngine,
         fallback_models: Vec<String>,
+        db_path: &str,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
         // BIG-1 (Gap 2): McpClient is shared by-Arc so each McpToolAdapter can hold a
@@ -115,7 +116,12 @@ impl AgentLoop {
             input_guard: InputGuardrail::default(),
             output_validator: OutputValidator,
             egress_hook: EgressHook,
-            capability_registry: crate::capability::CapabilityRegistry::new(),
+            // SEC-01: the real ApprovalQueue is wired against the SAME db_path as
+            // session/memory — a needs_approval()==true capability is never
+            // unusable-but-should-work; it always has a queue behind it.
+            capability_registry: crate::capability::CapabilityRegistry::new().with_approval_queue(
+                Arc::new(crate::capability::approval::ApprovalQueue::new(db_path)),
+            ),
             context_providers: vec![],
             pending_tx,
             pending_rx: Some(pending_rx),
@@ -877,7 +883,8 @@ impl AgentLoop {
                     for tc in &tool_calls {
                         tracing::debug!(event = "tool_dispatch", tool = %tc.name);
                         // D-13: route ALL tool calls through capability_registry.invoke.
-                        // v1.0: approval gate disabled — Phase 3 implements the approval queue.
+                        // SEC-01: the approval gate is real now — whether this call queues
+                        // is decided entirely by the capability's own needs_approval().
                         let ctx = crate::capability::InvokeCtx {
                             owner: owner.to_owned(),
                             // CR-01/CR-02: fail-closed — an unresolved tier is treated as the
@@ -886,7 +893,6 @@ impl AgentLoop {
                             privacy_tier: Some(
                                 resolved_tier.unwrap_or(crate::memory::PrivacyTier::LocalOnly),
                             ),
-                            needs_approval: false, // v1.0: approval gate desabilitado — Phase 3 implementará o approval queue
                         };
                         // SEAM #4: span filho execute_tool por tool call
                         let mut tool_span = tracer
@@ -1646,6 +1652,7 @@ mod tests {
             memory,
             GoalEngine::new(db_path, ScoringConfig::default()),
             vec![],
+            db_path,
         )
     }
 
@@ -1862,6 +1869,7 @@ mod tests {
             memory,
             GoalEngine::new(&path, ScoringConfig::default()),
             vec![],
+            &path,
         );
 
         // CloudOk persona + cloud provider: the multi-round tool loop must complete,
