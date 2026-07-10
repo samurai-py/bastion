@@ -9,8 +9,10 @@
 //! 3. No call path bypasses check_egress or approval queue
 
 pub mod adapters;
+pub mod approval;
 pub mod registry;
 pub mod structured_output;
 
 pub use adapters::{DirectFnAdapter, McpToolAdapter, NlCommandAdapter};
+pub use approval::{ApprovalOutcome, ApprovalQueue, ApprovalRow, ApprovalStatus};
 pub use registry::{Capability, CapabilityRegistry, InvokeCtx, TurnCapabilityScope};
