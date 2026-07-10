@@ -127,15 +127,23 @@ impl Channel for VoiceChannel {
         let owner = self.owner.clone();
         let voice_id = self.voice_id.clone();
 
-        // Wake-word (D-10) is stubbed here pending Task 3's package-legitimacy
-        // checkpoint on `rustpotter` — Task 4 replaces this branch with either the
-        // real rustpotter-backed loop (approved) or leaves this exact warn-and-
-        // fall-back-to-push-to-talk behavior (deferred). Never a silent no-op.
+        // Wake-word (D-10, opt-in): Task 3's package-legitimacy checkpoint on
+        // `rustpotter` was approved (pinned 3.0.2) — spawn the real
+        // rustpotter-backed loop concurrently with push-to-talk. Both triggers
+        // share the exact same `handle_voice_turn` core; only the trigger
+        // differs. `wake_word_loop` itself logs a loud warning and returns (no
+        // panic, no silent no-op) if the operator hasn't configured
+        // `VOICE_WAKE_WORD_MODEL_PATH` or hardware/model loading fails.
         if self.wake_word_enabled {
-            tracing::warn!(
-                event = "voice_wake_word_not_implemented",
-                "wake_word_enabled=true but wake-word is not yet implemented — see backlog"
-            );
+            let registry = registry.clone();
+            let agent = agent.clone();
+            let owner = owner.clone();
+            let voice_id = voice_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = wake_word_loop(registry, agent, owner, voice_id).await {
+                    tracing::warn!(event = "voice_wake_word_loop_error", error = %e, "wake-word loop terminated");
+                }
+            });
         }
         push_to_talk_loop(registry, agent, owner, voice_id).await
     }
@@ -456,6 +464,183 @@ async fn push_to_talk_loop(
                 }
             }
             KeyEventKind::Repeat => {}
+        }
+    }
+
+    Ok(())
+}
+
+// ─── wake-word trigger loop (D-10, opt-in, hardware-dependent) ────────────
+
+/// Fixed recording window for a wake-word-triggered utterance. VAD-based
+/// end-of-speech trimming is out of scope this phase (push-to-talk's
+/// press/release IS the end-of-speech signal for that trigger; wake-word has
+/// no equivalent signal without extra work) — a fixed window keeps the first
+/// cut simple and safe. A future refinement could trim trailing silence.
+const WAKE_WORD_UTTERANCE_SECS: f64 = 4.0;
+
+/// Wake-word (D-10, opt-in) trigger loop, backed by `rustpotter` (pinned
+/// `3.0.2`, approved via this plan's Task 3 human-verify checkpoint).
+///
+/// SUPPLY-CHAIN NOTE (T-10-07-SC): `rustpotter` ships NO bundled/default
+/// wake-word model or reference — every wakeword must be a file the operator
+/// supplies (either a wakeword *reference*, built from 3-8 of their own WAV
+/// recordings, e.g. via `rustpotter-cli`, or a trained wakeword *model*; see
+/// the crate's own README and `Rustpotter::add_wakeword_from_file`). This was
+/// outside 10-RESEARCH.md's supply-chain-only audit scope and is a real,
+/// expected operational requirement — not a Bastion bug. Configured via
+/// `VOICE_WAKE_WORD_MODEL_PATH`; if unset, or the file fails to load, or no
+/// input device is available, this loop logs a loud warning and returns
+/// immediately — `VoiceChannel::run`'s push-to-talk path keeps running
+/// regardless (never a silent no-op, per this task's own `<done>` criterion).
+///
+/// Reuses the exact same `handle_voice_turn` core as push-to-talk (via
+/// `run_voice_turn`) — only the trigger differs, per D-10.
+async fn wake_word_loop(
+    registry: Arc<CapabilityRegistry>,
+    agent: AgentHandle,
+    owner: String,
+    voice_id: String,
+) -> anyhow::Result<()> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use cpal::Sample;
+
+    let Ok(model_path) = std::env::var("VOICE_WAKE_WORD_MODEL_PATH") else {
+        tracing::warn!(
+            event = "voice_wake_word_model_missing",
+            "wake_word_enabled=true but VOICE_WAKE_WORD_MODEL_PATH is unset — rustpotter ships \
+             no default wakeword (a reference or trained model file must be provided by the \
+             operator); wake-word trigger disabled, push-to-talk continues"
+        );
+        return Ok(());
+    };
+
+    let host = cpal::default_host();
+    let Some(device) = host.default_input_device() else {
+        tracing::warn!(
+            event = "voice_wake_word_no_input_device",
+            "no default audio input device — wake-word trigger disabled, push-to-talk continues"
+        );
+        return Ok(());
+    };
+    let config = match device.default_input_config() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(event = "voice_wake_word_input_config_error", error = %e, "wake-word trigger disabled, push-to-talk continues");
+            return Ok(());
+        }
+    };
+    let channels = config.channels();
+    let sample_rate = config.sample_rate();
+    let sample_format = config.sample_format();
+    let stream_config: cpal::StreamConfig = config.into();
+
+    let mut rustpotter_config = rustpotter::RustpotterConfig::default();
+    rustpotter_config.fmt.sample_rate = sample_rate as usize;
+    rustpotter_config.fmt.channels = 1;
+    rustpotter_config.fmt.sample_format = rustpotter::SampleFormat::F32;
+
+    let mut detector = match rustpotter::Rustpotter::new(&rustpotter_config) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(event = "voice_wake_word_init_error", error = %e, "failed to initialize rustpotter detector — wake-word trigger disabled, push-to-talk continues");
+            return Ok(());
+        }
+    };
+    if let Err(e) = detector.add_wakeword_from_file("wake_word", &model_path) {
+        tracing::warn!(event = "voice_wake_word_model_load_error", error = %e, model_path = %model_path, "failed to load wake-word model/reference — wake-word trigger disabled, push-to-talk continues");
+        return Ok(());
+    }
+    let frame_len = detector.get_samples_per_frame();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<f32>();
+    let err_fn = |err: cpal::Error| {
+        tracing::warn!(event = "voice_wake_word_input_stream_error", error = %err);
+    };
+
+    macro_rules! build_wake_word_stream {
+        ($sample_ty:ty) => {{
+            let tx = tx.clone();
+            device.build_input_stream(
+                stream_config.clone(),
+                move |data: &[$sample_ty], _: &cpal::InputCallbackInfo| {
+                    if channels <= 1 {
+                        for s in data {
+                            let _ = tx.send(f32::from_sample(*s));
+                        }
+                    } else {
+                        for frame in data.chunks(channels as usize) {
+                            let sum: f32 = frame.iter().map(|s| f32::from_sample(*s)).sum();
+                            let _ = tx.send(sum / f32::from(channels));
+                        }
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }};
+    }
+
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => build_wake_word_stream!(f32),
+        cpal::SampleFormat::I16 => build_wake_word_stream!(i16),
+        cpal::SampleFormat::U16 => build_wake_word_stream!(u16),
+        cpal::SampleFormat::I8 => build_wake_word_stream!(i8),
+        other => {
+            tracing::warn!(event = "voice_wake_word_unsupported_format", format = ?other, "wake-word trigger disabled, push-to-talk continues");
+            return Ok(());
+        }
+    };
+    let stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(event = "voice_wake_word_stream_build_error", error = %e, "wake-word trigger disabled, push-to-talk continues");
+            return Ok(());
+        }
+    };
+    if let Err(e) = stream.play() {
+        tracing::warn!(event = "voice_wake_word_stream_play_error", error = %e, "wake-word trigger disabled, push-to-talk continues");
+        return Ok(());
+    }
+
+    tracing::info!(
+        event = "voice_wake_word_ready",
+        model_path = %model_path,
+        "Wake-word detection active."
+    );
+
+    let mut frame_buf: Vec<f32> = Vec::with_capacity(frame_len);
+    while let Some(sample) = rx.recv().await {
+        frame_buf.push(sample);
+        if frame_buf.len() < frame_len {
+            continue;
+        }
+        let frame: Vec<f32> = frame_buf.drain(..frame_len).collect();
+        if detector.process_samples(frame).is_none() {
+            continue;
+        }
+
+        tracing::info!(
+            event = "voice_wake_word_detected",
+            "Wake word detected — recording utterance."
+        );
+
+        // Collect the follow-up utterance from the SAME continuous stream
+        // (no second input stream needed) for a fixed window.
+        let utterance_samples_needed = (sample_rate as f64 * WAKE_WORD_UTTERANCE_SECS) as usize;
+        let mut utterance: Vec<f32> = Vec::with_capacity(utterance_samples_needed);
+        while utterance.len() < utterance_samples_needed {
+            match rx.recv().await {
+                Some(s) => utterance.push(s),
+                None => break,
+            }
+        }
+        detector.reset();
+
+        if let Err(e) =
+            run_voice_turn(utterance, sample_rate, &registry, &agent, &owner, &voice_id).await
+        {
+            tracing::warn!(event = "voice_turn_error", error = %e);
         }
     }
 

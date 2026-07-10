@@ -94,6 +94,24 @@ hmac           = "0.12"
 cpal           = "0.18.1"
 hound          = "3.5.1"
 mailparse      = "0.16.1"
+# Plan 10-07 Task 4 (VOICE-01/D-10): wake-word opt-in trigger. Approved via the
+# Task 3 package-legitimacy checkpoint (10-07-PLAN.md) despite the crate being
+# stale (no release since Oct 2023, ~199 dl/wk) — feature defaults OFF
+# (`wake_word_enabled: false`, VoiceChannelConfig), so nobody is exposed unless
+# they explicitly opt in.
+rustpotter     = "3.0.2"
+# rustpotter -> candle-nn -> candle-core 0.2.2 requires `half` (f16 support)
+# with its "rand_distr" feature enabled. half >= 2.5.0 upgraded that feature to
+# rand_distr 0.5.x (rand 0.9), while candle-core 0.2.2's own cpu_backend.rs
+# calls `rand_distr::Normal` from ITS pinned `rand_distr = "0.4.3"` (rand 0.8)
+# — two incompatible major versions of the same trait, so
+# `StandardNormal: Distribution<f16>` doesn't resolve (E0277) with a bare
+# `half = "2"` requirement. Pin the last `half` release whose "rand_distr"
+# feature still targets rand_distr ^0.4.3, matching candle-core's own
+# expectation. Real upstream breakage in a stale (no release since 2023)
+# transitive dependency — not a Bastion bug; `half` isn't used anywhere else
+# in this workspace (`cargo tree -i half` shows only the rustpotter subtree).
+half           = "=2.4.1"
 
 [dev-dependencies]
 tokio-test   = "0.4"
