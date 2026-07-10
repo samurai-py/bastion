@@ -1397,8 +1397,19 @@ fn render_verdict(verdict: &crate::cabinet::synth::CabinetVerdict) -> String {
 }
 
 /// Simple cost estimation for budget tracking.
+///
+/// SEC-02 (D-04/D-05): a provider's own reported per-request cost always wins when
+/// present (`TokenUsage.actual_cost_usd`, e.g. OpenRouter's `usage.cost`) — the
+/// hardcoded tables below are a fallback ONLY, used when the provider never reports a
+/// cost field at all (Gemini, always — confirmed no cost field exists in
+/// `usageMetadata`, RESEARCH Pitfall 3) or reports one that's momentarily absent.
+///
 /// Per AI-SPEC §4b.5: claude-sonnet-4-5 ≈ $3/1M input, $15/1M output
 fn estimate_cost_usd(provider: &str, usage: &TokenUsage) -> f64 {
+    if let Some(real) = usage.actual_cost_usd {
+        return real;
+    }
+
     match provider {
         "anthropic" => {
             let input_cost = usage.input_tokens as f64 * 3.0 / 1_000_000.0;
@@ -1408,6 +1419,25 @@ fn estimate_cost_usd(provider: &str, usage: &TokenUsage) -> f64 {
         "openai" => {
             let input_cost = usage.input_tokens as f64 * 2.5 / 1_000_000.0;
             let output_cost = usage.output_tokens as f64 * 10.0 / 1_000_000.0;
+            input_cost + output_cost
+        }
+        // OpenRouter aggregates many models at different price points; `usage.cost`
+        // (real, per-request) is the normal path and always wins above. This is a
+        // conservative blended-average estimate for the rare case that field is
+        // momentarily missing — never 0.0 for a paid provider (SEC-02, the original
+        // defect being fixed here). Source: openrouter.ai/models blended free+paid
+        // average as of 2026-07.
+        "openrouter" => {
+            let input_cost = usage.input_tokens as f64 * 0.5 / 1_000_000.0;
+            let output_cost = usage.output_tokens as f64 * 1.5 / 1_000_000.0;
+            input_cost + output_cost
+        }
+        // Gemini never reports a cost field (RESEARCH Pitfall 3) — this arm is always
+        // consulted for Gemini, not just a fallback. Rates match Gemini 2.5 Flash
+        // published pricing as of 2026-07 (ai.google.dev/pricing).
+        "gemini" => {
+            let input_cost = usage.input_tokens as f64 * 0.3 / 1_000_000.0;
+            let output_cost = usage.output_tokens as f64 * 2.5 / 1_000_000.0;
             input_cost + output_cost
         }
         "ollama" => 0.0, // local — no cost
@@ -1485,6 +1515,56 @@ mod tests {
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn estimate_cost_usd_real_cost_always_wins_over_hardcoded_table() {
+        let usage = TokenUsage {
+            actual_cost_usd: Some(0.0021),
+            ..Default::default()
+        };
+        assert_eq!(estimate_cost_usd("openrouter", &usage), 0.0021);
+    }
+
+    #[test]
+    fn estimate_cost_usd_openrouter_fallback_is_never_zero() {
+        let usage = TokenUsage {
+            actual_cost_usd: None,
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        };
+        assert!(estimate_cost_usd("openrouter", &usage) > 0.0);
+    }
+
+    #[test]
+    fn estimate_cost_usd_gemini_fallback_is_never_zero() {
+        let usage = TokenUsage {
+            actual_cost_usd: None,
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        };
+        assert!(estimate_cost_usd("gemini", &usage) > 0.0);
+    }
+
+    #[test]
+    fn estimate_cost_usd_existing_providers_unchanged() {
+        let usage = TokenUsage {
+            actual_cost_usd: None,
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        };
+        assert_eq!(
+            estimate_cost_usd("anthropic", &usage),
+            1000.0 * 3.0 / 1_000_000.0 + 500.0 * 15.0 / 1_000_000.0
+        );
+        assert_eq!(
+            estimate_cost_usd("openai", &usage),
+            1000.0 * 2.5 / 1_000_000.0 + 500.0 * 10.0 / 1_000_000.0
+        );
+        assert_eq!(estimate_cost_usd("ollama", &usage), 0.0);
+    }
 
     // MockProvider: complete_simple echoes a persona response.
     struct MockProvider {
