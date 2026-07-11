@@ -433,6 +433,95 @@ impl AgentLoop {
         None
     }
 
+    /// Plan 11-04 / SEC-01: pre-LLM approval-resolution intercept — the owner's
+    /// plain-language "sim"/"aprovo"/"não"/"cancela" reply (D-02: "linguagem
+    /// natural é o mecanismo BASE"), from ANY of the 7 channels, resolves the
+    /// OLDEST pending `approval_queue` row without ever invoking the LLM.
+    /// Channel-agnostic by construction: this lives in `run_turn_for`, the
+    /// single entry point every channel funnels through — same early-exit
+    /// shape as `cockpit_command` immediately above.
+    ///
+    /// Returns `None` (falls through to a normal turn, untouched) when: no
+    /// `ApprovalQueue` is wired, the owner has zero pending rows, or `input`
+    /// matches neither an approval nor a rejection phrase.
+    async fn approval_resolution(
+        &self,
+        input: &str,
+        owner: &str,
+    ) -> Option<anyhow::Result<String>> {
+        let queue = self.capability_registry.approval_queue()?.clone();
+
+        let pending = match queue.pending_for_owner(owner).await {
+            Ok(rows) => rows,
+            Err(e) => return Some(Err(e)),
+        };
+        if pending.is_empty() {
+            return None;
+        }
+
+        // Test 5: deterministic oldest-first tie-break when several actions are
+        // queued for the same owner — avoids ambiguity about which row a plain
+        // "sim"/"aprovo" (with no id) resolves. `created_at` (nanosecond
+        // timestamp at enqueue time) breaks ties first, `id` (autoincrement)
+        // breaks any remaining tie.
+        let oldest = pending
+            .into_iter()
+            .min_by_key(|r| (r.created_at, r.id))
+            .expect("pending is non-empty, checked above");
+
+        if crate::hooks::approval_intent::detect_approval_intent(input) {
+            let approved_row = match queue.approve(owner, oldest.id).await {
+                Ok(row) => row,
+                Err(e) => return Some(Err(e)),
+            };
+            let args: serde_json::Value = match serde_json::from_str(&approved_row.args_json) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e.into())),
+            };
+            // The queued capability already cleared Policy 1 (egress) once, at
+            // whatever tier the original enqueue-time turn resolved — that tier
+            // isn't persisted on the row. The owner's approval reply arrives
+            // through an already-authenticated channel (CR-03 owner-map/JWT;
+            // per this plan's threat model, the risk here is misclassifying
+            // intent, not spoofing identity), so this resolution re-invoke uses
+            // `CloudOk` — the same permissive-but-explicit tier the registry's
+            // own approval-gate test suite (Plan 11-02's `ctx_for`) uses to
+            // clear Policy 1 so Policy 2's `ApprovedPendingExecution` branch is
+            // reachable.
+            let ctx = crate::capability::InvokeCtx {
+                owner: owner.to_owned(),
+                privacy_tier: Some(crate::memory::PrivacyTier::CloudOk),
+            };
+            return Some(
+                match self
+                    .capability_registry
+                    .invoke(&approved_row.capability_name, args, &ctx)
+                    .await
+                {
+                    Ok(_) => Ok(format!(
+                        "Confirmado: {} executado.",
+                        approved_row.capability_name
+                    )),
+                    Err(e) => Err(e),
+                },
+            );
+        }
+
+        if crate::hooks::approval_intent::detect_rejection_intent(input) {
+            return Some(
+                queue
+                    .reject(owner, oldest.id)
+                    .await
+                    .map(|_| "Ação cancelada.".to_string()),
+            );
+        }
+
+        // Neither phrase matched — fall through to a normal turn. The pending
+        // row is left completely untouched; the LLM (not a hardcoded string
+        // here) may mention it via the existing context-injection seams.
+        None
+    }
+
     pub async fn run_turn_for(&mut self, user_input: &str, owner: &str) -> anyhow::Result<String> {
         let t_start = Instant::now();
 
@@ -441,6 +530,13 @@ impl AgentLoop {
 
         // Cockpit commands resolve to real memory/goal data, bypassing the LLM turn.
         if let Some(result) = self.cockpit_command(user_input, owner).await {
+            return result;
+        }
+
+        // SEC-01 / Plan 11-04 (D-02): the owner's plain-language "sim"/"não"
+        // reply resolves a pending approval-queue row, channel-agnostically,
+        // before any LLM call — same early-exit shape as cockpit_command above.
+        if let Some(result) = self.approval_resolution(user_input, owner).await {
             return result;
         }
 
@@ -1698,6 +1794,254 @@ mod tests {
             !resp.is_empty(),
             "response must not be empty; got: {resp:?}"
         );
+    }
+
+    // --- Plan 11-04 (SEC-01): run_turn_for's approval-resolution intercept ----
+
+    /// Stub capability with a call counter — proves whether `invoke()` actually
+    /// dispatched. Mirrors `capability::registry::tests::ApprovalStubCap`
+    /// exactly (that one is private to its own module, so this test module gets
+    /// its own copy).
+    struct ApprovalResolutionStubCap {
+        cap_name: String,
+        schema: serde_json::Value,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::capability::Capability for ApprovalResolutionStubCap {
+        fn name(&self) -> &str {
+            &self.cap_name
+        }
+        fn description(&self) -> &str {
+            "approval-resolution stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        async fn invoke(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::capability::InvokeCtx,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!({"dispatched": true}))
+        }
+        fn needs_approval(&self) -> bool {
+            true
+        }
+    }
+
+    fn cloudok_ctx(owner: &str) -> crate::capability::InvokeCtx {
+        // Clears Policy 1 (egress) so enqueue_or_reuse's own invoke() call
+        // reaches Policy 2 (the approval gate) — same convention as
+        // capability::registry::tests::ctx_for.
+        crate::capability::InvokeCtx {
+            owner: owner.to_string(),
+            privacy_tier: Some(PrivacyTier::CloudOk),
+        }
+    }
+
+    /// Queues one `needs_approval()==true` capability call for `owner` via the
+    /// real `invoke()` path (not a direct `ApprovalQueue` call) — proves the
+    /// row this test resolves is the SAME kind of row Policy 2 actually creates.
+    async fn queue_one_pending(
+        agent: &mut AgentLoop,
+        cap_name: &str,
+        owner: &str,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent
+            .capability_registry
+            .register(Arc::new(ApprovalResolutionStubCap {
+                cap_name: cap_name.to_string(),
+                schema: serde_json::json!({}),
+                calls: calls.clone(),
+            }))
+            .expect("register stub capability");
+        agent
+            .capability_registry
+            .invoke(cap_name, serde_json::json!({"x": 1}), &cloudok_ctx(owner))
+            .await
+            .expect("first invoke must queue, not error");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "queuing must not dispatch"
+        );
+        calls
+    }
+
+    /// Test 1: zero pending rows -> None immediately, regression: normal turn
+    /// proceeds unaffected (existing run_turn_for behavior unchanged).
+    #[tokio::test]
+    async fn approval_resolution_returns_none_with_zero_pending_rows() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let agent = make_loop(&path).await;
+
+        assert!(agent.approval_resolution("sim", "alice").await.is_none());
+
+        // Regression: a normal turn still completes end-to-end (the LLM mock
+        // response, not a hardcoded approval string).
+        let mut agent = agent;
+        let resp = agent
+            .run_turn_for("hello there", "alice")
+            .await
+            .expect("run_turn_for must succeed");
+        assert!(resp.contains("response from"), "got: {resp:?}");
+    }
+
+    /// Test 2: one pending row, owner sends "sim" -> approve + real dispatch +
+    /// a confirmation string; the LLM is never invoked for this turn (proven by
+    /// the response NOT being the mock provider's "response from ..." text).
+    #[tokio::test]
+    async fn approval_resolution_approves_and_dispatches_on_sim() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        let calls = queue_one_pending(&mut agent, "dangerous_action", "alice").await;
+
+        let resp = agent
+            .run_turn_for("sim, pode confirmar", "alice")
+            .await
+            .expect("run_turn_for must succeed");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the originally-queued capability must dispatch exactly once"
+        );
+        assert!(
+            resp.contains("dangerous_action"),
+            "confirmation must name the executed capability; got: {resp:?}"
+        );
+        assert!(
+            !resp.contains("response from"),
+            "the LLM mock must never be invoked for an approval-resolution turn; got: {resp:?}"
+        );
+
+        let queue = agent.capability_registry.approval_queue().unwrap();
+        assert!(
+            queue
+                .pending_for_owner("alice")
+                .await
+                .expect("pending_for_owner")
+                .is_empty(),
+            "row must no longer be pending after resolution"
+        );
+    }
+
+    /// Test 3: one pending row, owner sends "não" -> reject; the capability
+    /// never dispatches.
+    #[tokio::test]
+    async fn approval_resolution_rejects_and_never_dispatches_on_nao() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        let calls = queue_one_pending(&mut agent, "dangerous_action", "alice").await;
+
+        let resp = agent
+            .run_turn_for("não, cancela isso", "alice")
+            .await
+            .expect("run_turn_for must succeed");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a rejected action must never dispatch"
+        );
+        assert!(
+            resp.contains("cancel") || resp.to_lowercase().contains("cancel"),
+            "got: {resp:?}"
+        );
+
+        let queue = agent.capability_registry.approval_queue().unwrap();
+        let pending = queue
+            .pending_for_owner("alice")
+            .await
+            .expect("pending_for_owner");
+        assert!(
+            pending.is_empty(),
+            "rejected row must no longer be 'pending' status"
+        );
+    }
+
+    /// Test 4: one pending row, owner sends an UNRELATED message -> None,
+    /// falling through to a completely normal turn; the pending row is
+    /// untouched (still pending, capability never dispatches).
+    #[tokio::test]
+    async fn approval_resolution_falls_through_on_unrelated_message() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        let calls = queue_one_pending(&mut agent, "dangerous_action", "alice").await;
+
+        let resp = agent
+            .run_turn_for("what's the weather like today?", "alice")
+            .await
+            .expect("run_turn_for must succeed");
+
+        assert!(
+            resp.contains("response from"),
+            "an unrelated message must fall through to a normal LLM turn; got: {resp:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an unrelated message must never dispatch the pending capability"
+        );
+
+        let queue = agent.capability_registry.approval_queue().unwrap();
+        let pending = queue
+            .pending_for_owner("alice")
+            .await
+            .expect("pending_for_owner");
+        assert_eq!(pending.len(), 1, "the pending row must remain untouched");
+    }
+
+    /// Test 5: multiple pending rows for the same owner — a plain "sim" with no
+    /// id resolves the OLDEST pending row only (deterministic tie-break).
+    #[tokio::test]
+    async fn approval_resolution_resolves_oldest_pending_row_only() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+
+        let calls_a = queue_one_pending(&mut agent, "action_a", "alice").await;
+        // Nanosecond-resolution created_at should already differ, but a tiny
+        // sleep makes the ordering assertion deterministic regardless of clock
+        // granularity on any given CI runner.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let calls_b = queue_one_pending(&mut agent, "action_b", "alice").await;
+
+        let resp = agent
+            .run_turn_for("sim", "alice")
+            .await
+            .expect("run_turn_for must succeed");
+
+        assert!(
+            resp.contains("action_a"),
+            "must resolve the OLDEST (first-queued) row; got: {resp:?}"
+        );
+        assert_eq!(
+            calls_a.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "action_a (oldest) must dispatch"
+        );
+        assert_eq!(
+            calls_b.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "action_b (newer) must remain untouched"
+        );
+
+        let queue = agent.capability_registry.approval_queue().unwrap();
+        let pending = queue
+            .pending_for_owner("alice")
+            .await
+            .expect("pending_for_owner");
+        assert_eq!(pending.len(), 1, "only action_b should remain pending");
+        assert_eq!(pending[0].capability_name, "action_b");
     }
 
     #[tokio::test]

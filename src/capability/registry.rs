@@ -74,6 +74,16 @@ impl CapabilityRegistry {
         self
     }
 
+    /// Plan 11-04: read access to the wired `ApprovalQueue` (if any) — lets
+    /// `AgentLoop::run_turn_for`'s pre-LLM approval-resolution intercept check
+    /// `pending_for_owner`/`approve`/`reject` WITHOUT going through `invoke()`
+    /// (there is no capability to invoke yet at that point — resolution decides
+    /// whether to dispatch one). Returns `None` when no queue is wired, exactly
+    /// mirroring Policy 2's own fail-closed treatment of an unwired registry.
+    pub fn approval_queue(&self) -> Option<&Arc<ApprovalQueue>> {
+        self.approval_queue.as_ref()
+    }
+
     /// Register a capability under its `name()`.
     ///
     /// SECURITY: rejects two impersonation vectors (D-13 guardrail):
