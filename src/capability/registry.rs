@@ -691,4 +691,115 @@ mod tests {
         );
         assert_eq!(tagged.source, "remote_cap");
     }
+
+    // --- Plan 11-08 (SEC-05): drain_all/restore + TurnCapabilityScope::quarantine() ---
+
+    #[test]
+    fn drain_all_returns_all_capabilities_and_empties_registry() {
+        let mut registry = CapabilityRegistry::new();
+        registry.register(stub("a")).unwrap();
+        registry.register(stub("b")).unwrap();
+        registry.register(stub("c")).unwrap();
+
+        let drained = registry.drain_all();
+        assert_eq!(drained.len(), 3);
+        assert!(
+            registry.is_empty(),
+            "drain_all must leave the registry empty"
+        );
+    }
+
+    #[test]
+    fn restore_reregisters_every_drained_capability_byte_identical_list() {
+        let mut registry = CapabilityRegistry::new();
+        registry.register(stub("z")).unwrap();
+        registry.register(stub("a")).unwrap();
+        registry.register(stub("m")).unwrap();
+
+        let before = serde_json::to_string(&registry.list_tool_defs()).unwrap();
+
+        let drained = registry.drain_all();
+        assert!(registry.is_empty());
+
+        registry.restore(drained);
+
+        let after = serde_json::to_string(&registry.list_tool_defs()).unwrap();
+        assert_eq!(
+            before, after,
+            "restore() must reproduce the exact same set (list_tool_defs already sorts by name)"
+        );
+    }
+
+    /// Test 3: `TurnCapabilityScope::quarantine(&mut registry)` — while the
+    /// scope is alive, `list_tool_defs()` returns `[]` and `invoke()` errors
+    /// "unknown capability" for a PREVIOUSLY-registered name — genuinely
+    /// invisible, not just "no new tools added" (the exact gap RESEARCH.md
+    /// flagged). Uses the scope's `Deref` (not `registry` directly — the
+    /// scope holds the sole `&mut` for its lifetime).
+    #[tokio::test]
+    async fn quarantine_makes_every_capability_genuinely_invisible_while_alive() {
+        let mut registry = CapabilityRegistry::new();
+        registry.register(stub("a")).unwrap();
+        registry.register(stub("b")).unwrap();
+        registry.register(stub("c")).unwrap();
+
+        {
+            let scope = TurnCapabilityScope::quarantine(&mut registry);
+            assert!(
+                scope.list_tool_defs().is_empty(),
+                "quarantine must make list_tool_defs() return [] — not just 'no new tools added'"
+            );
+            let result = scope
+                .invoke(
+                    "a",
+                    serde_json::json!({}),
+                    &InvokeCtx {
+                        owner: "alice".to_string(),
+                        privacy_tier: Some(PrivacyTier::CloudOk),
+                    },
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "a previously-registered capability must be genuinely uninvokable during quarantine"
+            );
+        }
+    }
+
+    /// Test 4: when the `quarantine()`-created scope drops, every
+    /// originally-registered capability is invocable again, identically to
+    /// before quarantine began.
+    #[tokio::test]
+    async fn quarantine_restores_every_capability_on_drop() {
+        let mut registry = CapabilityRegistry::new();
+        registry.register(stub("a")).unwrap();
+        registry.register(stub("b")).unwrap();
+        registry.register(stub("c")).unwrap();
+        let before = serde_json::to_string(&registry.list_tool_defs()).unwrap();
+
+        {
+            let _scope = TurnCapabilityScope::quarantine(&mut registry);
+        }
+
+        let after = serde_json::to_string(&registry.list_tool_defs()).unwrap();
+        assert_eq!(
+            before, after,
+            "every originally-registered capability must be restored, identical to before quarantine"
+        );
+
+        let result = registry
+            .invoke(
+                "a",
+                serde_json::json!({}),
+                &InvokeCtx {
+                    owner: "alice".to_string(),
+                    privacy_tier: Some(PrivacyTier::CloudOk),
+                },
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "capability must be invocable again after quarantine scope drops"
+        );
+    }
 }
