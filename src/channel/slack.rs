@@ -79,9 +79,14 @@ impl Channel for SlackChannel {
 /// Resolve a Slack user_id to an owner via the OwnerMap and forward the message to the
 /// shared AgentLoop. Returns Err whose message contains "not in owner map" when the
 /// sender is unknown (CR-03). Factored out for unit testing without live tokens.
+///
+/// SEC-05/D-09: `is_public_channel` — true for any non-DM channel/group
+/// message, false for a direct message — is threaded to `ask_with_trust`,
+/// mirroring `handle_discord_message`'s classification.
 pub async fn handle_slack_message(
     text: String,
     slack_user_id: String,
+    is_public_channel: bool,
     agent: &AgentHandle,
     owner_map: &OwnerMap,
 ) -> anyhow::Result<String> {
@@ -91,7 +96,7 @@ pub async fn handle_slack_message(
             anyhow::anyhow!("slack_user_id {slack_user_id} not in owner map — rejecting (CR-03)")
         })?
         .to_owned();
-    agent.ask(text, owner).await
+    agent.ask_with_trust(text, owner, is_public_channel).await
 }
 
 /// Per-connection state threaded through slack-morphism's `SlackClientEventsUserState`
@@ -192,7 +197,27 @@ async fn on_slack_push_event(
         )
     };
 
-    let reply = match handle_slack_message(text, user.value().clone(), &agent, &owner_map).await {
+    // SEC-05/D-09: Slack's `channel_type` is `"im"` for a direct message and
+    // any other value (e.g. "channel"/"group") for a public/group context
+    // (T-11-08-03). Missing `channel_type` fails toward untrusted (fail-cautious,
+    // matching the codebase's existing `unwrap_or(true)` posture for ambiguous
+    // trust signals — see SEC-01's `needs_approval` sourcing).
+    let is_public_channel = msg
+        .origin
+        .channel_type
+        .as_ref()
+        .map(|ct| ct.value() != "im")
+        .unwrap_or(true);
+
+    let reply = match handle_slack_message(
+        text,
+        user.value().clone(),
+        is_public_channel,
+        &agent,
+        &owner_map,
+    )
+    .await
+    {
         Ok(reply) => reply,
         Err(e) => {
             // CR-03: unknown sender — warn and skip silently (no reply).
@@ -260,8 +285,7 @@ mod tests {
         stub_consumer(rx);
         let map = OwnerMap::from_pairs(&[("U01ABCDEF", "mario")]);
 
-        let result =
-            handle_slack_message("ping".into(), "U99ZZZZZZ".into(), false, &h, &map).await;
+        let result = handle_slack_message("ping".into(), "U99ZZZZZZ".into(), false, &h, &map).await;
         assert!(result.is_err(), "unknown slack user must be rejected");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("not in owner map"), "error message: {msg}");

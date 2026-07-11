@@ -63,9 +63,15 @@ impl Channel for DiscordChannel {
 /// the shared AgentLoop. Returns Err whose message contains "not in owner map" when
 /// the sender is unknown (CR-03: reject unknown senders, mirrors telegram.rs's
 /// `handle_update`). Factored out for unit testing without a live bot token.
+///
+/// SEC-05/D-09: `is_public_channel` — true for any guild/public-channel message,
+/// false for a DM — is threaded to `ask_with_trust`. A public channel is
+/// readable by anyone in the guild (untrusted, quarantines tool dispatch); a
+/// DM is a 1:1 conversation with the authenticated owner (trusted, unchanged).
 pub async fn handle_discord_message(
     text: String,
     discord_user_id: String,
+    is_public_channel: bool,
     agent: &AgentHandle,
     owner_map: &OwnerMap,
 ) -> anyhow::Result<String> {
@@ -77,7 +83,7 @@ pub async fn handle_discord_message(
             )
         })?
         .to_owned();
-    agent.ask(text, owner).await
+    agent.ask_with_trust(text, owner, is_public_channel).await
 }
 
 async fn discord_loop(token: &str, agent: AgentHandle, owner_map: &OwnerMap) -> anyhow::Result<()> {
@@ -125,9 +131,15 @@ impl serenity::client::EventHandler for Handler {
             return;
         }
 
+        // SEC-05/D-09: serenity's `guild_id` is `None` for a DM and `Some(_)`
+        // for any guild (public) channel — the single, explicitly-named
+        // classification call site (T-11-08-03).
+        let is_public_channel = msg.guild_id.is_some();
+
         let reply = match handle_discord_message(
             msg.content.clone(),
             msg.author.id.to_string(),
+            is_public_channel,
             &self.agent,
             &self.owner_map,
         )

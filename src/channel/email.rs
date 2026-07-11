@@ -138,6 +138,12 @@ fn extract_email_address(header_value: &str) -> String {
 /// the sender is unknown (CR-03: reject unknown senders — the `From:` header is
 /// untrusted/spoofable input, mirrors telegram.rs's `handle_update`). Factored out
 /// for unit testing without a live mailbox.
+///
+/// SEC-05/D-09: received email content is ALWAYS untrusted — no signature/DKIM
+/// verification currently gates this, and even a known/mapped sender's BODY
+/// content is untrusted (the OwnerMap only vouches for WHO is sending, never
+/// for WHAT the message body says). `ask_with_trust(..., true)` quarantines the
+/// agent's tool-facing dispatch for this turn.
 pub async fn handle_email_message(
     from_address: String,
     text: String,
@@ -150,7 +156,7 @@ pub async fn handle_email_message(
             anyhow::anyhow!("email address {from_address} not in owner map — rejecting (CR-03)")
         })?
         .to_owned();
-    agent.ask(text, owner).await
+    agent.ask_with_trust(text, owner, true).await
 }
 
 /// IMAP IDLE-with-poll-fallback receive loop + SMTP reply send.
