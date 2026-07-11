@@ -161,6 +161,30 @@ impl CapabilityRegistry {
         self.inner.remove(name).is_some()
     }
 
+    /// Drain EVERY registered capability, leaving the registry empty.
+    ///
+    /// SEC-05: the first method to manipulate the WHOLE map at once rather
+    /// than a single name at a time — the underlying mechanism backing
+    /// `TurnCapabilityScope::quarantine()`. Callers are expected to `restore()`
+    /// the returned vec once the quarantine window ends; this method itself
+    /// has no memory of what it drained.
+    pub fn drain_all(&mut self) -> Vec<Arc<dyn Capability>> {
+        self.inner.drain().map(|(_, cap)| cap).collect()
+    }
+
+    /// Re-register every capability from a previously `drain_all()`-ed vec,
+    /// keyed by each capability's own `.name()` — mirrors `register()`'s key
+    /// derivation WITHOUT re-running its guardrail checks (`cmd:` namespace,
+    /// duplicate-key rejection). These capabilities were already validated
+    /// once at their ORIGINAL registration time; restoring them is not a new,
+    /// untrusted registration.
+    pub fn restore(&mut self, caps: Vec<Arc<dyn Capability>>) {
+        for cap in caps {
+            let name = cap.name().to_owned();
+            self.inner.insert(name, cap);
+        }
+    }
+
     /// Return tool definitions in the JSON format expected by the provider
     /// (name/description/input_schema). Compatible with `anthropic_tools_to_openai()`
     /// in openrouter.rs.
@@ -297,9 +321,20 @@ impl Default for CapabilityRegistry {
 /// Registers capabilities on `new()` and removes them on `Drop` — guarantees cleanup
 /// even if the turn errors out. Capabilities that fail `register()` are not tracked
 /// and will not be removed on drop.
+///
+/// SEC-05: also doubles as the quarantine guard via `quarantine()` — a SECOND,
+/// mutually exclusive usage mode of the same RAII shape. `new()` is
+/// ADDITIVE-ONLY (registers new ephemeral caps, restores the pre-existing set
+/// untouched); `quarantine()` is SUBTRACTIVE (drains the ENTIRE pre-existing
+/// set, leaving nothing visible, restoring all of it on drop). A single scope
+/// instance is built via exactly one of these two constructors — never both.
 pub struct TurnCapabilityScope<'a> {
     registry: &'a mut CapabilityRegistry,
     registered: Vec<String>,
+    /// Populated ONLY by `quarantine()` — the full pre-existing capability
+    /// set, drained for this scope's lifetime and restored in `Drop`. Always
+    /// empty for a scope built via `new()`.
+    quarantined: Vec<Arc<dyn Capability>>,
 }
 
 impl<'a> TurnCapabilityScope<'a> {
@@ -316,6 +351,22 @@ impl<'a> TurnCapabilityScope<'a> {
         Self {
             registry,
             registered,
+            quarantined: Vec::new(),
+        }
+    }
+
+    /// Genuinely quarantine the turn (SEC-05): drains EVERY pre-existing
+    /// capability so `list_tool_defs()` returns `[]` and `invoke()` errors
+    /// "unknown capability" — genuinely invisible, closing the "zero tools
+    /// ADDED vs zero tools VISIBLE" gap RESEARCH.md flagged in the previous
+    /// additive-only `new()` constructor. Restored in full when the returned
+    /// scope drops, even on an early return/panic-unwind.
+    pub fn quarantine(registry: &'a mut CapabilityRegistry) -> Self {
+        let quarantined = registry.drain_all();
+        Self {
+            registry,
+            registered: Vec::new(),
+            quarantined,
         }
     }
 }
@@ -324,6 +375,9 @@ impl<'a> Drop for TurnCapabilityScope<'a> {
     fn drop(&mut self) {
         for name in &self.registered {
             self.registry.remove(name);
+        }
+        if !self.quarantined.is_empty() {
+            self.registry.restore(std::mem::take(&mut self.quarantined));
         }
     }
 }
