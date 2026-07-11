@@ -11,7 +11,11 @@ const DEFAULT_SIMILARITY_THRESHOLD: f64 = 0.90;
 /// Zero-cost fallback: same word-overlap idiom as `agent::memory_rag::lexical_overlap`,
 /// normalized to a 0.0-1.0 ratio (overlap count / max(len_a_terms, len_b_terms)) so it
 /// is directly comparable to a cosine-similarity threshold.
-fn lexical_similarity(a: &str, b: &str) -> f64 {
+///
+/// `pub(crate)` (not private): `agent::dream::HeuristicDream::consolidate` (MEM-02, D-13)
+/// calls this directly — it needs the exact zero-dependency Jaccard-style primitive, NOT
+/// `is_duplicate`, which tries `memory_embed` over MCP first and is therefore not zero-cost.
+pub(crate) fn lexical_similarity(a: &str, b: &str) -> f64 {
     let terms = |s: &str| -> std::collections::HashSet<String> {
         s.split(|c: char| !c.is_alphanumeric())
             .filter(|t| t.chars().count() >= MIN_TERM_LEN)
