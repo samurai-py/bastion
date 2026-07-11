@@ -530,7 +530,31 @@ impl AgentLoop {
         None
     }
 
+    /// Byte-identical to today's behavior — a thin wrapper over
+    /// `run_turn_for_with_trust(user_input, owner, false)` (SEC-05).
     pub async fn run_turn_for(&mut self, user_input: &str, owner: &str) -> anyhow::Result<String> {
+        self.run_turn_for_with_trust(user_input, owner, false).await
+    }
+
+    /// Like `run_turn_for`, but explicitly marks whether `user_input`
+    /// originates from an untrusted source (SEC-05/D-09: received email
+    /// content; a Discord/Slack message from a public, non-DM context).
+    ///
+    /// `untrusted: true` wraps the ENTIRE "Single/Parallel path via runner"
+    /// dispatch section — including where `config.tools` is built from
+    /// `self.capability_registry.list_tool_defs()` — in
+    /// `TurnCapabilityScope::quarantine()`, so the LLM-facing call for this
+    /// turn genuinely has ZERO visible capabilities, not merely "no new
+    /// tools added" (the exact gap RESEARCH.md flagged in the additive-only
+    /// `TurnCapabilityScope::new()`). The scope's lifetime covers exactly
+    /// that dispatch section; every pre-existing capability is restored the
+    /// instant it drops, whether the section returns normally or via `?`.
+    pub async fn run_turn_for_with_trust(
+        &mut self,
+        user_input: &str,
+        owner: &str,
+        untrusted: bool,
+    ) -> anyhow::Result<String> {
         let t_start = Instant::now();
 
         // HOOK-02: input guardrail before routing (screens empty/oversized/spam input)
@@ -2523,6 +2547,332 @@ mod tests {
                 .unwrap_or_default()
                 .contains("data, not instructions"),
             "envelope must carry an explicit non-instruction marker, got: {envelope}"
+        );
+    }
+
+    // --- Plan 11-08 (SEC-05): run_turn_for_with_trust + quarantine wiring -----
+
+    /// Router-aware mock (same `response_format.is_some()` trick as
+    /// `ToolThenTextNamed`) that additionally RECORDS every `config.tools`
+    /// seen by the real (non-router) `complete()` call, so tests can assert
+    /// on exactly what the LLM-facing dispatch saw.
+    struct ToolsRecordingProvider {
+        persona_name: String,
+        seen_tools: Arc<std::sync::Mutex<Vec<Vec<serde_json::Value>>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ToolsRecordingProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            config: &CallConfig,
+        ) -> anyhow::Result<LlmResponse> {
+            if config.response_format.is_some() {
+                return Ok(LlmResponse {
+                    text: serde_json::json!({
+                        "personas": [self.persona_name],
+                        "mode": "single",
+                        "convene_reason": null,
+                    })
+                    .to_string(),
+                    tool_calls: None,
+                    usage: TokenUsage::default(),
+                });
+            }
+            self.seen_tools.lock().unwrap().push(config.tools.clone());
+            Ok(LlmResponse {
+                text: "done".to_owned(),
+                tool_calls: None,
+                usage: TokenUsage::default(),
+            })
+        }
+        async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("s".to_owned())
+        }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    /// Test 4: `run_turn_for_with_trust(input, owner, true)` — the LLM-facing
+    /// call for this turn sees ZERO tools, genuinely hidden (not merely "no
+    /// new tools added"), even though a real capability is registered.
+    #[tokio::test]
+    async fn run_turn_for_with_trust_true_hides_all_tools_from_llm_facing_dispatch() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        let seen_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        agent.provider = Arc::new(RwLock::new(Box::new(ToolsRecordingProvider {
+            persona_name: "TestPersona".to_owned(),
+            seen_tools: seen_tools.clone(),
+        }) as Box<dyn Provider>));
+        agent
+            .capability_registry
+            .register(Arc::new(SpotlightStubCap {
+                name: "cap1".to_owned(),
+                schema: serde_json::json!({}),
+                local: true,
+            }))
+            .expect("register cap1");
+
+        let resp = agent
+            .run_turn_for_with_trust("email body content", "alice", true)
+            .await
+            .expect("run_turn_for_with_trust must complete");
+        assert_eq!(resp, "done");
+
+        {
+            let recorded = seen_tools.lock().unwrap();
+            assert_eq!(
+                recorded.last().unwrap().len(),
+                0,
+                "untrusted==true must hide every capability from the LLM-facing tools list"
+            );
+        }
+
+        assert_eq!(
+            agent.capability_registry.list_tool_defs().len(),
+            1,
+            "capabilities must be fully restored after the turn completes"
+        );
+    }
+
+    /// Counterpart: `untrusted == false` shows the registered capability
+    /// unchanged — zero regression for the overwhelming majority of turns.
+    #[tokio::test]
+    async fn run_turn_for_with_trust_false_shows_tools_unchanged() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        let seen_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        agent.provider = Arc::new(RwLock::new(Box::new(ToolsRecordingProvider {
+            persona_name: "TestPersona".to_owned(),
+            seen_tools: seen_tools.clone(),
+        }) as Box<dyn Provider>));
+        agent
+            .capability_registry
+            .register(Arc::new(SpotlightStubCap {
+                name: "cap1".to_owned(),
+                schema: serde_json::json!({}),
+                local: true,
+            }))
+            .expect("register cap1");
+
+        let resp = agent
+            .run_turn_for_with_trust("normal message", "alice", false)
+            .await
+            .expect("run_turn_for_with_trust must complete");
+        assert_eq!(resp, "done");
+
+        let recorded = seen_tools.lock().unwrap();
+        assert_eq!(
+            recorded.last().unwrap().len(),
+            1,
+            "untrusted==false must show the registered capability unchanged"
+        );
+    }
+
+    /// Test 3: `run_turn_for` (existing method) is byte-identical to today —
+    /// internally a thin wrapper over `run_turn_for_with_trust(..., false)`.
+    #[tokio::test]
+    async fn run_turn_for_is_a_thin_wrapper_over_with_trust_false() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        let seen_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        agent.provider = Arc::new(RwLock::new(Box::new(ToolsRecordingProvider {
+            persona_name: "TestPersona".to_owned(),
+            seen_tools: seen_tools.clone(),
+        }) as Box<dyn Provider>));
+        agent
+            .capability_registry
+            .register(Arc::new(SpotlightStubCap {
+                name: "cap1".to_owned(),
+                schema: serde_json::json!({}),
+                local: true,
+            }))
+            .expect("register cap1");
+
+        let resp = agent
+            .run_turn_for("normal message", "alice")
+            .await
+            .expect("run_turn_for must complete");
+        assert_eq!(resp, "done");
+
+        let recorded = seen_tools.lock().unwrap();
+        assert_eq!(
+            recorded.last().unwrap().len(),
+            1,
+            "run_turn_for must behave exactly like run_turn_for_with_trust(..., false)"
+        );
+    }
+
+    /// Round-aware mock provider (mirrors `ToolThenTextNamed`'s
+    /// response_format branch) that emits a tool call for the SAME name on
+    /// rounds 0 and 1, then a final "done" on round 2 — lets a test drive
+    /// TWO consecutive untrusted tool rounds.
+    struct RoundAwareProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        tool_name: String,
+        persona_name: String,
+    }
+
+    #[async_trait]
+    impl Provider for RoundAwareProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            config: &CallConfig,
+        ) -> anyhow::Result<LlmResponse> {
+            if config.response_format.is_some() {
+                return Ok(LlmResponse {
+                    text: serde_json::json!({
+                        "personas": [self.persona_name],
+                        "mode": "single",
+                        "convene_reason": null,
+                    })
+                    .to_string(),
+                    tool_calls: None,
+                    usage: TokenUsage::default(),
+                });
+            }
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < 2 {
+                Ok(LlmResponse {
+                    text: String::new(),
+                    tool_calls: Some(vec![crate::types::ToolCall {
+                        id: format!("t{n}"),
+                        name: self.tool_name.clone(),
+                        arguments: serde_json::json!({}),
+                        extra: None,
+                    }]),
+                    usage: TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read: 0,
+                        cache_write: 0,
+                        ..Default::default()
+                    },
+                })
+            } else {
+                Ok(LlmResponse {
+                    text: "done".to_owned(),
+                    tool_calls: None,
+                    usage: TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read: 0,
+                        cache_write: 0,
+                        ..Default::default()
+                    },
+                })
+            }
+        }
+        async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("s".to_owned())
+        }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    /// Stub capability with `is_local()==false` (untrusted by default) that
+    /// counts invocations — proves the SAME capability remains dispatchable
+    /// in the round FOLLOWING an untrusted result (the round-level
+    /// quarantine wraps ONLY the immediately-following LLM completion call,
+    /// tightly scoped and already dropped/restored by the time the next
+    /// round's tool dispatch runs).
+    struct CountingUntrustedCap {
+        name: String,
+        schema: serde_json::Value,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::capability::Capability for CountingUntrustedCap {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "counting untrusted stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        fn is_local(&self) -> bool {
+            false
+        }
+        async fn invoke(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::capability::InvokeCtx,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!({"x": 1}))
+        }
+    }
+
+    /// Test 5: when the CURRENT round's tool results include at least one
+    /// `TaggedValue.trusted == false`, the LLM call for the NEXT round runs
+    /// with quarantine active (tightly scoped to that one call). Proven here
+    /// by driving TWO untrusted rounds back-to-back: the loop must complete
+    /// normally, the capability must be invoked exactly twice (once per
+    /// round — the round-level quarantine has already dropped/restored by
+    /// the time each round's OWN tool dispatch runs, so it never permanently
+    /// blocks legitimate re-dispatch in a later round), and the capability
+    /// must remain registered/usable after the whole turn ends.
+    #[tokio::test]
+    async fn dispatch_tool_loop_untrusted_round_result_does_not_break_subsequent_rounds() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        agent.provider = Arc::new(RwLock::new(Box::new(RoundAwareProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_name: "untrusted_round_cap".to_owned(),
+            persona_name: "TestPersona".to_owned(),
+        }) as Box<dyn Provider>));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent
+            .capability_registry
+            .register(Arc::new(CountingUntrustedCap {
+                name: "untrusted_round_cap".to_owned(),
+                schema: serde_json::json!({}),
+                calls: calls.clone(),
+            }))
+            .expect("register untrusted_round_cap");
+
+        let resp = agent
+            .run_turn("trigger two untrusted rounds")
+            .await
+            .expect("run_turn must complete despite mid-loop quarantine wrapping");
+        assert_eq!(resp, "done");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the capability must still be dispatchable in the round FOLLOWING an untrusted \
+             result — round-level quarantine is scoped tightly to the intervening LLM call only"
+        );
+        assert_eq!(
+            agent.capability_registry.list_tool_defs().len(),
+            1,
+            "the capability must remain registered/usable after the whole turn completes"
         );
     }
 

@@ -747,6 +747,7 @@ async fn channel_inbound_two_owners_get_distinct_sessions() {
     tx.send(AgentRequest {
         text: "hello from a".into(),
         owner: "owner-a".into(),
+        untrusted: false,
         reply: reply_a_tx,
     })
     .await
@@ -754,6 +755,7 @@ async fn channel_inbound_two_owners_get_distinct_sessions() {
     tx.send(AgentRequest {
         text: "hello from b".into(),
         owner: "owner-b".into(),
+        untrusted: false,
         reply: reply_b_tx,
     })
     .await

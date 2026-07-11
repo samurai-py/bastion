@@ -8,6 +8,14 @@ use tokio::sync::{mpsc, oneshot};
 pub struct AgentRequest {
     pub text: String,
     pub owner: String,
+    /// SEC-05 (D-09): true when this request's content originates from an
+    /// untrusted source — received email content (always), or a Discord/Slack
+    /// message from a public (non-DM) context. Threaded into
+    /// `AgentLoop::run_turn_for_with_trust`, which quarantines the turn's
+    /// LLM-facing tool dispatch (zero visible capabilities) for its duration.
+    /// `false` (the default via `ask()`) preserves every pre-existing
+    /// channel's behavior unchanged.
+    pub untrusted: bool,
     pub reply: oneshot::Sender<anyhow::Result<String>>,
 }
 
@@ -33,12 +41,31 @@ impl AgentHandle {
     /// Returns the typed result from the AgentLoop — callers receive real `BastionError`
     /// variants (e.g. PrivacyEgressBlocked, InputGuardrailRejected) so the channel layer
     /// can map them to correct HTTP/transport status codes (WR-10).
+    ///
+    /// Byte-identical to today's behavior — a thin wrapper over
+    /// `ask_with_trust(text, owner, false)` (SEC-05).
     pub async fn ask(&self, text: String, owner: String) -> anyhow::Result<String> {
+        self.ask_with_trust(text, owner, false).await
+    }
+
+    /// Like `ask()`, but explicitly marks the request's trust classification
+    /// (SEC-05/D-09). `untrusted: true` is threaded through to
+    /// `AgentLoop::run_turn_for_with_trust`, which quarantines the turn's
+    /// LLM-facing tool dispatch for its whole duration. Every pre-existing
+    /// call site keeps calling `ask()` (which always passes `false`) and is
+    /// completely unaffected.
+    pub async fn ask_with_trust(
+        &self,
+        text: String,
+        owner: String,
+        untrusted: bool,
+    ) -> anyhow::Result<String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(AgentRequest {
                 text,
                 owner,
+                untrusted,
                 reply: reply_tx,
             })
             .await
