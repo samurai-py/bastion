@@ -59,6 +59,10 @@ mod tests {
             helpful_count: 0,
             harmful_count: 0,
             neutral_count: 0,
+            valid_from: None,
+            valid_until: None,
+            superseded_by: None,
+            supersedes_at: None,
         }
     }
 

@@ -72,9 +72,12 @@ impl Memory for SqliteMemory {
             // Atomic: belief + its provenance row commit together or not at all
             // (audit-trail integrity — no orphan belief without provenance).
             let tx = conn.transaction()?;
+            // valid_from/valid_until explicit NULL: no caller asserts a validity window at
+            // store time (D-11) — every existing store_belief caller keeps its prior
+            // behavior unchanged (bi-temporal window defaults to fully open).
             tx.execute(
-                "INSERT INTO beliefs (owner_id, persona_tag, content, weight, revoked, is_core, created_at, privacy_tier) \
-                 VALUES (?1, ?2, ?3, 1.0, 0, ?4, ?5, ?6)",
+                "INSERT INTO beliefs (owner_id, persona_tag, content, weight, revoked, is_core, created_at, privacy_tier, valid_from, valid_until) \
+                 VALUES (?1, ?2, ?3, 1.0, 0, ?4, ?5, ?6, NULL, NULL)",
                 rusqlite::params![owner_id, persona_tag, content, is_core as i32, now, tier_str],
             )?;
             let belief_id = tx.last_insert_rowid();
@@ -99,14 +102,21 @@ impl Memory for SqliteMemory {
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+            let now = now_nanos();
+            // Bi-temporal valid-time gate (MEM-01/D-11): valid_from/valid_until IS NULL
+            // means open/no-bound — PERMISSIVE, the deliberate opposite of
+            // privacy_tier's deny-on-ambiguity NULL convention used 2 columns above.
             let mut stmt = conn.prepare(
                 "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier, \
-                        kind, keywords, issue, helpful_count, harmful_count, neutral_count \
+                        kind, keywords, issue, helpful_count, harmful_count, neutral_count, \
+                        valid_from, valid_until, superseded_by, supersedes_at \
                  FROM beliefs \
-                 WHERE owner_id = ?1 AND (persona_tag = ?2 OR persona_tag IS NULL) AND revoked = 0 AND weight > 0",
+                 WHERE owner_id = ?1 AND (persona_tag = ?2 OR persona_tag IS NULL) AND revoked = 0 AND weight > 0 \
+                       AND (valid_from IS NULL OR valid_from <= ?3) \
+                       AND (valid_until IS NULL OR valid_until >= ?3)",
             )?;
             let beliefs = stmt
-                .query_map(rusqlite::params![owner_id, persona_tag], |row| {
+                .query_map(rusqlite::params![owner_id, persona_tag, now], |row| {
                     let tier_str: Option<String> = row.get(6)?;
                     let tier = tier_str.as_deref().and_then(|s| match s {
                         "cloud-ok" => Some(PrivacyTier::CloudOk),
@@ -127,6 +137,10 @@ impl Memory for SqliteMemory {
                         helpful_count: row.get(10)?,
                         harmful_count: row.get(11)?,
                         neutral_count: row.get(12)?,
+                        valid_from: row.get(13)?,
+                        valid_until: row.get(14)?,
+                        superseded_by: row.get(15)?,
+                        supersedes_at: row.get(16)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -150,6 +164,34 @@ impl Memory for SqliteMemory {
             )?;
             if changed == 0 {
                 anyhow::bail!("belief {id} not found for owner (no row revoked)");
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?
+    }
+
+    async fn supersede_belief(
+        &self,
+        owner_id: &str,
+        old_id: i64,
+        new_id: i64,
+    ) -> anyhow::Result<()> {
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+            let now = now_nanos();
+            // Owner-scoped UPDATE (IDOR guard), exact mirror of revoke_belief: only the
+            // OLD row (old_id) is touched here; the NEW row is presumed to already exist
+            // and is never written by this call. Row is NEVER deleted (D-15).
+            let changed = conn.execute(
+                "UPDATE beliefs SET superseded_by = ?3, supersedes_at = ?4 \
+                 WHERE id = ?1 AND owner_id = ?2",
+                rusqlite::params![old_id, owner_id, new_id, now],
+            )?;
+            if changed == 0 {
+                anyhow::bail!("belief {old_id} not found for owner (no row superseded)");
             }
             Ok::<(), anyhow::Error>(())
         })
@@ -222,7 +264,8 @@ impl Memory for SqliteMemory {
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             let mut stmt = conn.prepare(
                 "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier, \
-                        kind, keywords, issue, helpful_count, harmful_count, neutral_count \
+                        kind, keywords, issue, helpful_count, harmful_count, neutral_count, \
+                        valid_from, valid_until, superseded_by, supersedes_at \
                  FROM beliefs \
                  WHERE owner_id = ?1 AND is_core = 1 AND revoked = 0",
             )?;
@@ -248,6 +291,10 @@ impl Memory for SqliteMemory {
                         helpful_count: row.get(10)?,
                         harmful_count: row.get(11)?,
                         neutral_count: row.get(12)?,
+                        valid_from: row.get(13)?,
+                        valid_until: row.get(14)?,
+                        superseded_by: row.get(15)?,
+                        supersedes_at: row.get(16)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -264,7 +311,8 @@ impl Memory for SqliteMemory {
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             let mut stmt = conn.prepare(
                 "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier, \
-                        kind, keywords, issue, helpful_count, harmful_count, neutral_count \
+                        kind, keywords, issue, helpful_count, harmful_count, neutral_count, \
+                        valid_from, valid_until, superseded_by, supersedes_at \
                  FROM beliefs \
                  WHERE owner_id = ?1 AND revoked = 0 AND weight > 0",
             )?;
@@ -290,6 +338,10 @@ impl Memory for SqliteMemory {
                         helpful_count: row.get(10)?,
                         harmful_count: row.get(11)?,
                         neutral_count: row.get(12)?,
+                        valid_from: row.get(13)?,
+                        valid_until: row.get(14)?,
+                        superseded_by: row.get(15)?,
+                        supersedes_at: row.get(16)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1123,6 +1175,222 @@ mod tests {
         assert!(
             bob_pending.is_empty(),
             "no cross-owner correction row must be inserted"
+        );
+    }
+
+    /// Raw-SQL helper: directly set valid_from/valid_until on a belief row, since
+    /// store_belief doesn't expose setting a validity window at store time (MEM-01).
+    async fn set_valid_window(
+        mem: &SqliteMemory,
+        id: i64,
+        valid_from: Option<i64>,
+        valid_until: Option<i64>,
+    ) {
+        let path = mem.db_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE beliefs SET valid_from = ?2, valid_until = ?3 WHERE id = ?1",
+                rusqlite::params![id, valid_from, valid_until],
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_belief_defaults_valid_from_until_null() {
+        // Test 1: a belief inserted via store_belief has valid_from=NULL, valid_until=NULL
+        // by default — no behavior change for the common case.
+        let (_f, mem) = make_db().await;
+        let id = mem
+            .store_belief("owner1", None, "Some fact", "sess1", "user", false, None)
+            .await
+            .expect("store");
+
+        let beliefs = mem.retrieve_tagged("owner1", None).await.expect("retrieve");
+        assert_eq!(beliefs.len(), 1);
+        assert_eq!(beliefs[0].id, id);
+        assert_eq!(beliefs[0].valid_from, None);
+        assert_eq!(beliefs[0].valid_until, None);
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_tagged_excludes_belief_with_past_valid_until() {
+        // Test 2: valid_until in the past excludes the belief from retrieve_tagged,
+        // even though revoked=0 and weight>0.
+        let (_f, mem) = make_db().await;
+        let id = mem
+            .store_belief("owner1", None, "Expired fact", "sess1", "user", false, None)
+            .await
+            .expect("store");
+
+        let past = now_nanos() - 1_000_000_000;
+        set_valid_window(&mem, id, None, Some(past)).await;
+
+        let beliefs = mem.retrieve_tagged("owner1", None).await.expect("retrieve");
+        assert!(
+            beliefs.is_empty(),
+            "belief with valid_until in the past must be excluded from retrieve_tagged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_tagged_includes_belief_with_null_valid_until() {
+        // Test 3: valid_until = NULL (the default) IS included — NULL means open, not deny.
+        let (_f, mem) = make_db().await;
+        mem.store_belief(
+            "owner1",
+            None,
+            "Open-ended fact",
+            "sess1",
+            "user",
+            false,
+            None,
+        )
+        .await
+        .expect("store");
+
+        let beliefs = mem.retrieve_tagged("owner1", None).await.expect("retrieve");
+        assert_eq!(
+            beliefs.len(),
+            1,
+            "belief with valid_until=NULL must be included (permissive convention)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_tagged_excludes_belief_with_future_valid_from() {
+        // Test 4: valid_from in the future excludes the belief (not yet valid).
+        let (_f, mem) = make_db().await;
+        let id = mem
+            .store_belief(
+                "owner1",
+                None,
+                "Not-yet-valid fact",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store");
+
+        let future = now_nanos() + 1_000_000_000_000;
+        set_valid_window(&mem, id, Some(future), None).await;
+
+        let beliefs = mem.retrieve_tagged("owner1", None).await.expect("retrieve");
+        assert!(
+            beliefs.is_empty(),
+            "belief with valid_from in the future must be excluded from retrieve_tagged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_supersede_belief_marks_old_row_non_destructively() {
+        // Test 5: supersede_belief sets superseded_by/supersedes_at on old_id only;
+        // retrieve_all_beliefs still returns the old row (never deleted); retrieve_tagged
+        // still returns it too since supersession alone doesn't touch weight/valid-time.
+        let (_f, mem) = make_db().await;
+        let old_id = mem
+            .store_belief("owner1", None, "Old insight", "sess1", "user", false, None)
+            .await
+            .expect("store old");
+        let new_id = mem
+            .store_belief(
+                "owner1",
+                None,
+                "Corrected insight",
+                "sess2",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store new");
+
+        mem.supersede_belief("owner1", old_id, new_id)
+            .await
+            .expect("supersede");
+
+        // Old row still present via retrieve_all_beliefs (never deleted, D-15/D-10).
+        let all = mem
+            .retrieve_all_beliefs("owner1")
+            .await
+            .expect("retrieve_all_beliefs");
+        let old_row = all
+            .iter()
+            .find(|b| b.id == old_id)
+            .expect("old row present");
+        assert_eq!(old_row.superseded_by, Some(new_id));
+        assert!(old_row.supersedes_at.is_some());
+
+        // The new row is untouched by the supersede call.
+        let new_row = all
+            .iter()
+            .find(|b| b.id == new_id)
+            .expect("new row present");
+        assert_eq!(new_row.superseded_by, None);
+        assert_eq!(new_row.supersedes_at, None);
+
+        // Old row also still surfaces in retrieve_tagged (supersession alone doesn't hide it —
+        // pruning via weight/valid_until is Plan 11-09's job, not this one's).
+        let tagged = mem
+            .retrieve_tagged("owner1", None)
+            .await
+            .expect("retrieve_tagged");
+        assert!(
+            tagged.iter().any(|b| b.id == old_id),
+            "superseded row must still surface in retrieve_tagged (marker only, not a hide)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_supersede_belief_cross_owner_errors() {
+        // Test 6: IDOR guard — wrong owner cannot supersede another owner's belief,
+        // mirroring revoke_belief's existing test pattern.
+        let (_f, mem) = make_db().await;
+        let old_id = mem
+            .store_belief(
+                "owner1",
+                None,
+                "Owner1 insight",
+                "sess1",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store old");
+        let new_id = mem
+            .store_belief(
+                "owner1",
+                None,
+                "Owner1 correction",
+                "sess2",
+                "user",
+                false,
+                None,
+            )
+            .await
+            .expect("store new");
+
+        let result = mem.supersede_belief("owner2", old_id, new_id).await;
+        assert!(result.is_err(), "cross-owner supersede must error");
+
+        // Old row unaffected by the failed cross-owner attempt.
+        let all = mem
+            .retrieve_all_beliefs("owner1")
+            .await
+            .expect("retrieve_all_beliefs");
+        let old_row = all
+            .iter()
+            .find(|b| b.id == old_id)
+            .expect("old row present");
+        assert_eq!(
+            old_row.superseded_by, None,
+            "failed cross-owner supersede must not mutate the row"
         );
     }
 }
