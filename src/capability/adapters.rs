@@ -53,6 +53,14 @@ impl Capability for McpToolAdapter {
     fn needs_approval(&self) -> bool {
         self.needs_approval_override
     }
+    /// Plan 11-07 (SEC-04): trusted if the operator explicitly vouched for this
+    /// server (`trusted_override`, D-09/SEC-05 escape hatch) OR the server is
+    /// local (`is_local_override`) — mirrors `is_local()`'s own override pattern.
+    /// A local server is trusted regardless of the explicit-trust flag; a
+    /// non-local server is untrusted UNLESS the operator explicitly opted it in.
+    fn is_trusted(&self) -> bool {
+        self.trusted_override || self.is_local_override
+    }
     async fn invoke(&self, args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
         // Delegate to McpClient — no business logic here (thin adapter).
         // call_tool_with_timeout looks up server_label via internal ToolRegistry.
@@ -179,6 +187,17 @@ mod mcp_tool_adapter_tests {
         is_local_override: bool,
         needs_approval_override: bool,
     ) -> McpToolAdapter {
+        adapter_with_trust(mcp, is_local_override, needs_approval_override, false)
+    }
+
+    /// Plan 11-07 Task 2 helper: same as `adapter_with_approval()` but lets the
+    /// trust-override be set explicitly.
+    fn adapter_with_trust(
+        mcp: Arc<McpClient>,
+        is_local_override: bool,
+        needs_approval_override: bool,
+        trusted_override: bool,
+    ) -> McpToolAdapter {
         McpToolAdapter {
             tool_name: "voice_transcribe".to_string(),
             server_label: "voice".to_string(),
@@ -187,8 +206,35 @@ mod mcp_tool_adapter_tests {
             mcp,
             is_local_override,
             needs_approval_override,
-            trusted_override: false,
+            trusted_override,
         }
+    }
+
+    /// Plan 11-07 Task 2 Test 1: an untrusted external MCP server (neither
+    /// local nor explicitly trusted) — the common case.
+    #[tokio::test]
+    async fn is_trusted_false_when_neither_local_nor_explicitly_trusted() {
+        let mcp = empty_mcp_client().await;
+        let cap = adapter_with_trust(mcp, false, false, false);
+        assert!(!cap.is_trusted());
+    }
+
+    /// Plan 11-07 Task 2 Test 2: a local server is trusted regardless of the
+    /// explicit-trust flag.
+    #[tokio::test]
+    async fn is_trusted_true_when_local_regardless_of_explicit_trust_flag() {
+        let mcp = empty_mcp_client().await;
+        let cap = adapter_with_trust(mcp, true, false, false);
+        assert!(cap.is_trusted());
+    }
+
+    /// Plan 11-07 Task 2 Test 3 (D-09/SEC-05 escape hatch): an operator
+    /// explicitly vouching for a non-local server.
+    #[tokio::test]
+    async fn is_trusted_true_when_explicitly_trusted_even_if_not_local() {
+        let mcp = empty_mcp_client().await;
+        let cap = adapter_with_trust(mcp, false, false, true);
+        assert!(cap.is_trusted());
     }
 
     /// Plan 11-04 Task 1 Test 2: `McpToolAdapter::needs_approval()` returns exactly
