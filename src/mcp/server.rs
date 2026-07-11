@@ -192,8 +192,14 @@ impl ServerHandler for BastionMcpServer {
             };
 
             match registry.invoke(&name, Value::Object(args), &ctx).await {
-                Ok(value) => Ok(CallToolResult::success(vec![Content::text(
-                    value.to_string(),
+                // Plan 11-07 (SEC-04): `.data` is the same JSON-stringified content
+                // MCP clients have always received — spotlighting's LLM-facing
+                // untrusted-result framing (agent/loop_.rs's dispatch_tool_loop) is
+                // scoped to Bastion's OWN tool-loop, not to what Bastion exposes AS
+                // an MCP server to other agents. This external response shape is
+                // unchanged.
+                Ok(tagged) => Ok(CallToolResult::success(vec![Content::text(
+                    tagged.data.to_string(),
                 )])),
                 Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
             }

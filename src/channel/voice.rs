@@ -48,13 +48,18 @@ pub async fn handle_voice_turn(
         privacy_tier: Some(PrivacyTier::LocalOnly),
     };
 
+    // Plan 11-07 (SEC-04): `.data` unwraps the raw capability output from the
+    // `TaggedValue` wrapper — this is a direct capability-chain caller (not
+    // dispatch_tool_loop's LLM-facing tool-result path), so no untrusted-result
+    // envelope framing applies here, same as every other non-LLM-facing caller.
     let transcribe_result = registry
         .invoke(
             "voice_transcribe",
             serde_json::json!({ "audio_b64": audio_b64_in }),
             &ctx,
         )
-        .await?;
+        .await?
+        .data;
     let text = transcribe_result["text"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("voice_transcribe returned no text field"))?;
@@ -67,7 +72,8 @@ pub async fn handle_voice_turn(
             serde_json::json!({ "text": reply, "voice": voice_id }),
             &ctx,
         )
-        .await?;
+        .await?
+        .data;
     let audio_b64_out = speak_result["audio_b64"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("voice_speak returned no audio_b64 field"))?;

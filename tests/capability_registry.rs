@@ -85,7 +85,7 @@ async fn capability_registry_cloud_ok_dispatches_successfully() {
         result
     );
     assert_eq!(
-        result.unwrap(),
+        result.unwrap().data,
         args,
         "EchoCapability must return args unchanged"
     );
@@ -120,7 +120,7 @@ async fn capability_registry_nl_command_allowed_for_local_only() {
         result
     );
     // Verify the routing signal value
-    let v = result.unwrap();
+    let v = result.unwrap().data;
     assert_eq!(
         v["routed"],
         serde_json::json!(true),

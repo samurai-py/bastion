@@ -370,11 +370,15 @@ pub async fn complete_structured_via_forced_tool_call(
 
     // Mandatory single-policy-boundary hop (D-02) — never return
     // `tool_call.arguments` directly, even though this capability is a no-op.
-    let result = registry
+    // Plan 11-07 (SEC-04): `.data` unwraps the raw echoed Value from the new
+    // `TaggedValue` wrapper — this ephemeral, is_local()==true capability's
+    // `trusted` classification is irrelevant here (non-LLM-facing structured
+    // output plumbing, not a tool result shown to the model).
+    let tagged = registry
         .invoke(STRUCTURED_OUTPUT_TOOL, tool_call.arguments, ctx)
         .await?;
 
-    Ok(serde_json::to_string(&result)?)
+    Ok(serde_json::to_string(&tagged.data)?)
 }
 
 #[cfg(test)]

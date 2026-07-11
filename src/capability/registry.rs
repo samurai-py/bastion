@@ -44,6 +44,41 @@ pub trait Capability: Send + Sync {
     fn needs_approval(&self) -> bool {
         false
     }
+
+    /// Whether this capability's result is TRUSTED content — safe to hand the
+    /// LLM without a spotlighting/quarantine warning (SEC-04).
+    ///
+    /// SECURITY: like `is_local()`/`needs_approval()`, this is a TYPED property
+    /// of the capability itself, never derived from the capability's `name()`
+    /// string. Default mirrors `is_local()`: a capability that never leaves the
+    /// host is trusted-by-default; everything else defaults untrusted unless an
+    /// adapter explicitly overrides this (e.g. `McpToolAdapter`'s
+    /// `trusted_override` escape hatch, D-09/SEC-05).
+    fn is_trusted(&self) -> bool {
+        self.is_local()
+    }
+}
+
+/// The result of `CapabilityRegistry::invoke()` — a capability's raw output
+/// PLUS the trust classification computed once at the single policy boundary
+/// (SEC-04, spotlighting).
+///
+/// `trusted` is metadata, never an inline text prefix scattered through the
+/// codebase — mirrors `TurnContextProvider`'s "opaque block, core never
+/// interprets content" precedent, applied one layer earlier (the invoke()
+/// boundary itself, not just system-prompt assembly). The ONE place that
+/// decides how an untrusted result is FRAMED for the LLM is
+/// `dispatch_tool_loop` (src/agent/loop_.rs) — never a parallel/duplicate
+/// framing mechanism elsewhere.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaggedValue {
+    /// The capability's raw output — exactly what `Capability::invoke()` returned.
+    pub data: Value,
+    /// The capability name this result came from (mirrors `Capability::name()`).
+    pub source: String,
+    /// Trust classification, computed ONCE here from `cap.is_trusted()` —
+    /// never re-derived downstream from `source`'s string value.
+    pub trusted: bool,
 }
 
 /// Unified capability registry.
@@ -159,7 +194,18 @@ impl CapabilityRegistry {
     ///    `ApprovalQueue` (queue/idempotent-resume/cache), or fail-closed deny if
     ///    no queue is wired
     /// 3. Dispatch to capability adapter
-    pub async fn invoke(&self, name: &str, args: Value, ctx: &InvokeCtx) -> anyhow::Result<Value> {
+    ///
+    /// SEC-04 (spotlighting): every return path wraps its `Value` in a
+    /// `TaggedValue{data, source, trusted}` — computed ONCE here from
+    /// `cap.is_trusted()` — including the approval-gate early-returns above
+    /// (Policy 2's `AlreadyExecuted`/`awaiting_approval` branches), so every
+    /// exit from `invoke()` produces the new type consistently.
+    pub async fn invoke(
+        &self,
+        name: &str,
+        args: Value,
+        ctx: &InvokeCtx,
+    ) -> anyhow::Result<TaggedValue> {
         let cap = self
             .inner
             .get(name)
@@ -195,15 +241,23 @@ impl CapabilityRegistry {
                     match outcome {
                         // D-03 idempotent-resume: already ran to completion — return the
                         // cached result, never re-dispatch.
-                        ApprovalOutcome::AlreadyExecuted(cached) => Ok(cached),
+                        ApprovalOutcome::AlreadyExecuted(cached) => Ok(TaggedValue {
+                            data: cached,
+                            source: name.to_owned(),
+                            trusted: cap.is_trusted(),
+                        }),
                         // Not yet approved (freshly queued or still pending): the
                         // capability has NOT run — Dispatch below is structurally
                         // unreachable from this branch (T-11-02-02).
                         ApprovalOutcome::AlreadyPending | ApprovalOutcome::NewlyQueued(_) => {
-                            Ok(serde_json::json!({
-                                "awaiting_approval": true,
-                                "capability": name,
-                            }))
+                            Ok(TaggedValue {
+                                data: serde_json::json!({
+                                    "awaiting_approval": true,
+                                    "capability": name,
+                                }),
+                                source: name.to_owned(),
+                                trusted: cap.is_trusted(),
+                            })
                         }
                         // Approved but not yet executed: this invoke() call IS the
                         // resolution (triggered by Plan 11-04's NL intercept) — dispatch
@@ -211,7 +265,11 @@ impl CapabilityRegistry {
                         ApprovalOutcome::ApprovedPendingExecution(id) => {
                             let result = cap.invoke(args, ctx).await?;
                             queue.record_executed(id, &result).await?;
-                            Ok(result)
+                            Ok(TaggedValue {
+                                data: result,
+                                source: name.to_owned(),
+                                trusted: cap.is_trusted(),
+                            })
                         }
                     }
                 }
@@ -219,7 +277,12 @@ impl CapabilityRegistry {
         }
 
         // Dispatch
-        cap.invoke(args, ctx).await
+        let data = cap.invoke(args, ctx).await?;
+        Ok(TaggedValue {
+            data,
+            source: name.to_owned(),
+            trusted: cap.is_trusted(),
+        })
     }
 }
 
@@ -468,7 +531,7 @@ mod tests {
             0,
             "must not dispatch on first call"
         );
-        assert_eq!(result["awaiting_approval"], serde_json::json!(true));
+        assert_eq!(result.data["awaiting_approval"], serde_json::json!(true));
     }
 
     #[tokio::test]
@@ -500,7 +563,7 @@ mod tests {
             1,
             "must dispatch exactly once after approval"
         );
-        assert_eq!(result, serde_json::json!({"dispatched": true}));
+        assert_eq!(result.data, serde_json::json!({"dispatched": true}));
 
         let still_pending = queue
             .pending_for_owner("alice")
@@ -531,6 +594,101 @@ mod tests {
             .expect("default needs_approval()==false must dispatch immediately");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(result, serde_json::json!({"dispatched": true}));
+        assert_eq!(result.data, serde_json::json!({"dispatched": true}));
+    }
+
+    // --- Plan 11-07 (SEC-04): TaggedValue + Capability::is_trusted() -----------
+
+    /// Stub capability with a configurable `is_local()` and the DEFAULT
+    /// `is_trusted()` (mirrors `is_local()`, unmodified).
+    struct TrustStubCap {
+        name: String,
+        schema: Value,
+        local: bool,
+    }
+
+    #[async_trait]
+    impl Capability for TrustStubCap {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "trust stub"
+        }
+        fn input_schema(&self) -> &Value {
+            &self.schema
+        }
+        fn is_local(&self) -> bool {
+            self.local
+        }
+        async fn invoke(&self, _args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
+            Ok(serde_json::json!({"own": true}))
+        }
+    }
+
+    /// Test 1: a stub with `is_local()==true` and default `is_trusted()`
+    /// invoked via `CapabilityRegistry::invoke()` returns
+    /// `TaggedValue{trusted: true, source: <cap name>, data: <cap's own Value>}`.
+    #[tokio::test]
+    async fn invoke_wraps_local_capability_as_trusted_tagged_value() {
+        let mut registry = CapabilityRegistry::new();
+        registry
+            .register(Arc::new(TrustStubCap {
+                name: "local_cap".to_string(),
+                schema: serde_json::json!({}),
+                local: true,
+            }))
+            .unwrap();
+
+        let tagged = registry
+            .invoke(
+                "local_cap",
+                serde_json::json!({}),
+                &InvokeCtx {
+                    owner: "alice".to_string(),
+                    privacy_tier: Some(PrivacyTier::LocalOnly),
+                },
+            )
+            .await
+            .expect("local capability must dispatch under LocalOnly");
+
+        assert!(
+            tagged.trusted,
+            "is_local()==true must default is_trusted() to true"
+        );
+        assert_eq!(tagged.source, "local_cap");
+        assert_eq!(tagged.data, serde_json::json!({"own": true}));
+    }
+
+    /// Test 2: a stub with `is_local()==false` and default `is_trusted()`
+    /// returns `trusted: false`.
+    #[tokio::test]
+    async fn invoke_wraps_non_local_capability_as_untrusted_tagged_value() {
+        let mut registry = CapabilityRegistry::new();
+        registry
+            .register(Arc::new(TrustStubCap {
+                name: "remote_cap".to_string(),
+                schema: serde_json::json!({}),
+                local: false,
+            }))
+            .unwrap();
+
+        let tagged = registry
+            .invoke(
+                "remote_cap",
+                serde_json::json!({}),
+                &InvokeCtx {
+                    owner: "alice".to_string(),
+                    privacy_tier: Some(PrivacyTier::CloudOk),
+                },
+            )
+            .await
+            .expect("non-local capability must dispatch under CloudOk");
+
+        assert!(
+            !tagged.trusted,
+            "is_local()==false must default is_trusted() to false"
+        );
+        assert_eq!(tagged.source, "remote_cap");
     }
 }

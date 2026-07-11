@@ -56,10 +56,10 @@ async fn embed(
     ctx: &InvokeCtx,
     text: &str,
 ) -> anyhow::Result<Vec<f64>> {
-    let val = registry
+    let tagged = registry
         .invoke("memory_embed", serde_json::json!({ "text": text }), ctx)
         .await?;
-    serde_json::from_value(val)
+    serde_json::from_value(tagged.data)
         .map_err(|e| anyhow::anyhow!("memory_embed returned non-vector: {e}"))
 }
 
