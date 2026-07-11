@@ -707,98 +707,45 @@ impl AgentLoop {
                 render_verdict(&verdict)
             }
             _ => {
-                // Single / Parallel path via runner.
-                // Build CallConfig with tools from capability_registry (BIG-1).
-                // SEAM #2: system_prompt built dynamically — context_providers inject opaque blocks.
-                let system_prompt = self
-                    .build_system_prompt(owner, user_input, turn_persona.as_deref())
-                    .await;
-                let tools = self.capability_registry.list_tool_defs();
-                let config = CallConfig {
-                    system_prompt, // ← dinâmico via SEAM #2
-                    max_tokens: 4096,
-                    tools,
-                    ..Default::default()
-                };
-
-                let output = crate::persona::runner::run(
-                    decision,
-                    &self.registry,
-                    self.provider.clone(),
-                    &history,
-                    &config,
-                )
-                .await?;
-
-                // Process tool_calls if present via dispatch_tool_loop (BIG-1).
-                match output {
-                    crate::persona::runner::RunnerOutput::Single(pid, response) => {
-                        // WR-04 / CR-01: resolve PrivacyTier from the persona actually
-                        // handling this turn (router-chosen or /as-forced). Re-reading
-                        // self.forced_persona here was a privacy bug: it was already
-                        // consumed by .take() above (line ~211), so a forced LocalOnly
-                        // persona resolved to None and got stamped CloudOk in
-                        // dispatch_tool_loop — a LocalOnly→cloud downgrade.
-                        let resolved_tier: Option<crate::memory::PrivacyTier> =
-                            self.registry.get(&pid).map(|p| p.tier);
-                        let text = self
-                            .dispatch_tool_loop(
-                                &mut history,
-                                &session_id,
-                                &config,
-                                response,
-                                owner,
-                                resolved_tier,
-                            )
-                            .await?;
-                        // Persist the assistant response (dispatch_tool_loop handles intermediate turns)
-                        self.session
-                            .append(
-                                &session_id,
-                                Message {
-                                    role: Role::Assistant,
-                                    content: crate::types::MessageContent::Text(text.clone()),
-                                },
-                                None,
-                            )
-                            .await?;
-                        text
-                    }
-                    crate::persona::runner::RunnerOutput::Parallel(results) => {
-                        // Parallel: run tool-loop for each persona result and collect texts.
-                        let mut texts: Vec<String> = Vec::new();
-                        for (pid, response) in results {
-                            // CR-01: resolve tier per-persona — each parallel persona may
-                            // carry a different tier. fail-closed via check_egress inside
-                            // dispatch_tool_loop (None → blocked, not defaulted to cloud).
-                            let resolved_tier: Option<crate::memory::PrivacyTier> =
-                                self.registry.get(&pid).map(|p| p.tier);
-                            let text = self
-                                .dispatch_tool_loop(
-                                    &mut history,
-                                    &session_id,
-                                    &config,
-                                    response,
-                                    owner,
-                                    resolved_tier,
-                                )
-                                .await?;
-                            texts.push(text);
-                        }
-                        let combined = texts.join("\n\n");
-                        self.session
-                            .append(
-                                &session_id,
-                                Message {
-                                    role: Role::Assistant,
-                                    content: crate::types::MessageContent::Text(combined.clone()),
-                                },
-                                None,
-                            )
-                            .await?;
-                        combined
-                    }
-                    crate::persona::runner::RunnerOutput::ConveneCabinet(_) => String::new(),
+                // SEC-05/D-09: when this turn's input is untrusted (received email
+                // content; a public-channel Discord/Slack message), the ENTIRE
+                // Single/Parallel dispatch section below — including where
+                // `config.tools` is snapshotted from `capability_registry` — runs
+                // with every pre-existing capability genuinely drained/invisible.
+                //
+                // This is NOT expressed as a `TurnCapabilityScope` value held alive
+                // across the call, because `dispatch_single_or_parallel` (like
+                // `dispatch_tool_loop` inside it) takes `&mut self` — a scope
+                // borrowing `self.capability_registry` cannot coexist with a
+                // subsequent call needing ALL of `self`. `drain_all()`/`restore()`
+                // achieve the identical guarantee (genuinely empty for the call's
+                // duration, fully restored after) without holding a live borrow
+                // across it; restoration happens whether the call returns `Ok` or
+                // `Err`, exactly like the RAII guard would.
+                if untrusted {
+                    let backup = self.capability_registry.drain_all();
+                    let result = self
+                        .dispatch_single_or_parallel(
+                            decision,
+                            &mut history,
+                            &session_id,
+                            owner,
+                            user_input,
+                            turn_persona.as_deref(),
+                        )
+                        .await;
+                    self.capability_registry.restore(backup);
+                    result?
+                } else {
+                    self.dispatch_single_or_parallel(
+                        decision,
+                        &mut history,
+                        &session_id,
+                        owner,
+                        user_input,
+                        turn_persona.as_deref(),
+                    )
+                    .await?
                 }
             }
         };
@@ -955,6 +902,115 @@ impl AgentLoop {
         }
     }
 
+    /// Single/Parallel path via runner (BIG-1) — extracted from `run_turn_for_with_trust`
+    /// so its caller can wrap the WHOLE call (including where `config.tools` is
+    /// snapshotted from `capability_registry`) in a quarantine window (SEC-05)
+    /// via `drain_all()`/`restore()` around the call, rather than a
+    /// `TurnCapabilityScope` value that cannot outlive a `&mut self` method
+    /// call like this one.
+    async fn dispatch_single_or_parallel(
+        &mut self,
+        decision: crate::persona::router::RouterDecision,
+        history: &mut Vec<Message>,
+        session_id: &str,
+        owner: &str,
+        user_input: &str,
+        turn_persona: Option<&str>,
+    ) -> anyhow::Result<String> {
+        // Build CallConfig with tools from capability_registry (BIG-1).
+        // SEAM #2: system_prompt built dynamically — context_providers inject opaque blocks.
+        let system_prompt = self
+            .build_system_prompt(owner, user_input, turn_persona)
+            .await;
+        let tools = self.capability_registry.list_tool_defs();
+        let config = CallConfig {
+            system_prompt, // ← dinâmico via SEAM #2
+            max_tokens: 4096,
+            tools,
+            ..Default::default()
+        };
+
+        let output = crate::persona::runner::run(
+            decision,
+            &self.registry,
+            self.provider.clone(),
+            history.as_slice(),
+            &config,
+        )
+        .await?;
+
+        // Process tool_calls if present via dispatch_tool_loop (BIG-1).
+        Ok(match output {
+            crate::persona::runner::RunnerOutput::Single(pid, response) => {
+                // WR-04 / CR-01: resolve PrivacyTier from the persona actually
+                // handling this turn (router-chosen or /as-forced). Re-reading
+                // self.forced_persona here was a privacy bug: it was already
+                // consumed by .take() above (line ~211), so a forced LocalOnly
+                // persona resolved to None and got stamped CloudOk in
+                // dispatch_tool_loop — a LocalOnly→cloud downgrade.
+                let resolved_tier: Option<crate::memory::PrivacyTier> =
+                    self.registry.get(&pid).map(|p| p.tier);
+                let text = self
+                    .dispatch_tool_loop(
+                        history,
+                        session_id,
+                        &config,
+                        response,
+                        owner,
+                        resolved_tier,
+                    )
+                    .await?;
+                // Persist the assistant response (dispatch_tool_loop handles intermediate turns)
+                self.session
+                    .append(
+                        session_id,
+                        Message {
+                            role: Role::Assistant,
+                            content: crate::types::MessageContent::Text(text.clone()),
+                        },
+                        None,
+                    )
+                    .await?;
+                text
+            }
+            crate::persona::runner::RunnerOutput::Parallel(results) => {
+                // Parallel: run tool-loop for each persona result and collect texts.
+                let mut texts: Vec<String> = Vec::new();
+                for (pid, response) in results {
+                    // CR-01: resolve tier per-persona — each parallel persona may
+                    // carry a different tier. fail-closed via check_egress inside
+                    // dispatch_tool_loop (None → blocked, not defaulted to cloud).
+                    let resolved_tier: Option<crate::memory::PrivacyTier> =
+                        self.registry.get(&pid).map(|p| p.tier);
+                    let text = self
+                        .dispatch_tool_loop(
+                            history,
+                            session_id,
+                            &config,
+                            response,
+                            owner,
+                            resolved_tier,
+                        )
+                        .await?;
+                    texts.push(text);
+                }
+                let combined = texts.join("\n\n");
+                self.session
+                    .append(
+                        session_id,
+                        Message {
+                            role: Role::Assistant,
+                            content: crate::types::MessageContent::Text(combined.clone()),
+                        },
+                        None,
+                    )
+                    .await?;
+                combined
+            }
+            crate::persona::runner::RunnerOutput::ConveneCabinet(_) => String::new(),
+        })
+    }
+
     /// Dispatch tool-loop for a single LLM response (BIG-1).
     ///
     /// Processes `response.tool_calls` by routing each call through `capability_registry.invoke`
@@ -1027,6 +1083,12 @@ impl AgentLoop {
                         );
                         anyhow::bail!(BastionError::ToolLoopCap);
                     }
+
+                    // SEC-05: tracks whether ANY tool result THIS round was untrusted
+                    // (`TaggedValue.trusted == false`) — if so, the LLM call for the
+                    // NEXT round is quarantined (below), independent of the turn-level
+                    // `untrusted` flag on `run_turn_for_with_trust`.
+                    let mut round_untrusted = false;
 
                     for tc in &tool_calls {
                         tracing::debug!(event = "tool_dispatch", tool = %tc.name);
@@ -1110,6 +1172,12 @@ impl AgentLoop {
                         };
                         tool_span.end();
 
+                        // SEC-05: any untrusted result this round quarantines the NEXT
+                        // round's LLM call, below.
+                        if !trusted {
+                            round_untrusted = true;
+                        }
+
                         // Gap 1 (SC#2): skill-writer-by-NL must reload on the normal
                         // persona path too, not only in run_provider_fallback. Shared
                         // helper handles the skill_reloaded signal.
@@ -1176,9 +1244,23 @@ impl AgentLoop {
                             KeyValue::new("gen_ai.request.model", model_name),
                         ])
                         .start(&tracer);
-                    let next_response = self
-                        .complete_with_fallback_ladder(history, config, resolved_tier)
-                        .await?;
+                    // SEC-05: a round whose results included an untrusted tool result
+                    // quarantines ONLY this immediately-following completion call —
+                    // drain/restore brackets it tightly (a live `TurnCapabilityScope`
+                    // cannot span this `&mut self` call, same reasoning as
+                    // `dispatch_single_or_parallel`'s caller). Restored whether the
+                    // call succeeds or errors, before the `?` propagates.
+                    let next_response = if round_untrusted {
+                        let backup = self.capability_registry.drain_all();
+                        let result = self
+                            .complete_with_fallback_ladder(history, config, resolved_tier)
+                            .await;
+                        self.capability_registry.restore(backup);
+                        result?
+                    } else {
+                        self.complete_with_fallback_ladder(history, config, resolved_tier)
+                            .await?
+                    };
                     // Record token usage and finish reason
                     chat_span.set_attribute(KeyValue::new(
                         "gen_ai.usage.input_tokens",
@@ -2744,9 +2826,7 @@ mod tests {
                     usage: TokenUsage::default(),
                 });
             }
-            let n = self
-                .calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < 2 {
                 Ok(LlmResponse {
                     text: String::new(),
@@ -2823,8 +2903,7 @@ mod tests {
             _args: serde_json::Value,
             _ctx: &crate::capability::InvokeCtx,
         ) -> anyhow::Result<serde_json::Value> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(serde_json::json!({"x": 1}))
         }
     }

@@ -903,7 +903,13 @@ async fn daemon_loop(
                         Err(e) => Err(e),
                     }
                 } else {
-                    agent.run_turn_for(&req.text, &req.owner).await
+                    // SEC-05: threads the channel-resolved trust classification
+                    // (email always untrusted; public-channel Discord/Slack
+                    // untrusted; DMs and every other pre-existing channel
+                    // trusted) into the quarantine-aware turn entry point.
+                    agent
+                        .run_turn_for_with_trust(&req.text, &req.owner, req.untrusted)
+                        .await
                 };
                 if let Err(ref e) = res {
                     tracing::warn!(
