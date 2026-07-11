@@ -91,10 +91,16 @@ impl CronService {
     /// PROACT-04: idle distillation trigger.
     ///
     /// When called after an idle period, runs `dream.extract_facts` on `recent` messages
-    /// and persists each fact as a belief via `memory` (MEM-05).
+    /// and persists each fact as a belief via `memory` (MEM-05). Then, in the SAME pass
+    /// (D-12 — never a separate component), runs `dream.consolidate()` over the owner's
+    /// currently-active beliefs and applies the resulting `ConsolidationPlan` via
+    /// `Memory::supersede_belief`/`Memory::revoke_belief` (MEM-02). Consolidation runs
+    /// unconditionally, even when `extract_facts` produced zero new facts — an idle tick
+    /// with no new self-disclosures can still merge/prune the existing belief set.
     ///
     /// Optionally enqueues a follow-up nudge into `pending_tx` after storing beliefs.
-    /// Errors are logged and swallowed — idle failures must not abort the daemon.
+    /// Errors at every step are logged and swallowed — idle failures must not abort the
+    /// daemon; one bad supersession/prune pair must not block the rest.
     pub async fn idle_tick(
         &self,
         dream: &dyn crate::agent::dream::Dream,
@@ -110,10 +116,6 @@ impl CronService {
             }
         };
 
-        if facts.is_empty() {
-            return;
-        }
-
         let mem = memory.read().await;
         let mut stored = 0usize;
         for fact in &facts {
@@ -127,6 +129,53 @@ impl CronService {
         }
 
         tracing::info!(event = "idle_tick_complete", owner, stored);
+
+        // MEM-02: consolidate the active belief set alongside extract_facts, in the
+        // same pass. Each step below swallows its own errors — a retrieve/consolidate
+        // failure skips consolidation for this tick only, never aborts idle_tick.
+        let beliefs = match mem.retrieve_tagged(owner, None).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(event = "idle_tick_consolidate_retrieve_error", error = %e);
+                return;
+            }
+        };
+
+        let plan = match dream.consolidate(&beliefs).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(event = "idle_tick_consolidate_error", error = %e);
+                return;
+            }
+        };
+
+        let mut superseded = 0usize;
+        for (old_id, new_id) in &plan.supersessions {
+            match mem.supersede_belief(owner, *old_id, *new_id).await {
+                Ok(_) => superseded += 1,
+                Err(e) => tracing::warn!(
+                    event = "idle_tick_supersede_error",
+                    error = %e,
+                    old_id,
+                    new_id
+                ),
+            }
+        }
+
+        let mut pruned = 0usize;
+        for id in &plan.prune_ids {
+            match mem.revoke_belief(owner, *id).await {
+                Ok(_) => pruned += 1,
+                Err(e) => tracing::warn!(event = "idle_tick_prune_error", error = %e, id),
+            }
+        }
+
+        tracing::info!(
+            event = "idle_tick_consolidate_complete",
+            owner,
+            superseded,
+            pruned
+        );
     }
 }
 
@@ -137,20 +186,23 @@ impl CronService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::dream::Dream;
+    use crate::agent::dream::{ConsolidationPlan, Dream};
     use crate::goal::ScoringConfig;
     use crate::memory::sqlite::SqliteMemory;
-    use crate::memory::Memory;
+    use crate::memory::{Belief, Memory};
     use crate::types::Message;
     use async_trait::async_trait;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio::sync::RwLock;
 
-    // --- MockDream: returns scripted facts ---
+    // --- MockDream: returns scripted facts + a scripted ConsolidationPlan (or a
+    // simulated consolidate() error, to test idle_tick's error-swallow discipline). ---
 
     struct MockDream {
         facts: Vec<String>,
+        consolidation_plan: ConsolidationPlan,
+        consolidate_error: bool,
     }
 
     #[async_trait]
@@ -159,11 +211,11 @@ mod tests {
             Ok(self.facts.clone())
         }
 
-        async fn consolidate(
-            &self,
-            _: &[crate::memory::Belief],
-        ) -> anyhow::Result<crate::agent::dream::ConsolidationPlan> {
-            Ok(crate::agent::dream::ConsolidationPlan::default())
+        async fn consolidate(&self, _: &[Belief]) -> anyhow::Result<ConsolidationPlan> {
+            if self.consolidate_error {
+                anyhow::bail!("mock consolidate error");
+            }
+            Ok(self.consolidation_plan.clone())
         }
     }
 
@@ -268,6 +320,8 @@ mod tests {
                 "Mario exercises every morning".to_string(),
                 "Mario drinks coffee".to_string(),
             ],
+            consolidation_plan: ConsolidationPlan::default(),
+            consolidate_error: false,
         };
 
         let messages: Vec<Message> = vec![]; // unused by MockDream
@@ -285,6 +339,145 @@ mod tests {
             "idle_tick must store all 2 facts; got {}",
             beliefs.len()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // idle_tick: MEM-02 — applies a scripted ConsolidationPlan via
+    // supersede_belief/revoke_belief, in the same pass as extract_facts, even when
+    // extract_facts produces zero new facts.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn idle_tick_applies_consolidation_plan_supersede_and_prune() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        setup_db(&path).await;
+
+        let memory: crate::memory::SharedMemory = Arc::new(RwLock::new(
+            Box::new(SqliteMemory::new(&path)) as Box<dyn Memory>,
+        ));
+
+        // Seed 3 real beliefs directly via the Memory trait — supersession/prune are
+        // scripted below by exact id, so the actual content/weight doesn't drive the
+        // decision here (Dream::consolidate's own decision logic is unit-tested in
+        // agent::dream::tests; this test proves idle_tick's WIRING of a given plan).
+        let (old_id, new_id, prune_id) = {
+            let m = memory.read().await;
+            let old_id = m
+                .store_belief(
+                    "_local",
+                    None,
+                    "Mario exercises every morning",
+                    "seed",
+                    "test",
+                    false,
+                    None,
+                )
+                .await
+                .expect("store old belief");
+            let new_id = m
+                .store_belief(
+                    "_local",
+                    None,
+                    "Mario exercises each morning",
+                    "seed",
+                    "test",
+                    false,
+                    None,
+                )
+                .await
+                .expect("store new belief");
+            let prune_id = m
+                .store_belief(
+                    "_local",
+                    None,
+                    "Mario dislikes cauliflower",
+                    "seed",
+                    "test",
+                    false,
+                    None,
+                )
+                .await
+                .expect("store prune belief");
+            (old_id, new_id, prune_id)
+        };
+
+        let engine = GoalEngine::new(&path, ScoringConfig::default());
+        let (tx, _rx) = mpsc::channel::<String>(16);
+        let svc = CronService::new(tx, engine);
+
+        let dream = MockDream {
+            facts: vec![], // proves consolidation runs even with zero new facts
+            consolidation_plan: ConsolidationPlan {
+                supersessions: vec![(old_id, new_id)],
+                prune_ids: vec![prune_id],
+            },
+            consolidate_error: false,
+        };
+
+        let messages: Vec<Message> = vec![];
+        svc.idle_tick(&dream, &messages, &memory, "_local").await;
+
+        // Supersession: the OLD row's superseded_by is set; the row is still present
+        // (never deleted, D-15) since supersede_belief never touches weight/revoked —
+        // retrieve_all_beliefs (WHERE revoked=0 AND weight>0) still returns it.
+        let all = {
+            let m = memory.read().await;
+            m.retrieve_all_beliefs("_local")
+                .await
+                .expect("retrieve_all")
+        };
+        let old_row = all
+            .iter()
+            .find(|b| b.id == old_id)
+            .expect("old belief must still be present (non-destructive supersession)");
+        assert_eq!(
+            old_row.superseded_by,
+            Some(new_id),
+            "old belief must be marked superseded_by new_id"
+        );
+
+        // Pruning: the belief is soft-revoked (revoked=1, weight=0). Verified via a raw
+        // query since retrieve_all_beliefs deliberately excludes revoked rows
+        // (WHERE revoked=0), so absence there alone wouldn't distinguish "revoked" from
+        // "never existed".
+        let (revoked, weight) = read_raw_belief_flags(&path, prune_id).await;
+        assert!(revoked, "pruned belief must be revoked");
+        assert_eq!(
+            weight, 0.0,
+            "pruned belief must have weight=0 after revoke_belief"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // idle_tick: a consolidate() error is logged and swallowed — idle_tick completes
+    // normally (mirrors extract_facts's existing error-swallow test coverage).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn idle_tick_swallows_consolidate_error_without_panicking() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        setup_db(&path).await;
+
+        let memory: crate::memory::SharedMemory = Arc::new(RwLock::new(
+            Box::new(SqliteMemory::new(&path)) as Box<dyn Memory>,
+        ));
+
+        let engine = GoalEngine::new(&path, ScoringConfig::default());
+        let (tx, _rx) = mpsc::channel::<String>(16);
+        let svc = CronService::new(tx, engine);
+
+        let dream = MockDream {
+            facts: vec![],
+            consolidation_plan: ConsolidationPlan::default(),
+            consolidate_error: true,
+        };
+
+        let messages: Vec<Message> = vec![];
+        // Must not panic/abort — idle_tick completes normally despite consolidate()
+        // erroring; if this test hangs or panics, the error-swallow discipline broke.
+        svc.idle_tick(&dream, &messages, &memory, "_local").await;
     }
 
     // -----------------------------------------------------------------------
@@ -309,5 +502,29 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: read (revoked, weight) directly from SQLite for a given belief id —
+    // used to verify pruning since retrieve_all_beliefs excludes revoked rows.
+    // -----------------------------------------------------------------------
+
+    async fn read_raw_belief_flags(db_path: &str, id: i64) -> (bool, f64) {
+        let path = db_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.query_row(
+                "SELECT revoked, weight FROM beliefs WHERE id = ?1",
+                rusqlite::params![id],
+                |row| {
+                    let revoked: i64 = row.get(0)?;
+                    let weight: f64 = row.get(1)?;
+                    Ok((revoked != 0, weight))
+                },
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap()
     }
 }
