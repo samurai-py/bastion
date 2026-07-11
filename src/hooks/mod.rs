@@ -6,9 +6,11 @@
 //! - [`guardrails`]: input guardrail — malformed/oversized input (HOOK-02)
 //! - [`output_validator`]: NL contestation detection → belief revocation (HOOK-03, D-13)
 //! - [`observer`]: life-log Observer (HOOK-05)
+//! - [`approval_intent`]: NL approval/rejection phrase detection (SEC-01, D-02, Plan 11-04)
 //!
 //! AgentLoop wiring of these hooks is plan 08.
 
+pub mod approval_intent;
 pub mod egress;
 pub mod guardrails;
 pub mod observer;
