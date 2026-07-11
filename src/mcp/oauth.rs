@@ -65,6 +65,22 @@ impl ComposioOAuth {
         }
     }
 
+    /// Test-only constructor bypassing the `COMPOSIO_API_KEY` env lookup entirely —
+    /// lets OTHER modules' tests (e.g. `agent::command`'s `/connect-app-composio`
+    /// tests) build a working `ComposioOAuth` against a local scripted server without
+    /// mutating a process-global env var (which would race against this module's own
+    /// `new_panics_when_composio_api_key_missing_or_empty` test under parallel
+    /// `cargo test`). Fields stay private; this is the sanctioned test-only seam.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(db_path: impl Into<String>, base: impl Into<String>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            api_key: "test-key".into(),
+            db_path: db_path.into(),
+            base: base.into(),
+        }
+    }
+
     /// POST a JSON body to a Composio API path, surfacing Composio's error message on
     /// non-2xx (mirrors `GroqProvider::post_chat`'s raw-reqwest send/parse/error idiom).
     async fn post_json(
@@ -279,12 +295,7 @@ mod tests {
     /// Bypass `new()`'s COMPOSIO_API_KEY env lookup for tests that don't exercise it
     /// directly (mirrors `GroqProvider`'s `test_provider()`).
     fn test_oauth(db_path: &str, base: &str) -> ComposioOAuth {
-        ComposioOAuth {
-            http: reqwest::Client::new(),
-            api_key: "test-key".into(),
-            db_path: db_path.to_owned(),
-            base: base.to_owned(),
-        }
+        ComposioOAuth::new_for_test(db_path, base)
     }
 
     async fn make_db() -> (NamedTempFile, String) {

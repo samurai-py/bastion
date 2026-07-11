@@ -10,6 +10,7 @@ use crate::provider::SharedProvider;
 /// message, not be mislabeled "console-only" as if it would work at the console).
 pub const KNOWN_COMMANDS: &[&str] = &[
     "/connect-app",
+    "/connect-app-composio",
     "/model",
     "/stop",
     "/as",
@@ -50,8 +51,13 @@ fn generate_otc() -> String {
 ///
 /// Widened signature (plan 08): also accepts registry + memory for /as, /cabinet, /contest.
 /// CR-02 (plan 06-08): also accepts the shared OTC store for /connect-app.
-/// `owner` scopes owner-sensitive commands (e.g. /contest) — IDOR guard now that
-/// this router is reachable from multi-owner channels, not just the local console.
+/// SEC-03 (plan 11-06): also accepts the optional ComposioOAuth client for
+/// /connect-app-composio — `None` when COMPOSIO_API_KEY is not configured (mirrors
+/// `otc_store`'s "feature is opt-in, degrade gracefully" shape exactly).
+/// `owner` scopes owner-sensitive commands (e.g. /contest, /connect-app-composio) — IDOR
+/// guard now that this router is reachable from multi-owner channels, not just the
+/// local console.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     input: &str,
     provider: &SharedProvider,
@@ -59,6 +65,7 @@ pub async fn handle_command(
     memory: &SharedMemory,
     forced_persona: &mut Option<String>,
     otc_store: Option<&crate::channel::webhook::OtcStore>,
+    composio_oauth: Option<&crate::mcp::oauth::ComposioOAuth>,
     owner: &str,
 ) -> anyhow::Result<CommandResult> {
     let trimmed = input.trim();
@@ -89,6 +96,37 @@ pub async fn handle_command(
                 None => Ok(CommandResult::Handled(
                     "/connect-app unavailable — the webhook channel is not running.\n\
                      Start the daemon with BASTION_WEBHOOK_ADDR set, then retry."
+                        .to_string(),
+                )),
+            }
+        }
+
+        "/connect-app-composio" => {
+            // SEC-03: initiate a real Composio OAuth (AuthKit) connection for a given
+            // toolkit (e.g. "gmail", "slack"), owner-scoped. Composio calls back
+            // POST /auth/composio/callback (webhook server) with the resulting
+            // connected_account_id once the owner authorizes in their browser.
+            let toolkit = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
+            let toolkit = match toolkit {
+                Some(t) => t,
+                None => {
+                    return Ok(CommandResult::Handled(
+                        "Uso: /connect-app-composio <toolkit>".to_string(),
+                    ))
+                }
+            };
+            match composio_oauth {
+                Some(oauth) => {
+                    let redirect_url = oauth.initiate(owner, toolkit).await?;
+                    tracing::info!(event = "connect_app_composio_initiated", toolkit = %toolkit, owner = %owner);
+                    Ok(CommandResult::Handled(format!(
+                        "Abra este link para autorizar '{toolkit}': {redirect_url}\n\
+                         Após autorizar, a conexão será confirmada automaticamente."
+                    )))
+                }
+                None => Ok(CommandResult::Handled(
+                    "/connect-app-composio unavailable — Composio OAuth is not configured.\n\
+                     Set COMPOSIO_API_KEY and restart the daemon, then retry."
                         .to_string(),
                 )),
             }
@@ -232,6 +270,7 @@ pub async fn handle_command(
              \x20 /as <persona>         Force persona for next turn (console only — daemon-wide state)\n\
              \x20 /cabinet [personas..] Convene Cabinet with named personas (console only)\n\
              \x20 /contest <id>         Revoke a belief by ID (D-14 — also over webhook/Telegram)\n\
+             \x20 /connect-app-composio <toolkit>  Start a Composio OAuth connection (SEC-03)\n\
              \x20 /logs                 Show recent ERROR/WARN log entries (console only)\n\
              \x20 /help                 Show this help (also over webhook/Telegram)"
                 .to_string(),
@@ -394,6 +433,7 @@ mod tests {
             &mem,
             &mut forced,
             None,
+            None,
             "_local",
         )
         .await
@@ -425,6 +465,7 @@ mod tests {
             &mem,
             &mut forced,
             None,
+            None,
             "_local",
         )
         .await
@@ -451,6 +492,7 @@ mod tests {
             &registry,
             &mem,
             &mut forced,
+            None,
             None,
             "_local",
         )
@@ -553,6 +595,7 @@ mod tests {
             &mem,
             &mut forced,
             None,
+            None,
             "_local",
         )
         .await
@@ -591,6 +634,7 @@ mod tests {
             &mem,
             &mut forced,
             Some(&store),
+            None,
             "_local",
         )
         .await
@@ -632,10 +676,138 @@ mod tests {
             &mem,
             &mut forced,
             None,
+            None,
             "_local",
         )
         .await
         .expect("cmd");
         assert!(matches!(result, CommandResult::Handled(_)));
+    }
+
+    // ── /connect-app-composio unit tests (SEC-03) ───────────────────────────────
+
+    /// Spin up a tiny local axum server scripting Composio's initiate endpoint —
+    /// mirrors `mcp::oauth`'s own offline test pattern (no mocking crate needed).
+    async fn spawn_scripted_composio_server(redirect_url: &'static str) -> std::net::SocketAddr {
+        let app = axum::Router::new().route(
+            "/api/v3/connected_accounts/link",
+            axum::routing::post(move || async move {
+                axum::Json(serde_json::json!({ "redirect_url": redirect_url }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    #[test]
+    fn connect_app_composio_is_a_known_command() {
+        assert!(
+            KNOWN_COMMANDS.contains(&"/connect-app-composio"),
+            "must be registered in KNOWN_COMMANDS so channel dispatch classifies it as console-only, not Unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_app_composio_without_toolkit_returns_usage_message() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mem = make_memory(&path).await;
+        let registry = make_registry(&["Aria"]);
+        let provider = make_provider();
+        let mut forced = None;
+
+        let result = handle_command(
+            "/connect-app-composio",
+            &provider,
+            &registry,
+            &mem,
+            &mut forced,
+            None,
+            None,
+            "_local",
+        )
+        .await
+        .expect("cmd");
+        match result {
+            CommandResult::Handled(msg) => {
+                assert!(
+                    msg.contains("Uso: /connect-app-composio"),
+                    "must return a usage message when toolkit arg is missing: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Handled usage message, got a different variant: {other:?}",
+                other = std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_app_composio_without_oauth_client_is_graceful() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mem = make_memory(&path).await;
+        let registry = make_registry(&["Aria"]);
+        let provider = make_provider();
+        let mut forced = None;
+
+        // No COMPOSIO_API_KEY configured → composio_oauth is None → graceful
+        // "unavailable" message, never a panic or an Err.
+        let result = handle_command(
+            "/connect-app-composio gmail",
+            &provider,
+            &registry,
+            &mem,
+            &mut forced,
+            None,
+            None,
+            "_local",
+        )
+        .await
+        .expect("cmd");
+        assert!(matches!(result, CommandResult::Handled(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_app_composio_with_working_oauth_returns_redirect_url() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mem = make_memory(&path).await;
+        let registry = make_registry(&["Aria"]);
+        let provider = make_provider();
+        let mut forced = None;
+
+        let addr = spawn_scripted_composio_server("https://composio.dev/auth/xyz").await;
+        let oauth = crate::mcp::oauth::ComposioOAuth::new_for_test(&path, format!("http://{addr}"));
+
+        let result = handle_command(
+            "/connect-app-composio gmail",
+            &provider,
+            &registry,
+            &mem,
+            &mut forced,
+            None,
+            Some(&oauth),
+            "_local",
+        )
+        .await
+        .expect("cmd");
+
+        match result {
+            CommandResult::Handled(msg) => {
+                assert!(
+                    msg.contains("https://composio.dev/auth/xyz"),
+                    "must surface the real redirect_url: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Handled with redirect_url, got: {other:?}",
+                other = std::mem::discriminant(&other)
+            ),
+        }
     }
 }

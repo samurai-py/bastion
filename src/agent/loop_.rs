@@ -63,6 +63,11 @@ pub struct AgentLoop {
     /// starts. `/connect-app` writes one-time codes here for the mobile pairing flow
     /// (`/auth/exchange`). `None` when the webhook channel is not running.
     pub otc_store: Option<crate::channel::webhook::OtcStore>,
+    /// SEC-03: Composio OAuth client, injected by main.rs when `COMPOSIO_API_KEY` is
+    /// configured. `/connect-app-composio` uses this to initiate real OAuth
+    /// connections. `None` (the opt-in default) degrades the command to an
+    /// "unavailable" message rather than panicking the daemon.
+    pub composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
     /// D-11 (Plan 08-01) / SO-03 (Plan 08-08): ordered list of model-name strings tried,
     /// in order, when the primary provider suffers a hard/persistent failure
     /// (`complete_with_fallback_ladder`'s rung 3). Sourced from `AgentConfig.fallback_models`
@@ -127,6 +132,7 @@ impl AgentLoop {
             pending_rx: Some(pending_rx),
             forced_persona: None,
             otc_store: None,
+            composio_oauth: None,
             fallback_models,
             #[cfg(test)]
             fallback_resolver_override: None,
@@ -1336,6 +1342,13 @@ impl AgentLoop {
         self.otc_store = Some(store);
     }
 
+    /// SEC-03: inject the Composio OAuth client so `/connect-app-composio` can
+    /// initiate real OAuth connections. Called by main.rs when `COMPOSIO_API_KEY`
+    /// is configured (opt-in — mirrors `set_otc_store`'s shape exactly).
+    pub fn set_composio_oauth(&mut self, oauth: std::sync::Arc<crate::mcp::oauth::ComposioOAuth>) {
+        self.composio_oauth = Some(oauth);
+    }
+
     pub async fn handle_command(
         &mut self,
         input: &str,
@@ -1348,6 +1361,7 @@ impl AgentLoop {
             &self.memory,
             &mut self.forced_persona,
             self.otc_store.as_ref(),
+            self.composio_oauth.as_deref(),
             owner,
         )
         .await
