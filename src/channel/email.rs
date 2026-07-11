@@ -451,4 +451,25 @@ mod tests {
             handle_email_message("mario@example.com".into(), "ping".into(), &h, &map).await;
         assert!(result.is_err());
     }
+
+    /// Plan 11-08 (SEC-05/D-09): received email content ALWAYS reaches the
+    /// agent marked untrusted — no signature/DKIM check gates this, and even
+    /// a known/mapped sender's BODY content is untrusted.
+    #[tokio::test]
+    async fn handle_email_message_always_marks_untrusted_true() {
+        let (h, mut rx) = handle::channel();
+        let map = OwnerMap::from_pairs(&[("mario@example.com", "mario")]);
+
+        let task = tokio::spawn(async move {
+            handle_email_message("mario@example.com".into(), "ping".into(), &h, &map).await
+        });
+
+        let req = rx.recv().await.expect("request must arrive");
+        assert!(
+            req.untrusted,
+            "received email content must ALWAYS be marked untrusted (D-09), no carve-out"
+        );
+        let _ = req.reply.send(Ok("ok".into()));
+        task.await.unwrap().unwrap();
+    }
 }

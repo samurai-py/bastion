@@ -190,7 +190,7 @@ mod tests {
         stub_consumer(rx);
         let map = OwnerMap::from_pairs(&[("111222333", "mario")]);
 
-        let reply = handle_discord_message("ping".into(), "111222333".into(), &h, &map)
+        let reply = handle_discord_message("ping".into(), "111222333".into(), false, &h, &map)
             .await
             .unwrap();
         assert_eq!(reply, "echo:ping");
@@ -202,7 +202,8 @@ mod tests {
         stub_consumer(rx);
         let map = OwnerMap::from_pairs(&[("111222333", "mario")]);
 
-        let result = handle_discord_message("ping".into(), "999999999".into(), &h, &map).await;
+        let result =
+            handle_discord_message("ping".into(), "999999999".into(), false, &h, &map).await;
         assert!(result.is_err(), "unknown discord user must be rejected");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("not in owner map"), "error message: {msg}");
@@ -214,7 +215,46 @@ mod tests {
         stub_consumer(rx);
         let map = OwnerMap::default();
 
-        let result = handle_discord_message("ping".into(), "111222333".into(), &h, &map).await;
+        let result =
+            handle_discord_message("ping".into(), "111222333".into(), false, &h, &map).await;
         assert!(result.is_err());
+    }
+
+    /// Plan 11-08 (SEC-05/D-09): a message from a public (non-DM) Discord
+    /// context — `is_public_channel == true` — must reach the agent marked
+    /// untrusted.
+    #[tokio::test]
+    async fn handle_discord_message_public_channel_marks_untrusted_true() {
+        let (h, mut rx) = handle::channel();
+        let map = OwnerMap::from_pairs(&[("111222333", "mario")]);
+
+        let task = tokio::spawn(async move {
+            handle_discord_message("ping".into(), "111222333".into(), true, &h, &map).await
+        });
+
+        let req = rx.recv().await.expect("request must arrive");
+        assert!(
+            req.untrusted,
+            "a public (non-DM) Discord message must be untrusted"
+        );
+        let _ = req.reply.send(Ok("ok".into()));
+        task.await.unwrap().unwrap();
+    }
+
+    /// Counterpart: a Discord DM (`is_public_channel == false`) must NOT be
+    /// marked untrusted.
+    #[tokio::test]
+    async fn handle_discord_message_dm_marks_untrusted_false() {
+        let (h, mut rx) = handle::channel();
+        let map = OwnerMap::from_pairs(&[("111222333", "mario")]);
+
+        let task = tokio::spawn(async move {
+            handle_discord_message("ping".into(), "111222333".into(), false, &h, &map).await
+        });
+
+        let req = rx.recv().await.expect("request must arrive");
+        assert!(!req.untrusted, "a Discord DM must be trusted");
+        let _ = req.reply.send(Ok("ok".into()));
+        task.await.unwrap().unwrap();
     }
 }

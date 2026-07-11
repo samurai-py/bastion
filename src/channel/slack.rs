@@ -248,7 +248,7 @@ mod tests {
         stub_consumer(rx);
         let map = OwnerMap::from_pairs(&[("U01ABCDEF", "mario")]);
 
-        let reply = handle_slack_message("ping".into(), "U01ABCDEF".into(), &h, &map)
+        let reply = handle_slack_message("ping".into(), "U01ABCDEF".into(), false, &h, &map)
             .await
             .unwrap();
         assert_eq!(reply, "echo:ping");
@@ -260,7 +260,8 @@ mod tests {
         stub_consumer(rx);
         let map = OwnerMap::from_pairs(&[("U01ABCDEF", "mario")]);
 
-        let result = handle_slack_message("ping".into(), "U99ZZZZZZ".into(), &h, &map).await;
+        let result =
+            handle_slack_message("ping".into(), "U99ZZZZZZ".into(), false, &h, &map).await;
         assert!(result.is_err(), "unknown slack user must be rejected");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("not in owner map"), "error message: {msg}");
@@ -272,7 +273,45 @@ mod tests {
         stub_consumer(rx);
         let map = OwnerMap::default();
 
-        let result = handle_slack_message("ping".into(), "U01ABCDEF".into(), &h, &map).await;
+        let result = handle_slack_message("ping".into(), "U01ABCDEF".into(), false, &h, &map).await;
         assert!(result.is_err());
+    }
+
+    /// Plan 11-08 (SEC-05/D-09): a message from a public (non-DM) Slack
+    /// context — `is_public_channel == true` — must reach the agent marked
+    /// untrusted.
+    #[tokio::test]
+    async fn handle_slack_message_public_channel_marks_untrusted_true() {
+        let (h, mut rx) = handle::channel();
+        let map = OwnerMap::from_pairs(&[("U01ABCDEF", "mario")]);
+
+        let task = tokio::spawn(async move {
+            handle_slack_message("ping".into(), "U01ABCDEF".into(), true, &h, &map).await
+        });
+
+        let req = rx.recv().await.expect("request must arrive");
+        assert!(
+            req.untrusted,
+            "a public (non-DM) Slack message must be untrusted"
+        );
+        let _ = req.reply.send(Ok("ok".into()));
+        task.await.unwrap().unwrap();
+    }
+
+    /// Counterpart: a Slack DM (`is_public_channel == false`) must NOT be
+    /// marked untrusted.
+    #[tokio::test]
+    async fn handle_slack_message_dm_marks_untrusted_false() {
+        let (h, mut rx) = handle::channel();
+        let map = OwnerMap::from_pairs(&[("U01ABCDEF", "mario")]);
+
+        let task = tokio::spawn(async move {
+            handle_slack_message("ping".into(), "U01ABCDEF".into(), false, &h, &map).await
+        });
+
+        let req = rx.recv().await.expect("request must arrive");
+        assert!(!req.untrusted, "a Slack DM must be trusted");
+        let _ = req.reply.send(Ok("ok".into()));
+        task.await.unwrap().unwrap();
     }
 }
