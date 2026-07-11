@@ -86,6 +86,20 @@ pub struct Belief {
     pub helpful_count: i64,
     pub harmful_count: i64,
     pub neutral_count: i64,
+    /// Start of this belief's valid-time window (bi-temporal, MEM-01/D-11).
+    /// `None` means open from the beginning of time — permissive.
+    pub valid_from: Option<i64>,
+    /// End of this belief's valid-time window (bi-temporal, MEM-01/D-11). `None`
+    /// means open/no-expiry — a PERMISSIVE convention that deliberately diverges
+    /// from `tier: Option<PrivacyTier>` 15 lines above in this same struct, whose
+    /// `None` is treated as deny-on-ambiguity by the egress gate. Do NOT "fix" this
+    /// field by analogy to `tier`'s convention — NULL here means valid, not denied.
+    pub valid_until: Option<i64>,
+    /// Id of the belief that superseded this one, if any (soft-supersession, D-11).
+    /// `None` means this belief has not been superseded.
+    pub superseded_by: Option<i64>,
+    /// Timestamp (nanos) at which this belief was superseded, if any.
+    pub supersedes_at: Option<i64>,
 }
 
 /// Core memory abstraction. Every subsystem reads/writes beliefs through this trait.
@@ -118,6 +132,18 @@ pub trait Memory: Send + Sync {
     /// Owner-scoped (IDOR guard): only the owning user's belief may be revoked.
     /// Errors when no row matches (id, owner_id) so a wrong owner cannot silently no-op.
     async fn revoke_belief(&self, owner_id: &str, id: i64) -> anyhow::Result<()>;
+
+    /// Soft-supersession: sets `superseded_by=new_id`, `supersedes_at=now` on the OLD
+    /// row only (id=old_id). The NEW row (id=new_id) is untouched by this call — it is
+    /// presumed to already exist as a normal belief. Row is NEVER deleted (same D-15
+    /// principle as revoke_belief). Owner-scoped (IDOR guard): errors when no row
+    /// matches (old_id, owner_id) — a wrong owner cannot silently no-op.
+    async fn supersede_belief(
+        &self,
+        owner_id: &str,
+        old_id: i64,
+        new_id: i64,
+    ) -> anyhow::Result<()>;
 
     /// Load frozen-core beliefs (is_core=1, revoked=0) once at session start.
     async fn load_core(&self, owner_id: &str) -> anyhow::Result<Vec<Belief>>;
