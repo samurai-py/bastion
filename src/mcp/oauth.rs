@@ -31,6 +31,22 @@
 use rusqlite::Connection;
 use tokio::task;
 
+/// SEC-03 forgery fix (T-11-06-01): TTL for a pending OAuth state-nonce, in seconds.
+/// Wider than the 5-minute OTC pairing window (`generate_otc` in `agent/command.rs`)
+/// because this window must cover a full third-party consent flow in the owner's
+/// browser (Gmail/Slack login + 2FA + consent screens), not just typing a short code.
+const OAUTH_STATE_TTL_SECS: i64 = 900;
+
+/// Generate an unguessable, single-use CSPRNG state token (32 random bytes, hex).
+/// Binds `ComposioOAuth::initiate()` to the `/auth/composio/callback` webhook so the
+/// callback can never be forged with an arbitrary `{owner, toolkit}` pair (T-11-06-01).
+fn generate_state_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Owner-scoped Composio OAuth client, backed by the `composio_connections` sqlite
 /// table (Plan 11-01: id, owner_id, toolkit, connected_account_id, status, created_at,
 /// updated_at; UNIQUE(owner_id, toolkit)).
@@ -139,10 +155,26 @@ impl ComposioOAuth {
     /// `owner_id` is threaded into the request so a future multi-tenant Composio
     /// project can disambiguate connections server-side; today's single-owner
     /// deployments pass `agent::loop_::DEFAULT_OWNER`.
+    ///
+    /// SEC-03 forgery fix (T-11-06-01): also mints a CSPRNG state-nonce and persists
+    /// `(state, owner_id, toolkit, expires_at)` in `composio_oauth_state` BEFORE the
+    /// Composio call, then passes `state` through in the initiate request body so
+    /// Composio's own callback is expected to echo it back. `/auth/composio/callback`
+    /// (`channel/webhook.rs`) derives `owner`/`toolkit` EXCLUSIVELY from this
+    /// server-side record (via [`Self::consume_state`]) — never from the callback
+    /// body's own fields — closing the "anyone who can reach the endpoint can bind an
+    /// arbitrary connection to any owner" forgery hole. The exact `state` passthrough
+    /// field name is Bastion's own webhook contract, not a confirmed Composio API
+    /// field — MUST be reconfirmed against a live Composio account before Phase 12
+    /// closes (same live-verify deferral this module's header already documents).
     pub async fn initiate(&self, owner_id: &str, toolkit: &str) -> anyhow::Result<String> {
+        let state = generate_state_token();
+        self.store_pending_state(owner_id, toolkit, &state).await?;
+
         let body = serde_json::json!({
             "toolkit": { "slug": toolkit },
             "user_id": owner_id,
+            "state": state,
         });
         let json = self
             .post_json("/api/v3/connected_accounts/link", &body)
@@ -155,6 +187,111 @@ impl ComposioOAuth {
                 anyhow::anyhow!("composio initiate response missing redirect_url: {json}")
             })?;
         Ok(redirect_url.to_owned())
+    }
+
+    /// Persist a freshly-minted state-nonce with a `OAUTH_STATE_TTL_SECS` expiry.
+    /// `state` is 32 CSPRNG bytes hex-encoded (see [`generate_state_token`]) — a
+    /// PRIMARY KEY collision is not a case this needs to defensively upsert around.
+    async fn store_pending_state(
+        &self,
+        owner_id: &str,
+        toolkit: &str,
+        state: &str,
+    ) -> anyhow::Result<()> {
+        let path = self.db_path.clone();
+        let owner_id = owner_id.to_owned();
+        let toolkit = toolkit.to_owned();
+        let state = state.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+            let expires_at = now_nanos() + OAUTH_STATE_TTL_SECS * 1_000_000_000;
+            conn.execute(
+                "INSERT INTO composio_oauth_state (state, owner_id, toolkit, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![state, owner_id, toolkit, expires_at],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?
+    }
+
+    /// Look up and CONSUME (delete-on-read, single-use) a pending OAuth state-nonce.
+    /// Returns `Some((owner_id, toolkit))` only when the state exists AND has not yet
+    /// expired; returns `None` for a missing, expired, or already-consumed state —
+    /// the caller (`composio_callback_handler`) maps every `None` to a generic
+    /// 401/403, never distinguishing "unknown" from "expired" (mirrors the OTC
+    /// enumeration-oracle guard, WR-03).
+    ///
+    /// Always deletes the row when found (even if expired) so a leaked/replayed state
+    /// can never be consumed twice, expired or not.
+    pub async fn consume_state(&self, state: &str) -> anyhow::Result<Option<(String, String)>> {
+        let path = self.db_path.clone();
+        let state = state.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+            let row = conn
+                .query_row(
+                    "SELECT owner_id, toolkit, expires_at FROM composio_oauth_state WHERE state = ?1",
+                    rusqlite::params![state],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional_result()?;
+
+            let Some((owner_id, toolkit, expires_at)) = row else {
+                return Ok::<Option<(String, String)>, anyhow::Error>(None);
+            };
+
+            // Single-use: delete unconditionally, whether or not it was still valid.
+            conn.execute(
+                "DELETE FROM composio_oauth_state WHERE state = ?1",
+                rusqlite::params![state],
+            )?;
+
+            if expires_at < now_nanos() {
+                return Ok(None);
+            }
+            Ok(Some((owner_id, toolkit)))
+        })
+        .await?
+    }
+
+    /// Test-only seam: insert a known state directly, bypassing `initiate()`'s
+    /// Composio HTTP round-trip. Lets other modules' tests (e.g.
+    /// `channel::webhook`'s callback tests) exercise the consume/expire/replay paths
+    /// against a deterministic token without a scripted Composio server. Mirrors
+    /// [`Self::new_for_test`]'s "sanctioned test-only seam" precedent.
+    #[cfg(test)]
+    pub(crate) async fn insert_state_for_test(
+        &self,
+        state: &str,
+        owner_id: &str,
+        toolkit: &str,
+        ttl_secs: i64,
+    ) -> anyhow::Result<()> {
+        let path = self.db_path.clone();
+        let state = state.to_owned();
+        let owner_id = owner_id.to_owned();
+        let toolkit = toolkit.to_owned();
+        task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+            let expires_at = now_nanos() + ttl_secs * 1_000_000_000;
+            conn.execute(
+                "INSERT INTO composio_oauth_state (state, owner_id, toolkit, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![state, owner_id, toolkit, expires_at],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?
     }
 
     /// Upsert the (owner_id, toolkit) -> connected_account_id mapping. Calling this
@@ -450,5 +587,87 @@ mod tests {
             status, "expired",
             "local status must resync from Composio's response"
         );
+    }
+
+    // ── SEC-03 forgery fix: state-nonce tests (T-11-06-01) ─────────────────────
+
+    /// `initiate()` mints and persists a state-nonce; a valid, unconsumed state
+    /// resolves to the (owner_id, toolkit) that actually called `initiate()`.
+    #[tokio::test]
+    async fn initiate_persists_a_consumable_state_bound_to_owner_and_toolkit() {
+        let addr = spawn_scripted_composio_server("https://composio.dev/auth/xyz").await;
+        let (_f, path) = make_db().await;
+        let oauth = test_oauth(&path, &format!("http://{addr}"));
+
+        oauth.initiate("alice", "gmail").await.expect("initiate");
+
+        // initiate() doesn't return the state (it's Composio's job to echo it back
+        // via the callback), so read it directly from the table to drive consume_state.
+        let conn = Connection::open(&path).unwrap();
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM composio_oauth_state WHERE owner_id='alice' AND toolkit='gmail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("state row must exist after initiate()");
+
+        let consumed = oauth.consume_state(&state).await.expect("consume_state");
+        assert_eq!(consumed, Some(("alice".to_string(), "gmail".to_string())));
+    }
+
+    /// consume_state is single-use: a second consume of the same token returns None.
+    #[tokio::test]
+    async fn consume_state_is_single_use() {
+        let (_f, path) = make_db().await;
+        let oauth = test_oauth(&path, "http://unused.invalid");
+        oauth
+            .insert_state_for_test("tok-1", "alice", "gmail", 900)
+            .await
+            .expect("insert_state_for_test");
+
+        let first = oauth.consume_state("tok-1").await.expect("first consume");
+        assert_eq!(first, Some(("alice".to_string(), "gmail".to_string())));
+
+        let second = oauth.consume_state("tok-1").await.expect("second consume");
+        assert_eq!(second, None, "state must be consumed exactly once");
+    }
+
+    /// An expired state is rejected (and still consumed/deleted so it can't be retried).
+    #[tokio::test]
+    async fn consume_state_rejects_expired_state() {
+        let (_f, path) = make_db().await;
+        let oauth = test_oauth(&path, "http://unused.invalid");
+        // Negative TTL — already expired the instant it's inserted.
+        oauth
+            .insert_state_for_test("tok-expired", "alice", "gmail", -60)
+            .await
+            .expect("insert_state_for_test");
+
+        let result = oauth
+            .consume_state("tok-expired")
+            .await
+            .expect("consume_state");
+        assert_eq!(result, None, "expired state must not resolve");
+
+        // Deleted on the first (failed) consume — a retry must also return None,
+        // not resurrect the expired row.
+        let retry = oauth
+            .consume_state("tok-expired")
+            .await
+            .expect("consume_state retry");
+        assert_eq!(retry, None);
+    }
+
+    /// An unknown/never-issued state returns None (never an error, never a panic).
+    #[tokio::test]
+    async fn consume_state_rejects_unknown_state() {
+        let (_f, path) = make_db().await;
+        let oauth = test_oauth(&path, "http://unused.invalid");
+        let result = oauth
+            .consume_state("never-issued")
+            .await
+            .expect("consume_state");
+        assert_eq!(result, None);
     }
 }

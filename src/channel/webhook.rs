@@ -149,6 +149,10 @@ struct AppState {
     /// WhatsApp Cloud API config (CHAN-01). None = /whatsapp/webhook routes reject
     /// with 404/403 rather than panicking — WhatsApp is opt-in per instance.
     whatsapp: Option<crate::channel::whatsapp::WhatsAppConfig>,
+    /// Composio OAuth client (SEC-03). None = /auth/composio/callback rejects with
+    /// 501 rather than panicking — Composio integration is opt-in per instance
+    /// (requires COMPOSIO_API_KEY).
+    composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
 }
 
 /// Categorize an anyhow error for safe HTTP status mapping.
@@ -475,6 +479,124 @@ async fn auth_exchange_handler(
             (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "invalid OTC" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /auth/composio/callback body — mirrors the OTC-exchange precedent (D-06):
+/// Composio's own redirect flow calls this endpoint with the resulting
+/// `connected_account_id` once the owner authorizes in their browser.
+///
+/// SEC-03 forgery fix (T-11-06-01, security review finding): this body deliberately
+/// carries NO `owner`/`toolkit` fields. Earlier revisions accepted them directly from
+/// the request body and trusted them verbatim — meaning anyone who could reach this
+/// endpoint could POST an arbitrary `{owner, toolkit, connected_account_id}` and bind
+/// a connection to any owner of their choosing (OAuth callback forgery / IDOR). `state`
+/// is the CSPRNG nonce `ComposioOAuth::initiate()` minted and persisted server-side;
+/// `owner`/`toolkit` are now derived EXCLUSIVELY from that server-side record via
+/// `ComposioOAuth::consume_state` (single-use, delete-on-consume) — never from
+/// anything the caller supplies.
+#[derive(Deserialize)]
+struct ComposioCallbackBody {
+    state: String,
+    connected_account_id: String,
+}
+
+/// POST /auth/composio/callback { state, connected_account_id } → 200.
+///
+/// Persists ONLY Composio's own `connected_account_id` reference (never a raw
+/// third-party OAuth token — T-11-06-02) via `ComposioOAuth::store_connection`.
+/// Mirrors `auth_exchange_handler`'s shape: validate → act → respond, never leaking
+/// internal error detail in the body (CR-05), always logging via `tracing`.
+///
+/// T-11-06-01 (OAuth callback forgery — security review finding, HIGH): `owner`/
+/// `toolkit` are resolved via `ComposioOAuth::consume_state(&payload.state)` — a
+/// single-use, CSPRNG-bound, TTL-limited lookup — NEVER trusted from the request
+/// body. A missing/unknown/expired/already-consumed state is indistinguishable from
+/// any other invalid state in the response (mirrors the OTC enumeration-oracle guard,
+/// WR-03) and returns 401, never leaking which case it was. This route still carries
+/// no owner-token auth gate of its own — like `/auth/exchange`, it IS an auth entry
+/// point (Composio calling back, not an already-authenticated owner client) — so
+/// production deployments should still front it with the same network-boundary
+/// discipline as other webhook endpoints; the state-nonce binding is the primary
+/// mitigation, network placement is defense in depth on top of it.
+///
+/// Raw `Bytes` (not the `Json<...>` extractor) so a malformed body always resolves
+/// to a deliberate 400 here rather than axum's default 422 rejection response —
+/// mirrors `ingest_handler`'s same raw-body-then-manual-parse idiom.
+async fn composio_callback_handler(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let payload: ComposioCallbackBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(event = "composio_callback_bad_body", error = %e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid callback body" })),
+            )
+                .into_response();
+        }
+    };
+
+    let oauth = match &state.composio_oauth {
+        Some(o) => o.clone(),
+        None => {
+            tracing::warn!(event = "composio_callback_not_configured");
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(serde_json::json!({ "error": "composio oauth not configured" })),
+            )
+                .into_response();
+        }
+    };
+
+    // T-11-06-01: owner/toolkit come ONLY from the server-side state record — the
+    // request body has no owner/toolkit fields to forge in the first place.
+    let (owner, toolkit) = match oauth.consume_state(&payload.state).await {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            tracing::warn!(event = "composio_callback_invalid_state");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid or expired state" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::warn!(event = "composio_callback_state_lookup_failed", error = %e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to validate callback" })),
+            )
+                .into_response();
+        }
+    };
+
+    match oauth
+        .store_connection(&owner, &toolkit, &payload.connected_account_id)
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(
+                event = "composio_connection_stored",
+                owner = %owner,
+                toolkit = %toolkit,
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "connected" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(event = "composio_callback_store_failed", error = %e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to persist connection" })),
             )
                 .into_response()
         }
@@ -946,6 +1068,7 @@ pub async fn serve(
         "bastion".to_string(),
         None,
         None,
+        None,
     )
     .await
 }
@@ -978,6 +1101,9 @@ pub async fn serve_with_mesh(
     // reject with 404/403 rather than panicking (daemon startup wiring lands in
     // Plan 10-09).
     whatsapp: Option<crate::channel::whatsapp::WhatsAppConfig>,
+    // Composio OAuth client (SEC-03). None = /auth/composio/callback rejects with
+    // 501 rather than panicking — opt-in, requires COMPOSIO_API_KEY.
+    composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
 ) -> anyhow::Result<()> {
     let state = AppState {
         agent,
@@ -991,6 +1117,7 @@ pub async fn serve_with_mesh(
         agent_identity,
         agent_name,
         whatsapp,
+        composio_oauth,
     };
     let mut app = Router::new()
         .route("/webhook", post(handle))
@@ -1003,6 +1130,7 @@ pub async fn serve_with_mesh(
             "/whatsapp/webhook",
             get(whatsapp_verify_handler).post(whatsapp_receive_handler),
         )
+        .route("/auth/composio/callback", post(composio_callback_handler))
         .with_state(state);
     if let Some(mcp) = mcp_routes {
         app = app.merge(mcp);
@@ -1063,6 +1191,7 @@ mod tests {
             agent_identity: None,
             agent_name: "test".to_string(),
             whatsapp,
+            composio_oauth: None,
         };
         let router = Router::new()
             .route("/webhook", post(handle))
@@ -1075,6 +1204,7 @@ mod tests {
                 "/whatsapp/webhook",
                 get(whatsapp_verify_handler).post(whatsapp_receive_handler),
             )
+            .route("/auth/composio/callback", post(composio_callback_handler))
             .with_state(state);
         (router, turn_count)
     }
@@ -1346,6 +1476,7 @@ mod tests {
             agent_identity: None,
             agent_name: "test".to_string(),
             whatsapp: None,
+            composio_oauth: None,
         };
         Router::new()
             .route("/webhook", post(handle))
@@ -1357,7 +1488,265 @@ mod tests {
                 "/whatsapp/webhook",
                 get(whatsapp_verify_handler).post(whatsapp_receive_handler),
             )
+            .route("/auth/composio/callback", post(composio_callback_handler))
             .with_state(state)
+    }
+
+    // ── SEC-03 Composio callback tests ──────────────────────────────────────────
+
+    /// Builds a router with the given (optional) ComposioOAuth wired into AppState —
+    /// `None` exercises the "not configured" 501 path, `Some` the real persist path.
+    fn build_router_with_composio(
+        composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
+    ) -> Router {
+        let (h, rx) = handle::channel();
+        stub_consumer(rx);
+        let (events_tx, _) = broadcast::channel::<String>(128);
+        let mesh_peer_map = Arc::new(RwLock::new(MeshPeerMap::new()));
+        let state = AppState {
+            agent: h,
+            owner_map: Arc::new(OwnerMap::default()),
+            events_tx,
+            mesh_peer_map,
+            otc_store: new_otc_store(),
+            jwt_secret: "test-secret".to_string(),
+            mesh_transport: None,
+            mesh_slice_store: None,
+            agent_identity: None,
+            agent_name: "test".to_string(),
+            whatsapp: None,
+            composio_oauth,
+        };
+        Router::new()
+            .route("/auth/composio/callback", post(composio_callback_handler))
+            .with_state(state)
+    }
+
+    /// Valid callback body (a state minted by the server) persists the connection
+    /// under the owner/toolkit BOUND TO THAT STATE (verified via `current_connection`)
+    /// and returns 200.
+    #[tokio::test]
+    async fn post_composio_callback_persists_connection_and_returns_200() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let session = crate::session::SessionManager::new(&path);
+        session.init_schema().await.expect("init_schema");
+        let oauth = Arc::new(crate::mcp::oauth::ComposioOAuth::new_for_test(
+            &path,
+            "http://unused.invalid",
+        ));
+        oauth
+            .insert_state_for_test("valid-state-1", "alice", "gmail", 900)
+            .await
+            .expect("insert_state_for_test");
+
+        let app = build_router_with_composio(Some(oauth.clone()));
+        let body = serde_json::json!({
+            "state": "valid-state-1",
+            "connected_account_id": "ca_123"
+        })
+        .to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/composio/callback")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let current = oauth
+            .current_connection("alice", "gmail")
+            .await
+            .expect("current_connection");
+        assert_eq!(current, Some("ca_123".to_string()));
+    }
+
+    /// T-11-06-01 regression: the request body has no `owner`/`toolkit` fields to
+    /// forge in the first place, but even extra/unknown JSON fields on the body
+    /// (an attacker trying to smuggle a spoofed owner) are silently ignored by serde
+    /// and never influence which owner/toolkit the connection is stored under — that
+    /// comes exclusively from the server-side state record.
+    #[tokio::test]
+    async fn post_composio_callback_ignores_spoofed_owner_field_in_body() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let session = crate::session::SessionManager::new(&path);
+        session.init_schema().await.expect("init_schema");
+        let oauth = Arc::new(crate::mcp::oauth::ComposioOAuth::new_for_test(
+            &path,
+            "http://unused.invalid",
+        ));
+        oauth
+            .insert_state_for_test("valid-state-2", "real-owner", "slack", 900)
+            .await
+            .expect("insert_state_for_test");
+
+        let app = build_router_with_composio(Some(oauth.clone()));
+        // Attacker-supplied "owner"/"toolkit" fields — must be ignored entirely.
+        let body = serde_json::json!({
+            "state": "valid-state-2",
+            "connected_account_id": "ca_999",
+            "owner": "attacker",
+            "toolkit": "gmail"
+        })
+        .to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/composio/callback")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let attacker_conn = oauth
+            .current_connection("attacker", "gmail")
+            .await
+            .expect("current_connection");
+        assert_eq!(
+            attacker_conn, None,
+            "spoofed owner/toolkit body fields must never create a connection"
+        );
+        let real_conn = oauth
+            .current_connection("real-owner", "slack")
+            .await
+            .expect("current_connection");
+        assert_eq!(
+            real_conn,
+            Some("ca_999".to_string()),
+            "connection must be bound to the state's owner/toolkit, not the body's"
+        );
+    }
+
+    /// T-11-06-01 regression: missing, unknown, expired, or already-consumed state
+    /// tokens are all rejected with 401 — never a panic, never a silent bind.
+    #[tokio::test]
+    async fn post_composio_callback_invalid_state_returns_401() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let session = crate::session::SessionManager::new(&path);
+        session.init_schema().await.expect("init_schema");
+        let oauth = Arc::new(crate::mcp::oauth::ComposioOAuth::new_for_test(
+            &path,
+            "http://unused.invalid",
+        ));
+        // Already-expired state (negative TTL).
+        oauth
+            .insert_state_for_test("expired-state", "alice", "gmail", -60)
+            .await
+            .expect("insert_state_for_test");
+        // A state that will be consumed once, then retried (replay).
+        oauth
+            .insert_state_for_test("single-use-state", "alice", "gmail", 900)
+            .await
+            .expect("insert_state_for_test");
+
+        let app = build_router_with_composio(Some(oauth.clone()));
+
+        // Case 1: unknown state — never issued.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/composio/callback")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "state": "never-issued", "connected_account_id": "ca_1" })
+                    .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Case 2: expired state.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/composio/callback")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "state": "expired-state", "connected_account_id": "ca_2" })
+                    .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Case 3: valid state, first use — succeeds.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/composio/callback")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "state": "single-use-state", "connected_account_id": "ca_3" })
+                    .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // Case 4: same state, replayed — must now be rejected (already consumed).
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/composio/callback")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "state": "single-use-state", "connected_account_id": "ca_4" })
+                    .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// A malformed callback body (missing a required field) returns 400, never panics.
+    #[tokio::test]
+    async fn post_composio_callback_malformed_body_returns_400() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let session = crate::session::SessionManager::new(&path);
+        session.init_schema().await.expect("init_schema");
+        let oauth = Arc::new(crate::mcp::oauth::ComposioOAuth::new_for_test(
+            &path,
+            "http://unused.invalid",
+        ));
+
+        let app = build_router_with_composio(Some(oauth));
+        // Missing "connected_account_id".
+        let body = serde_json::json!({ "state": "some-state" }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/composio/callback")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// composio_oauth: None (feature not configured) → 501, never a panic.
+    #[tokio::test]
+    async fn post_composio_callback_not_configured_returns_501() {
+        let app = build_router_with_composio(None);
+        let body = serde_json::json!({
+            "state": "irrelevant-state",
+            "connected_account_id": "ca_123"
+        })
+        .to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/composio/callback")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     /// CR-02: /auth/exchange with a freshly inserted OTC returns 200 + {jwt, device_name}.

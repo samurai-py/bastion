@@ -132,6 +132,13 @@ impl SessionManager {
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_composio_connections_owner_toolkit
                     ON composio_connections(owner_id, toolkit);
+
+                CREATE TABLE IF NOT EXISTS composio_oauth_state (
+                    state      TEXT    PRIMARY KEY,
+                    owner_id   TEXT    NOT NULL,
+                    toolkit    TEXT    NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
             ",
             )?;
             // Additive migration for pre-existing single-user DBs (idempotent —
@@ -564,6 +571,51 @@ mod tests {
         assert!(
             second.is_err(),
             "duplicate (owner_id, toolkit) must violate UNIQUE index"
+        );
+    }
+
+    /// SEC-03 forgery fix: `composio_oauth_state` is the CSPRNG state-nonce table that
+    /// binds an OAuth callback to the owner/toolkit that actually initiated it — the
+    /// callback handler must never trust `owner`/`toolkit` fields on the request body
+    /// (T-11-06-01, OAuth callback forgery / IDOR).
+    #[tokio::test]
+    async fn test_composio_oauth_state_table_columns() {
+        let (_f, sm) = make_db().await;
+        let path = sm.db_path.clone();
+        let conn = open_conn(&path).expect("open_conn");
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(composio_oauth_state)")
+            .expect("prepare");
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query_map")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        for expected in ["state", "owner_id", "toolkit", "expires_at"] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "composio_oauth_state missing column {expected}, has {cols:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_composio_oauth_state_primary_key_rejects_duplicate() {
+        let (_f, sm) = make_db().await;
+        let path = sm.db_path.clone();
+        let conn = open_conn(&path).expect("open_conn");
+        conn.execute(
+            "INSERT INTO composio_oauth_state (state, owner_id, toolkit, expires_at) VALUES ('tok1', 'owner1', 'gmail', 999999999999)",
+            [],
+        )
+        .expect("first insert");
+        let second = conn.execute(
+            "INSERT INTO composio_oauth_state (state, owner_id, toolkit, expires_at) VALUES ('tok1', 'owner2', 'slack', 999999999999)",
+            [],
+        );
+        assert!(
+            second.is_err(),
+            "duplicate state token must violate PRIMARY KEY (single-use, CSPRNG-collision-resistant)"
         );
     }
 

@@ -139,7 +139,22 @@ async fn main() -> anyhow::Result<()> {
     // failed servers gracefully: logs tracing::warn per failed server and continues.
     // (Previously this used the legacy .bastion/mcp-servers.json path, which isn't mounted
     // in the FROM-scratch container — so memupalace/skill-writer tools were silently absent.)
-    let mcp_client = McpClient::connect_from_config(&cfg.mcp.servers).await?;
+    let mut mcp_client = McpClient::connect_from_config(&cfg.mcp.servers).await?;
+
+    // SEC-03: Composio OAuth is opt-in — only constructed when COMPOSIO_API_KEY is
+    // actually set. ComposioOAuth::new() itself panics on a missing/empty key (a
+    // deliberate fail-loud contract for direct callers), so this guard is what keeps
+    // the daemon from panicking at startup for deployments that simply don't use
+    // Composio at all.
+    let composio_oauth: Option<Arc<bastion::mcp::ComposioOAuth>> =
+        if std::env::var("COMPOSIO_API_KEY").is_ok_and(|v| !v.trim().is_empty()) {
+            let oauth = Arc::new(bastion::mcp::ComposioOAuth::new(&db_path));
+            mcp_client = mcp_client.with_composio_oauth(oauth.clone());
+            tracing::info!(event = "composio_oauth_enabled");
+            Some(oauth)
+        } else {
+            None
+        };
 
     // Init provider from config (default_model from bastion.toml, overridable via env BASTION__AGENT__DEFAULT_MODEL)
     let default_model = cfg.agent.default_model.clone();
@@ -211,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", response);
         }
         Command::Daemon => {
-            daemon_loop(&mut agent, &cfg, agent_identity).await?;
+            daemon_loop(&mut agent, &cfg, agent_identity, composio_oauth).await?;
         }
         Command::McpStdio => {
             use rmcp::ServiceExt;
@@ -337,6 +352,10 @@ async fn daemon_loop(
     agent: &mut AgentLoop,
     cfg: &bastion::config::BastionConfig,
     agent_identity: Option<Arc<bastion::identity::age_identity::AgeIdentity>>,
+    // SEC-03: opt-in Composio OAuth client (Some only when COMPOSIO_API_KEY is
+    // configured) — wired into both the agent (/connect-app-composio) and the
+    // webhook server's /auth/composio/callback route below.
+    composio_oauth: Option<Arc<bastion::mcp::ComposioOAuth>>,
 ) -> anyhow::Result<()> {
     use bastion::agent::command::CommandResult;
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -483,6 +502,13 @@ async fn daemon_loop(
         let otc_store = bastion::channel::webhook::new_otc_store();
         agent.set_otc_store(otc_store.clone());
 
+        // SEC-03: mirrors the OTC store wiring above — inject the same ComposioOAuth
+        // Arc into both the agent (for /connect-app-composio) and serve_with_mesh
+        // (for the /auth/composio/callback route), only when configured.
+        if let Some(oauth) = &composio_oauth {
+            agent.set_composio_oauth(oauth.clone());
+        }
+
         // WhatsApp (CHAN-01): reuses this same webhook router (10-RESEARCH.md
         // Pattern 1) — no second axum server. `WHATSAPP_PHONE_NUMBER_ID` presence
         // gates whether we attempt to build a sender at all.
@@ -516,6 +542,7 @@ async fn daemon_loop(
                 agent_name,
                 mcp_routes,
                 whatsapp_config,
+                composio_oauth.clone(),
             )
             .await
             {
