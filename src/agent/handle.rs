@@ -77,6 +77,43 @@ mod tests {
         log
     }
 
+    // --- Plan 11-08 (SEC-05): AgentRequest.untrusted + ask_with_trust --------
+
+    /// Test 1/2: `ask()` (existing method) produces an `AgentRequest` with
+    /// `untrusted: false` — byte-identical to today's behavior, internally a
+    /// thin wrapper over `ask_with_trust(..., false)`.
+    #[tokio::test]
+    async fn ask_produces_agent_request_with_untrusted_false() {
+        let (handle, mut rx) = channel();
+        let h = handle.clone();
+        task::spawn(async move {
+            let _ = h.ask("hi".into(), "alice".into()).await;
+        });
+        let req = rx.recv().await.expect("request must arrive");
+        assert!(
+            !req.untrusted,
+            "ask() must default untrusted to false, unchanged from today"
+        );
+        let _ = req.reply.send(Ok("ok".into()));
+    }
+
+    /// Test 2: `ask_with_trust(text, owner, true)` results in an
+    /// `AgentRequest` with `untrusted: true` reaching the consumer.
+    #[tokio::test]
+    async fn ask_with_trust_true_produces_agent_request_with_untrusted_true() {
+        let (handle, mut rx) = channel();
+        let h = handle.clone();
+        task::spawn(async move {
+            let _ = h.ask_with_trust("hi".into(), "alice".into(), true).await;
+        });
+        let req = rx.recv().await.expect("request must arrive");
+        assert!(
+            req.untrusted,
+            "ask_with_trust(..., true) must set untrusted: true"
+        );
+        let _ = req.reply.send(Ok("ok".into()));
+    }
+
     #[tokio::test]
     async fn two_concurrent_clones_both_get_replies() {
         let (handle, rx) = channel();
