@@ -158,6 +158,13 @@ mod tests {
         async fn extract_facts(&self, _: &[Message]) -> anyhow::Result<Vec<String>> {
             Ok(self.facts.clone())
         }
+
+        async fn consolidate(
+            &self,
+            _: &[crate::memory::Belief],
+        ) -> anyhow::Result<crate::agent::dream::ConsolidationPlan> {
+            Ok(crate::agent::dream::ConsolidationPlan::default())
+        }
     }
 
     async fn setup_db(path: &str) {
