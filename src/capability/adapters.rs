@@ -21,6 +21,19 @@ pub struct McpToolAdapter {
     /// (`is_local()==true` maps to `"ollama"`, which passes `check_egress` under
     /// `PrivacyTier::LocalOnly`).
     pub is_local_override: bool,
+    /// Plan 11-04 / SEC-01: typed approval-gate flag, sourced at construction
+    /// time from `ToolRegistry::needs_approval(tool_name)` — itself derived from
+    /// the MCP wire protocol's own `ToolAnnotations.destructive_hint` — NEVER
+    /// derived from `tool_name`. Backs `Capability::needs_approval()` below,
+    /// mirroring `is_local_override`'s exact sourcing pattern.
+    pub needs_approval_override: bool,
+    /// Plan 11-04: typed trust flag, sourced at construction time from
+    /// `ToolRegistry::is_trusted(tool_name)` — itself derived from the owning
+    /// server's `McpServerEntry.trusted` config. Threaded through now so Plan
+    /// 11-07 can wire `Capability::is_trusted()` against it once that trait
+    /// method exists; this plan only carries the field, it does not yet back
+    /// any trait override (11-07's own scope).
+    pub trusted_override: bool,
 }
 
 #[async_trait]
@@ -36,6 +49,9 @@ impl Capability for McpToolAdapter {
     }
     fn is_local(&self) -> bool {
         self.is_local_override
+    }
+    fn needs_approval(&self) -> bool {
+        self.needs_approval_override
     }
     async fn invoke(&self, args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
         // Delegate to McpClient — no business logic here (thin adapter).
@@ -153,6 +169,16 @@ mod mcp_tool_adapter_tests {
     }
 
     fn adapter(mcp: Arc<McpClient>, is_local_override: bool) -> McpToolAdapter {
+        adapter_with_approval(mcp, is_local_override, false)
+    }
+
+    /// Plan 11-04 Task 1 Test 2 helper: same as `adapter()` but lets the
+    /// approval-override be set explicitly.
+    fn adapter_with_approval(
+        mcp: Arc<McpClient>,
+        is_local_override: bool,
+        needs_approval_override: bool,
+    ) -> McpToolAdapter {
         McpToolAdapter {
             tool_name: "voice_transcribe".to_string(),
             server_label: "voice".to_string(),
@@ -160,7 +186,28 @@ mod mcp_tool_adapter_tests {
             schema: serde_json::json!({}),
             mcp,
             is_local_override,
+            needs_approval_override,
+            trusted_override: false,
         }
+    }
+
+    /// Plan 11-04 Task 1 Test 2: `McpToolAdapter::needs_approval()` returns exactly
+    /// `self.needs_approval_override` — both `true` and `false` round-trip. NOTE:
+    /// `McpToolAdapter::is_trusted()` is deliberately NOT tested here — the
+    /// `Capability::is_trusted()` default trait method does not exist yet (it is
+    /// added by Plan 11-07); this plan only carries the `trusted_override` field.
+    #[tokio::test]
+    async fn needs_approval_override_true_reports_true() {
+        let mcp = empty_mcp_client().await;
+        let cap = adapter_with_approval(mcp, false, true);
+        assert!(cap.needs_approval());
+    }
+
+    #[tokio::test]
+    async fn needs_approval_override_false_reports_false() {
+        let mcp = empty_mcp_client().await;
+        let cap = adapter_with_approval(mcp, false, false);
+        assert!(!cap.needs_approval());
     }
 
     /// Plan 10-08 Test 1: is_local_override: true => is_local() == true.

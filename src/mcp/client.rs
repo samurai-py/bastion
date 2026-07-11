@@ -76,9 +76,16 @@ impl McpClient {
             // is_local (Plan 10-08): threaded through so connect_from_servers_obj can pass
             // it to ToolRegistry::register_with_schema — the typed locality flag flows
             // config -> intermediate JSON -> registry, never re-derived from tool_name.
+            // trusted (Plan 11-04): threaded the SAME way, alongside is_local, so
+            // Plans 11-07/11-08 can consume ToolRegistry::is_trusted() later.
             obj.insert(
                 label,
-                serde_json::json!({ "url": entry.url, "transport": "sse", "is_local": entry.is_local }),
+                serde_json::json!({
+                    "url": entry.url,
+                    "transport": "sse",
+                    "is_local": entry.is_local,
+                    "trusted": entry.trusted,
+                }),
             );
         }
         Self::connect_from_servers_obj(&obj).await
@@ -101,6 +108,13 @@ impl McpClient {
             // server config that omits it (legacy mcp-servers.json path).
             let is_local = server_cfg
                 .get("is_local")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // Plan 11-04: typed, operator-controlled trust flag from
+            // `[mcp.servers.*].trusted` — same default-false, same fail-closed
+            // convention as is_local above (threaded through the same JSON hop).
+            let trusted = server_cfg
+                .get("trusted")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
@@ -172,12 +186,28 @@ impl McpClient {
                                     .as_ref()
                                     .map(|d| d.to_string())
                                     .unwrap_or_default();
+                                // Plan 11-04 / SEC-01: source needs_approval from the MCP
+                                // wire protocol's OWN `ToolAnnotations.destructive_hint`
+                                // (rmcp::model::Tool.annotations) — never a tool-name
+                                // string match. Fail-cautious default: a tool that omits
+                                // the hint entirely (annotations absent, or annotations
+                                // present but destructive_hint absent) is treated as
+                                // destructive (`unwrap_or(true)`), matching the MCP
+                                // spec's own fail-cautious semantics and D-01's
+                                // "irreversible-only" fail-safe intent.
+                                let needs_approval = tool
+                                    .annotations
+                                    .as_ref()
+                                    .and_then(|a| a.destructive_hint)
+                                    .unwrap_or(true);
                                 registry.register_with_schema(
                                     label,
                                     tool.name.to_string(),
                                     schema,
                                     description,
                                     is_local,
+                                    needs_approval,
+                                    trusted,
                                 );
                             }
                             tracing::info!(server = %label, "MCP server connected and tools registered");
@@ -473,6 +503,8 @@ mod tests {
             serde_json::json!({"type": "object", "properties": {}}),
             String::new(),
             false,
+            false,
+            false,
         );
 
         let (_f, oauth) = make_composio_oauth_with_no_stored_connection().await;
@@ -521,6 +553,8 @@ mod tests {
             serde_json::json!({"type": "object", "properties": {}}),
             String::new(),
             true,
+            false,
+            false,
         );
 
         let (_f, oauth) = make_composio_oauth_with_no_stored_connection().await;

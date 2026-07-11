@@ -312,6 +312,19 @@ pub struct McpServerEntry {
     /// never sends data off-host — see 10-08-PLAN.md's threat register (T-10-08-01).
     #[serde(default)]
     pub is_local: bool,
+    /// Operator-controlled trust flag (Plan 11-04 / SEC-01), mirroring `is_local`'s
+    /// exact shape and default.
+    ///
+    /// Defaults to `false` (`#[serde(default)]`) so every EXISTING `[mcp.servers.*]`
+    /// entry is unaffected without any bastion.toml edit — only a server the operator
+    /// EXPLICITLY vouches for gets this set `true`. This is a TRUST-BOUNDARY setting:
+    /// it is threaded through the same registration pipeline as `is_local` (config ->
+    /// `ToolRegistry::is_trusted()` -> `McpToolAdapter.trusted_override`) but is not
+    /// yet consumed by any policy decision in this plan — Plans 11-07 (spotlighting)
+    /// and 11-08 (quarantine) are the intended consumers of an operator-marked-trusted
+    /// server as their escape hatch (D-09).
+    #[serde(default)]
+    pub trusted: bool,
 }
 
 /// Individual token entry for the MCP server (static token auth, D-05).

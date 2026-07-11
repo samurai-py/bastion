@@ -749,6 +749,12 @@ async fn daemon_loop(
                 // memupalace's memory_embed is NOT local (Plan 10-08) — preserves
                 // today's exact behavior unchanged.
                 is_local_override: false,
+                // memory_embed is a read-only embedding lookup, not destructive —
+                // and this minimal reflector registry has no ApprovalQueue wired
+                // anyway, so needs_approval:true here would fail-closed-deny it
+                // outright (Plan 11-04).
+                needs_approval_override: false,
+                trusted_override: false,
             },
         )) {
             tracing::warn!(event = "reflector_registry_register_failed", error = %e);

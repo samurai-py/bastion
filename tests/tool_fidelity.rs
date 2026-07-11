@@ -34,6 +34,8 @@ fn registry_schema_stored_and_retrieved() {
         schema.clone(),
         "Star a GitHub repo".into(),
         false,
+        false,
+        false,
     );
     let retrieved = reg.get_tool_schema("github_star").unwrap();
     assert_eq!(retrieved, &schema);

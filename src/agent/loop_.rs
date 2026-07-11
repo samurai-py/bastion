@@ -175,7 +175,7 @@ impl AgentLoop {
         // per tool makes ALL tool calls flow through capability_registry.invoke (D-13).
         // Snapshot tool metadata first (owned) so the agent.mcp borrow is released before we
         // mutably borrow agent.capability_registry.
-        let mcp_tools: Vec<(String, String, serde_json::Value, String, bool)> = agent
+        let mcp_tools: Vec<(String, String, serde_json::Value, String, bool, bool, bool)> = agent
             .mcp
             .registry()
             .list_tool_names()
@@ -204,16 +204,28 @@ impl AgentLoop {
                 // Plan 10-03/10-09's `[mcp.servers.voice]`) is automatically registered
                 // as a local capability below, with zero tool-name string matching.
                 let is_local = agent.mcp.registry().is_local(name);
+                // Plan 11-04: the load-bearing lookup — a tool whose own MCP server
+                // self-reported `ToolAnnotations.destructive_hint` (or omitted it,
+                // fail-cautious) is automatically registered as needing owner
+                // approval below, with zero tool-name string matching. `trusted`
+                // mirrors `is_local`'s threading, sourced from the owning server's
+                // `McpServerEntry.trusted` config.
+                let needs_approval = agent.mcp.registry().needs_approval(name);
+                let trusted = agent.mcp.registry().is_trusted(name);
                 (
                     name.to_string(),
                     server_label,
                     schema,
                     description,
                     is_local,
+                    needs_approval,
+                    trusted,
                 )
             })
             .collect();
-        for (tool_name, server_label, schema, description, is_local) in mcp_tools {
+        for (tool_name, server_label, schema, description, is_local, needs_approval, trusted) in
+            mcp_tools
+        {
             let adapter = crate::capability::McpToolAdapter {
                 tool_name: tool_name.clone(),
                 server_label,
@@ -221,6 +233,8 @@ impl AgentLoop {
                 schema,
                 mcp: agent.mcp.clone(),
                 is_local_override: is_local,
+                needs_approval_override: needs_approval,
+                trusted_override: trusted,
             };
             if let Err(e) = agent.capability_registry.register(Arc::new(adapter)) {
                 tracing::warn!(event = "mcp_capability_register_failed", tool = %tool_name, err = %e);

@@ -30,6 +30,7 @@ async fn mcp_client_unavailable_external_server_is_non_fatal() -> anyhow::Result
             url: "http://127.0.0.1:9/mcp".to_string(),
             label: "echo".to_string(),
             is_local: false,
+            trusted: false,
         },
     );
 
