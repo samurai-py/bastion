@@ -92,8 +92,8 @@ Topologia alvo (decisão #1 — intermediária, 10 crates + app; confirmar desti
 
 ## M2. Separação lógica no workspace
 
-- [ ] **M2-01** Criar crates finos no workspace mantendo o binário atual funcionando.
-- [ ] **M2-02** Extrair tipos folha sem lógica (types, mensagens, IDs, erros).
+- [x] **M2-01** Workspace criado (`f0f6650`); binário intacto (+576 bytes vs baseline).
+- [x] **M2-02** `bastion-types` extraída via git mv + shim de re-export (`ec30069`); 533 testes verdes.
 - [ ] **M2-03** Extrair runtime (capabilities/context/sessions/hooks/observabilidade).
 - [ ] **M2-04** Extrair memory + provider traits.
 - [ ] **M2-05** Extrair agent loop completo.
