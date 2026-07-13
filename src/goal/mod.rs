@@ -33,17 +33,11 @@ impl Default for ScoringConfig {
 // Domain types
 // ---------------------------------------------------------------------------
 
-/// A persisted goal row.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Goal {
-    pub id: i64,
-    pub owner_id: String,
-    pub description: String,
-    pub metric: Option<String>,
-    pub deadline: Option<i64>,
-    pub guardian_persona: Option<String>,
-    pub last_confirmed: Option<i64>,
-}
+/// A persisted goal row. Moved to `bastion_types::Goal` (M2 3b — plain data;
+/// `docs/revamp/LOOP-REPORT.md` finding #2). Re-exported here so every existing
+/// `crate::goal::Goal` path (and downstream code in this module) keeps
+/// compiling unchanged.
+pub use bastion_types::Goal;
 
 /// Result of heuristic progress scoring (zero LLM, D-09).
 #[derive(Debug, Clone)]

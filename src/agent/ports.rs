@@ -6,10 +6,9 @@
 //! loop is wired to depend on them, but no file moves crate yet — that is a
 //! separate step (3b). Behavior is unchanged; only the seam is added.
 
-use bastion_types::FailureKind;
+use bastion_types::{FailureKind, Goal, PrivacyTier};
 
 use crate::capability::CapabilityRegistry;
-use crate::memory::PrivacyTier;
 use crate::provider::SharedProvider;
 use crate::types::{CallConfig, LlmResponse, Message};
 
@@ -76,7 +75,7 @@ pub trait ToolSource: Send + Sync {
 #[async_trait::async_trait]
 pub trait GoalPort: Send + Sync {
     /// Return all goals for `owner_id`.
-    async fn list_goals(&self, owner_id: &str) -> anyhow::Result<Vec<crate::goal::Goal>>;
+    async fn list_goals(&self, owner_id: &str) -> anyhow::Result<Vec<Goal>>;
 }
 
 /// P1 — narrow kernel capability handle exposed to a [`Responder`] via

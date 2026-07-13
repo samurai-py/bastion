@@ -3,18 +3,14 @@
 // Tests (offline, temp DB) are in sqlite.rs #[cfg(test)].
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Privacy tier consumed by persona/soul.rs (plan 03) and hooks/egress.rs (plan 04).
-/// Defined here once; exported at crate root via `pub mod memory`.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PrivacyTier {
-    LocalOnly,
-    CloudOk,
-}
+/// Moved to `bastion_types::PrivacyTier` (M2 3b — vocabulary, not memory-store
+/// logic; `docs/revamp/LOOP-REPORT.md` finding #2). Re-exported here so every
+/// existing `crate::memory::PrivacyTier` path keeps compiling unchanged.
+pub use bastion_types::PrivacyTier;
 
 /// Belief kind — factual (default, Phase 1-6 behavior) or procedural (LEARN-01).
 /// Defaults to `Factual` so every pre-Phase-7 row (DB default `'factual'`) decodes

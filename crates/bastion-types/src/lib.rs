@@ -176,6 +176,31 @@ impl fmt::Display for FailureKind {
     }
 }
 
+/// Privacy tier consumed by persona/soul.rs (plan 03) and hooks/egress.rs (plan 04).
+/// Moved here from `src/memory/mod.rs` (M2 3b — vocabulary shared across the
+/// kernel/product boundary, not memory-store logic itself; see
+/// `docs/revamp/LOOP-REPORT.md` finding #2).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrivacyTier {
+    LocalOnly,
+    CloudOk,
+}
+
+/// A persisted goal row (GOAL-01). Moved here from `src/goal/mod.rs` (M2 3b —
+/// plain data/vocabulary; `GoalEngine` and its SQL-backed impls stay in
+/// `src/goal/mod.rs`, see `docs/revamp/LOOP-REPORT.md` finding #2).
+#[derive(Debug, Clone, Serialize)]
+pub struct Goal {
+    pub id: i64,
+    pub owner_id: String,
+    pub description: String,
+    pub metric: Option<String>,
+    pub deadline: Option<i64>,
+    pub guardian_persona: Option<String>,
+    pub last_confirmed: Option<i64>,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BastionError {
