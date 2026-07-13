@@ -27,7 +27,9 @@
 //! claim. This call site also grows the EVAL-01 regression set (tier-gated — see
 //! `crate::eval::capture`).
 
+use crate::agent::ports::FailureSink;
 use crate::memory::SharedMemory;
+use std::sync::Arc;
 
 /// Phrase sets for contestation intent detection (pt-BR + en, case-insensitive).
 /// These cover the most common forms of "that belief is wrong / outdated".
@@ -69,9 +71,18 @@ pub fn detect_contestation(text: &str) -> bool {
 
 /// Output-validator: scans user input for contestation intent and soft-revokes
 /// the best-matching belief for the given `owner` (HOOK-03, MEM-07).
-pub struct OutputValidator;
+pub struct OutputValidator {
+    /// M2 (P2 `FailureSink` port): grows the EVAL-01 regression set on
+    /// NL-contestation revoke, without naming `crate::eval` directly.
+    failure_sink: Arc<dyn FailureSink>,
+}
 
 impl OutputValidator {
+    /// Build a validator that reports contestation-revoke events to `failure_sink`.
+    pub fn new(failure_sink: Arc<dyn FailureSink>) -> Self {
+        Self { failure_sink }
+    }
+
     /// Validate `user_input` for contestation intent.
     ///
     /// If `detect_contestation(user_input)` is true, find the most-recent non-revoked
@@ -135,8 +146,8 @@ impl OutputValidator {
             if overlap > 0 {
                 let mem = memory.write().await;
                 mem.revoke_belief(owner, belief.id).await?;
-                crate::eval::capture::record_failure(
-                    crate::eval::capture::FailureKind::Contestation,
+                self.failure_sink.record_failure(
+                    bastion_types::FailureKind::Contestation,
                     belief.tier,
                     "belief_revoked_on_nl_contestation",
                 );
@@ -234,7 +245,7 @@ mod tests {
         assert_eq!(before.len(), 1, "belief should exist before contestation");
 
         // Contestation: user says the exercise belief is wrong
-        let validator = OutputValidator;
+        let validator = OutputValidator::new(Arc::new(crate::eval::failure_sink::EvalFailureSink));
         validator
             .validate(
                 "isso não é mais verdade sobre exercises morning",
@@ -288,7 +299,7 @@ mod tests {
             .expect("store");
         }
 
-        let validator = OutputValidator;
+        let validator = OutputValidator::new(Arc::new(crate::eval::failure_sink::EvalFailureSink));
         validator
             .validate("what's the weather today?", &mem, owner)
             .await

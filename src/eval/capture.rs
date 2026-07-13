@@ -21,23 +21,11 @@
 use crate::memory::PrivacyTier;
 use std::io::Write as _;
 
-/// The two concrete production-failure signals this plan wires (EVAL-01). Deliberately
-/// scoped — no LLM-judge rubric was designed for a broader failure taxonomy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailureKind {
-    Contestation,
-    EgressReject,
-}
-
-impl std::fmt::Display for FailureKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FailureKind::Contestation => write!(f, "contestation"),
-            FailureKind::EgressReject => write!(f, "egress_reject"),
-        }
-    }
-}
+/// M2 (P2 `FailureSink` port): `FailureKind` moved to `bastion-types` — it is
+/// vocabulary shared across the kernel/product boundary, not capture logic.
+/// Re-exported here so existing `crate::eval::capture::FailureKind` paths keep
+/// working unchanged.
+pub use bastion_types::FailureKind;
 
 /// One regression-set entry. There is deliberately NO content field on this struct —
 /// structurally impossible to serialize raw turn/belief text through it (Pitfall 1).

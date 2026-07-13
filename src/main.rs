@@ -218,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
         goals,
         cfg.agent.fallback_models.clone(),
         &db_path,
+        std::sync::Arc::new(bastion::eval::failure_sink::EvalFailureSink),
     );
 
     match cli.command {

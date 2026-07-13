@@ -963,6 +963,7 @@ async fn cli_session_deterministic_across_turns() {
         GoalEngine::new(&path, ScoringConfig::default()),
         vec![],
         &path,
+        SArc::new(bastion::eval::failure_sink::EvalFailureSink),
     );
 
     // Two consecutive CLI turns — both must succeed.

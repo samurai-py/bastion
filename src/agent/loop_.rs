@@ -2,6 +2,7 @@ use crate::agent::command::{handle_command, CommandResult};
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::identity::IdentityProvider;
+use crate::agent::ports::FailureSink;
 use crate::goal::GoalEngine;
 use crate::hooks::egress::EgressHook;
 use crate::hooks::guardrails::InputGuardrail;
@@ -73,6 +74,11 @@ pub struct AgentLoop {
     /// (`complete_with_fallback_ladder`'s rung 3). Sourced from `AgentConfig.fallback_models`
     /// via main.rs. Empty = zero behavior change (today's exact fail-on-exhaustion behavior).
     pub fallback_models: Vec<String>,
+    /// M2 (P2 `FailureSink` port): where the loop reports the EVAL-01
+    /// egress-reject production-failure signal (`run_provider_fallback`'s
+    /// `PrivacyEgressBlocked` arm). Injected at construction — the kernel no
+    /// longer names `crate::eval` directly.
+    pub failure_sink: Arc<dyn FailureSink>,
     /// Test-only seam (mirrors `#[cfg(test)] pub async fn drain_handle` below): lets unit
     /// tests inject a scripted `Provider` for the fallback ladder's provider-switch rung
     /// instead of a real, network/credential-backed one from `registry::resolve_provider`.
@@ -103,6 +109,7 @@ impl AgentLoop {
         goals: GoalEngine,
         fallback_models: Vec<String>,
         db_path: &str,
+        failure_sink: Arc<dyn FailureSink>,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
         // BIG-1 (Gap 2): McpClient is shared by-Arc so each McpToolAdapter can hold a
@@ -119,7 +126,7 @@ impl AgentLoop {
             memory,
             goals,
             input_guard: InputGuardrail::default(),
-            output_validator: OutputValidator,
+            output_validator: OutputValidator::new(failure_sink.clone()),
             egress_hook: EgressHook,
             // SEC-01: the real ApprovalQueue is wired against the SAME db_path as
             // session/memory — a needs_approval()==true capability is never
@@ -134,6 +141,7 @@ impl AgentLoop {
             otc_store: None,
             composio_oauth: None,
             fallback_models,
+            failure_sink,
             #[cfg(test)]
             fallback_resolver_override: None,
         };
@@ -787,8 +795,8 @@ impl AgentLoop {
                         e.downcast_ref::<BastionError>(),
                         Some(BastionError::PrivacyEgressBlocked)
                     ) {
-                        crate::eval::capture::record_failure(
-                            crate::eval::capture::FailureKind::EgressReject,
+                        self.failure_sink.record_failure(
+                            bastion_types::FailureKind::EgressReject,
                             turn_tier,
                             "localonly_belief_blocked_from_cloud_provider",
                         );
@@ -2007,6 +2015,7 @@ mod tests {
             GoalEngine::new(db_path, ScoringConfig::default()),
             vec![],
             db_path,
+            Arc::new(crate::eval::failure_sink::EvalFailureSink),
         )
     }
 
@@ -2512,6 +2521,7 @@ mod tests {
             GoalEngine::new(&path, ScoringConfig::default()),
             vec![],
             &path,
+            Arc::new(crate::eval::failure_sink::EvalFailureSink),
         );
 
         // CloudOk persona + cloud provider: the multi-round tool loop must complete,

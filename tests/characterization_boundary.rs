@@ -373,6 +373,7 @@ async fn make_agent(db_path: &str) -> AgentLoop {
         GoalEngine::new(db_path, ScoringConfig::default()),
         vec![],
         db_path,
+        Arc::new(bastion::eval::failure_sink::EvalFailureSink),
     )
 }
 

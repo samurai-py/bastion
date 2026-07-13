@@ -6,5 +6,6 @@ pub mod handle;
 pub mod identity;
 pub mod loop_;
 pub mod memory_rag;
+pub mod ports;
 pub mod procedural;
 pub mod skills;

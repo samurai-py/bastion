@@ -155,6 +155,27 @@ impl Default for CallConfig {
     }
 }
 
+/// The two concrete production-failure signals the eval regression-capture
+/// mechanism wires (EVAL-01). Deliberately scoped — no LLM-judge rubric was
+/// designed for a broader failure taxonomy. Moved here from
+/// `src/eval/capture.rs` (M2 P2 — `FailureSink` port): this is vocabulary
+/// shared across the kernel/product boundary, not capture logic itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    Contestation,
+    EgressReject,
+}
+
+impl fmt::Display for FailureKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FailureKind::Contestation => write!(f, "contestation"),
+            FailureKind::EgressReject => write!(f, "egress_reject"),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BastionError {
@@ -231,6 +252,12 @@ mod tests {
             "a  b  c"
         );
         assert_eq!(strip_think("a <think>\nmultiline\n</think> b"), "a  b");
+    }
+
+    #[test]
+    fn failure_kind_display_matches_serde_rename() {
+        assert_eq!(FailureKind::Contestation.to_string(), "contestation");
+        assert_eq!(FailureKind::EgressReject.to_string(), "egress_reject");
     }
 
     #[test]
