@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_runtime;
 pub mod api;
 pub mod cabinet;
 pub mod capability;
