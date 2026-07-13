@@ -12,6 +12,8 @@
 - Reindex GitNexus adiado pro fim do M2 (extração invalida o índice a cada `git mv`); `detect_changes` roda mas é sinal fraco até lá.
 - Padrão de falha recorrente: subagentes encerram deixando cargo em background (3 ocorrências) — mitigado com fingerprint + wakeup de estagnação + finalização inline.
 - Máquina do owner caiu 2x com builds pesados — todos os builds em `CARGO_BUILD_JOBS=2`, um por vez.
+- ENOSPC durante `cargo test` do 3b — liberados 23G (`target/debug/incremental` + deps antigos). Recorrente nesta máquina; se voltar, mesmo remédio.
+- Session limit da API derrubou o 3b no meio do git mv (reset 19:20); retomado por SendMessage sem perda — renames staged sobreviveram.
 
 ## Pendências pro owner
 

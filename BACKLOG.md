@@ -94,9 +94,7 @@ Topologia alvo (decisão #1 — intermediária, 10 crates + app; confirmar desti
 
 - [x] **M2-01** Workspace criado (`f0f6650`); binário intacto (+576 bytes vs baseline).
 - [x] **M2-02** `bastion-types` extraída via git mv + shim de re-export (`ec30069`); 533 testes verdes.
-- [ ] **M2-03** Extrair runtime (capabilities/context/sessions/hooks/observabilidade).
-- [ ] **M2-04** Extrair memory + provider traits.
-- [ ] **M2-05** Extrair agent loop completo.
+- [x] **M2-03/04/05** `bastion-runtime` extraída (`849e67d` + 3 commits de ports): capability/session/hooks/agent-core + traits Provider e Memory no kernel; 9 ports (Responder, TurnKernel, FailureSink, ToolSource, GoalPort, CommandHandler, PreCompactionFlush, ToolResultObserver, ProviderResolver); 535 testes/24 suites; binário +0,16%.
 - [ ] **M2-06** Extrair cognition/personas/mesh/mcp como extensões.
 - [ ] **M2-07** Binário atual vira composição das crates.
 - [ ] **M2-08** CI de dependências proibidas (regras da seção 0).
