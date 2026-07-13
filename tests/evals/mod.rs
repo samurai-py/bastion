@@ -932,9 +932,11 @@ async fn cli_session_deterministic_across_turns() {
         &path,
     ))
         as Box<dyn bastion::memory::Memory>));
-    let mcp = McpClient::connect_all("nonexistent.json")
-        .await
-        .expect("mcp");
+    let mcp = SArc::new(
+        McpClient::connect_all("nonexistent.json")
+            .await
+            .expect("mcp"),
+    );
 
     let mut personas = HashMap::new();
     personas.insert(
@@ -960,7 +962,7 @@ async fn cli_session_deterministic_across_turns() {
         10.0,
         PersonaRegistry::new_from_map(personas),
         memory,
-        GoalEngine::new(&path, ScoringConfig::default()),
+        Some(SArc::new(GoalEngine::new(&path, ScoringConfig::default()))),
         vec![],
         &path,
         SArc::new(bastion::eval::failure_sink::EvalFailureSink),

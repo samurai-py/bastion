@@ -328,6 +328,15 @@ impl GoalEngine {
     }
 }
 
+/// M2 (P4 `GoalPort` port): the loop only ever needs `list_goals` — this is a
+/// pure passthrough to the inherent method, no logic change.
+#[async_trait::async_trait]
+impl crate::agent::ports::GoalPort for GoalEngine {
+    async fn list_goals(&self, owner_id: &str) -> anyhow::Result<Vec<Goal>> {
+        GoalEngine::list_goals(self, owner_id).await
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pure string builders (D-10 / D-11 — pt-BR per spec §4)
 // ---------------------------------------------------------------------------

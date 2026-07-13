@@ -2,12 +2,11 @@ use crate::agent::command::{handle_command, CommandResult};
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::identity::IdentityProvider;
-use crate::agent::ports::FailureSink;
-use crate::goal::GoalEngine;
+use crate::agent::ports::{FailureSink, GoalPort, ToolSource};
 use crate::hooks::egress::EgressHook;
 use crate::hooks::guardrails::InputGuardrail;
 use crate::hooks::output_validator::OutputValidator;
-use crate::mcp::McpClient;
+use crate::mcp::{tool_source::McpToolSource, McpClient};
 use crate::memory::SharedMemory;
 use crate::persona::PersonaRegistry;
 use crate::provider::{call_with_retry, SharedProvider};
@@ -28,7 +27,11 @@ pub const DEFAULT_OWNER: &str = "_local";
 pub struct AgentLoop {
     pub provider: SharedProvider,
     pub session: SessionManager,
-    pub mcp: Arc<McpClient>,
+    /// P3 `ToolSource` port — replaces the concrete `Arc<McpClient>` field.
+    /// Sources tool defs for `run_provider_fallback` and dispatches the
+    /// registry-bypass tool calls; the primary invocation path
+    /// (`CapabilityRegistry::invoke`, BIG-1) is unaffected.
+    pub tool_source: Arc<dyn ToolSource>,
     pub compactor: AutoCompact,
     pub session_id: String,
     pub daily_budget_usd: f64,
@@ -36,8 +39,10 @@ pub struct AgentLoop {
     pub registry: PersonaRegistry,
     /// Shared memory backend (beliefs + provenance).
     pub memory: SharedMemory,
-    /// Goal engine for drift nudges.
-    pub goals: GoalEngine,
+    /// P4 `GoalPort` — optional goal engine for drift nudges. `None` degrades
+    /// `/goals` and `/drift` gracefully (no goal engine configured); production
+    /// always injects `Some(...)` today.
+    pub goals: Option<Arc<dyn GoalPort>>,
     /// Input guardrail — screens malformed/oversized input (HOOK-02).
     pub input_guard: InputGuardrail,
     /// Output-validator — NL contestation detection → belief revocation (HOOK-03).
@@ -101,24 +106,29 @@ impl AgentLoop {
     pub fn new(
         provider: SharedProvider,
         session: SessionManager,
-        mcp: McpClient,
+        mcp: Arc<McpClient>,
         session_id: String,
         daily_budget_usd: f64,
         registry: PersonaRegistry,
         memory: SharedMemory,
-        goals: GoalEngine,
+        goals: Option<Arc<dyn GoalPort>>,
         fallback_models: Vec<String>,
         db_path: &str,
         failure_sink: Arc<dyn FailureSink>,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
         // BIG-1 (Gap 2): McpClient is shared by-Arc so each McpToolAdapter can hold a
-        // reference and route tool calls through capability_registry.invoke.
-        let mcp = Arc::new(mcp);
+        // reference and route tool calls through capability_registry.invoke. Callers
+        // (main.rs) share this SAME Arc with other product-level MCP consumers
+        // (e.g. the Reflector's directly-registered McpToolAdapter) — never a
+        // second connection.
+        // P3 `ToolSource` port: wraps the SAME Arc<McpClient> shared with the
+        // McpToolAdapters registered into capability_registry below.
+        let tool_source: Arc<dyn ToolSource> = Arc::new(McpToolSource::new(mcp.clone()));
         let mut agent = Self {
             provider,
             session,
-            mcp,
+            tool_source,
             compactor: AutoCompact::new(),
             session_id,
             daily_budget_usd,
@@ -181,28 +191,20 @@ impl AgentLoop {
         // persona path offers ZERO tools to the LLM), and the is_empty() fast-path in
         // dispatch_tool_loop bypasses the egress/approval gate. Registering one McpToolAdapter
         // per tool makes ALL tool calls flow through capability_registry.invoke (D-13).
-        // Snapshot tool metadata first (owned) so the agent.mcp borrow is released before we
+        // Snapshot tool metadata first (owned) so the mcp borrow is released before we
         // mutably borrow agent.capability_registry.
-        let mcp_tools: Vec<(String, String, serde_json::Value, String, bool, bool, bool)> = agent
-            .mcp
+        let mcp_tools: Vec<(String, String, serde_json::Value, String, bool, bool, bool)> = mcp
             .registry()
             .list_tool_names()
             .iter()
             .map(|name| {
-                let server_label = agent
-                    .mcp
-                    .registry()
-                    .server_for(name)
-                    .unwrap_or("")
-                    .to_string();
-                let schema = agent
-                    .mcp
+                let server_label = mcp.registry().server_for(name).unwrap_or("").to_string();
+                let schema = mcp
                     .registry()
                     .get_tool_schema(name)
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-                let description = agent
-                    .mcp
+                let description = mcp
                     .registry()
                     .get_tool_description(name)
                     .unwrap_or("")
@@ -211,15 +213,15 @@ impl AgentLoop {
                 // server is config-flagged `is_local = true` (e.g. the voice sidecar,
                 // Plan 10-03/10-09's `[mcp.servers.voice]`) is automatically registered
                 // as a local capability below, with zero tool-name string matching.
-                let is_local = agent.mcp.registry().is_local(name);
+                let is_local = mcp.registry().is_local(name);
                 // Plan 11-04: the load-bearing lookup — a tool whose own MCP server
                 // self-reported `ToolAnnotations.destructive_hint` (or omitted it,
                 // fail-cautious) is automatically registered as needing owner
                 // approval below, with zero tool-name string matching. `trusted`
                 // mirrors `is_local`'s threading, sourced from the owning server's
                 // `McpServerEntry.trusted` config.
-                let needs_approval = agent.mcp.registry().needs_approval(name);
-                let trusted = agent.mcp.registry().is_trusted(name);
+                let needs_approval = mcp.registry().needs_approval(name);
+                let trusted = mcp.registry().is_trusted(name);
                 (
                     name.to_string(),
                     server_label,
@@ -239,7 +241,7 @@ impl AgentLoop {
                 server_label,
                 description,
                 schema,
-                mcp: agent.mcp.clone(),
+                mcp: mcp.clone(),
                 is_local_override: is_local,
                 needs_approval_override: needs_approval,
                 trusted_override: trusted,
@@ -402,41 +404,50 @@ impl AgentLoop {
             );
         }
         if t == "/goals" {
-            return Some(self.goals.list_goals(owner).await.map(|gs| {
-                if gs.is_empty() {
-                    "Nenhuma meta ativa.".to_string()
-                } else {
-                    let lines: Vec<String> = gs
-                        .iter()
-                        .map(|g| match &g.metric {
-                            Some(m) => format!("- {} ({})", g.description, m),
-                            None => format!("- {}", g.description),
-                        })
-                        .collect();
-                    format!("{} metas ativas\n{}", gs.len(), lines.join("\n"))
-                }
-            }));
+            // P4 `GoalPort`: `None` (no goal engine configured) degrades to the
+            // same "no active goals" text production never actually hits this
+            // arm — main.rs always injects `Some(...)`.
+            return Some(match &self.goals {
+                None => Ok("Nenhuma meta ativa.".to_string()),
+                Some(goals) => goals.list_goals(owner).await.map(|gs| {
+                    if gs.is_empty() {
+                        "Nenhuma meta ativa.".to_string()
+                    } else {
+                        let lines: Vec<String> = gs
+                            .iter()
+                            .map(|g| match &g.metric {
+                                Some(m) => format!("- {} ({})", g.description, m),
+                                None => format!("- {}", g.description),
+                            })
+                            .collect();
+                        format!("{} metas ativas\n{}", gs.len(), lines.join("\n"))
+                    }
+                }),
+            });
         }
         if t == "/drift" {
-            return Some(self.goals.list_goals(owner).await.map(|gs| {
-                if gs.is_empty() {
-                    return "Nenhuma meta ativa — sem drift a monitorar.".to_string();
-                }
-                let n = gs.len();
-                let healthy = gs.iter().filter(|g| g.last_confirmed.is_some()).count();
-                let pct = healthy * 100 / n;
-                let status = if pct >= 60 {
-                    "estável"
-                } else if pct >= 30 {
-                    "atenção"
-                } else {
-                    "em risco"
-                };
-                format!(
-                    "drift {} ({}%) — {}/{} metas com progresso confirmado.",
-                    status, pct, healthy, n
-                )
-            }));
+            return Some(match &self.goals {
+                None => Ok("Nenhuma meta ativa — sem drift a monitorar.".to_string()),
+                Some(goals) => goals.list_goals(owner).await.map(|gs| {
+                    if gs.is_empty() {
+                        return "Nenhuma meta ativa — sem drift a monitorar.".to_string();
+                    }
+                    let n = gs.len();
+                    let healthy = gs.iter().filter(|g| g.last_confirmed.is_some()).count();
+                    let pct = healthy * 100 / n;
+                    let status = if pct >= 60 {
+                        "estável"
+                    } else if pct >= 30 {
+                        "atenção"
+                    } else {
+                        "em risco"
+                    };
+                    format!(
+                        "drift {} ({}%) — {}/{} metas com progresso confirmado.",
+                        status, pct, healthy, n
+                    )
+                }),
+            });
         }
         None
     }
@@ -1161,7 +1172,7 @@ impl AgentLoop {
                                 }
                                 Ok(()) => {
                                     let value = self
-                                        .mcp
+                                        .tool_source
                                         .call_tool_with_timeout(
                                             &tc.name,
                                             tc.arguments.clone(),
@@ -1475,30 +1486,12 @@ impl AgentLoop {
         turn_tier: Option<crate::memory::PrivacyTier>,
         turn_persona: Option<&str>,
     ) -> anyhow::Result<String> {
-        // Build tool definitions from ToolRegistry.
+        // Build tool definitions via the ToolSource port (P3).
         // D-12/D-14b: list_tool_names() returns sorted-by-name output since Plan 08-02's
         // mcp/registry.rs fix (was iteration-order-dependent HashMap output before) — this
         // tools array is part of CallConfig and therefore part of the byte-stable-prefix
         // contract build_system_prompt documents; no code change needed here, confirming only.
-        let tools: Vec<serde_json::Value> = self
-            .mcp
-            .registry()
-            .list_tool_names()
-            .iter()
-            .map(|name| {
-                let schema = self
-                    .mcp
-                    .registry()
-                    .get_tool_schema(name)
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-                serde_json::json!({
-                    "name": name,
-                    "description": format!("External tool: {}", name),
-                    "input_schema": schema
-                })
-            })
-            .collect();
+        let tools: Vec<serde_json::Value> = self.tool_source.tool_defs().await?;
 
         // SEAM #2: build_system_prompt applies per-block egress check so LocalOnly blocks
         // are not injected when the active provider is cloud. This covers the fallback path
@@ -1621,7 +1614,7 @@ impl AgentLoop {
                             match crate::hooks::egress::check_egress(resolved_tier, "external") {
                                 Err(e) => serde_json::json!({ "error": e.to_string() }),
                                 Ok(()) => self
-                                    .mcp
+                                    .tool_source
                                     .call_tool_with_timeout(&tc.name, tc.arguments.clone(), owner)
                                     .await
                                     .unwrap_or_else(
@@ -2000,9 +1993,11 @@ mod tests {
         ));
 
         // connect_all with non-existent path returns empty client (load_mcp_config returns {})
-        let mcp = McpClient::connect_all("nonexistent_mcp.json")
-            .await
-            .expect("connect_all empty");
+        let mcp = Arc::new(
+            McpClient::connect_all("nonexistent_mcp.json")
+                .await
+                .expect("connect_all empty"),
+        );
 
         AgentLoop::new(
             make_provider("TestPersona"),
@@ -2012,7 +2007,7 @@ mod tests {
             10.0,
             make_registry("TestPersona"),
             memory,
-            GoalEngine::new(db_path, ScoringConfig::default()),
+            Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
             vec![],
             db_path,
             Arc::new(crate::eval::failure_sink::EvalFailureSink),
@@ -2488,9 +2483,11 @@ mod tests {
         let memory: SharedMemory = Arc::new(RwLock::new(
             Box::new(SqliteMemory::new(&path)) as Box<dyn crate::memory::Memory>
         ));
-        let mcp = McpClient::connect_all("nonexistent_mcp.json")
-            .await
-            .expect("connect_all empty");
+        let mcp = Arc::new(
+            McpClient::connect_all("nonexistent_mcp.json")
+                .await
+                .expect("connect_all empty"),
+        );
 
         let mut personas = HashMap::new();
         personas.insert(
@@ -2518,7 +2515,7 @@ mod tests {
             10.0,
             registry,
             memory,
-            GoalEngine::new(&path, ScoringConfig::default()),
+            Some(Arc::new(GoalEngine::new(&path, ScoringConfig::default()))),
             vec![],
             &path,
             Arc::new(crate::eval::failure_sink::EvalFailureSink),

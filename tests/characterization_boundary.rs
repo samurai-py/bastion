@@ -355,9 +355,11 @@ async fn make_agent(db_path: &str) -> AgentLoop {
 
     // connect_all against a non-existent path returns an empty (zero-tool) client —
     // no network I/O, mirrors tests/prompt_cache_prefix.rs's convention.
-    let mcp = McpClient::connect_all("nonexistent_mcp.json")
-        .await
-        .expect("connect_all empty");
+    let mcp = Arc::new(
+        McpClient::connect_all("nonexistent_mcp.json")
+            .await
+            .expect("connect_all empty"),
+    );
 
     let provider: SharedProvider =
         Arc::new(RwLock::new(Box::new(MockProvider) as Box<dyn Provider>));
@@ -370,7 +372,7 @@ async fn make_agent(db_path: &str) -> AgentLoop {
         10.0,
         make_registry_for_agent(),
         memory,
-        GoalEngine::new(db_path, ScoringConfig::default()),
+        Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],
         db_path,
         Arc::new(bastion::eval::failure_sink::EvalFailureSink),

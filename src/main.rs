@@ -155,6 +155,13 @@ async fn main() -> anyhow::Result<()> {
         } else {
             None
         };
+    // M2 (P3 `ToolSource`): shared by-Arc so it can back both the loop's
+    // `ToolSource` port AND the Reflector's directly-registered `McpToolAdapter`
+    // (below, in `daemon_loop`) — the SAME connected client, never a second
+    // connection. Wrapped only after `with_composio_oauth` above, which still
+    // needs owned `McpClient`.
+    let mcp_client = Arc::new(mcp_client);
+    let mcp_for_product = mcp_client.clone();
 
     // Init provider from config (default_model from bastion.toml, overridable via env BASTION__AGENT__DEFAULT_MODEL)
     let default_model = cfg.agent.default_model.clone();
@@ -174,6 +181,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Init goal engine
     let goals = GoalEngine::new(&db_path, ScoringConfig::default());
+    // M2 (P4 `GoalPort`): `agent.goals` becomes `Option<Arc<dyn GoalPort>>` below
+    // — the loop only ever needed `list_goals`. Two other product-level
+    // consumers still need the concrete `GoalEngine` (out of scope for this
+    // cut, not loop internals): `BastionMcpServer` (its own `goals: GoalEngine`
+    // field, src/mcp/server.rs) and `CronService` (needs `drift_nudge` too,
+    // src/proactive/mod.rs) — both wired inside `daemon_loop`. Keep a plain
+    // clone from BEFORE `goals` moves into the loop and thread it through,
+    // rather than reaching into `agent.goals` (no longer the right type).
+    let goals_for_product = goals.clone();
 
     // SEAM #4: inicializar OTel TracerProvider ANTES de AgentLoop::new()
     // (Pitfall 6: se chamado depois, spans no AgentLoop usariam no-op tracer)
@@ -215,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
         daily_budget,
         registry,
         memory.clone(),
-        goals,
+        Some(std::sync::Arc::new(goals)),
         cfg.agent.fallback_models.clone(),
         &db_path,
         std::sync::Arc::new(bastion::eval::failure_sink::EvalFailureSink),
@@ -227,7 +243,15 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", response);
         }
         Command::Daemon => {
-            daemon_loop(&mut agent, &cfg, agent_identity, composio_oauth).await?;
+            daemon_loop(
+                &mut agent,
+                &cfg,
+                agent_identity,
+                composio_oauth,
+                goals_for_product,
+                mcp_for_product,
+            )
+            .await?;
         }
         Command::McpStdio => {
             use rmcp::ServiceExt;
@@ -240,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
                 Arc::new(agent.capability_registry.clone()),
                 memory.clone(),
                 personas,
-                agent.goals.clone(),
+                goals_for_product.clone(),
                 token_perms,
                 local_owner,
             );
@@ -273,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
                     bastion::interop::export::export_full(
                         &memory,
                         &agent.registry,
-                        &agent.goals,
+                        &goals_for_product,
                         &cfg,
                         identity,
                         &owner_id,
@@ -324,7 +348,7 @@ async fn main() -> anyhow::Result<()> {
                 af,
                 &memory,
                 &agent.registry,
-                &agent.goals,
+                &goals_for_product,
                 &owner_id,
             )
             .await?;
@@ -357,6 +381,16 @@ async fn daemon_loop(
     // configured) — wired into both the agent (/connect-app-composio) and the
     // webhook server's /auth/composio/callback route below.
     composio_oauth: Option<Arc<bastion::mcp::ComposioOAuth>>,
+    // M2 (P4 `GoalPort`): concrete `GoalEngine` for the two product-level
+    // consumers `daemon_loop` wires up (`BastionMcpServer`'s MCP-over-HTTP
+    // resources, `CronService`'s heartbeat) that need more than the loop's
+    // `list_goals`-only port surface. Same underlying engine `agent.goals`
+    // wraps — cloned in `main()` before it moved into the loop.
+    goals_for_product: GoalEngine,
+    // M2 (P3 `ToolSource`): concrete `Arc<McpClient>` for the Reflector's
+    // directly-registered `McpToolAdapter` below — the SAME connected client
+    // `agent.tool_source` wraps, shared by-Arc from `main()`.
+    mcp_for_product: Arc<McpClient>,
 ) -> anyhow::Result<()> {
     use bastion::agent::command::CommandResult;
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -463,7 +497,7 @@ async fn daemon_loop(
             let cap_registry = Arc::new(agent.capability_registry.clone());
             let mem = agent.memory.clone();
             let personas = Arc::new(agent.registry.clone());
-            let goals = agent.goals.clone();
+            let goals = goals_for_product.clone();
             let local_owner = std::env::var("BASTION_OWNER_ID")
                 .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
             let token_perms = build_token_perms(cfg);
@@ -721,7 +755,7 @@ async fn daemon_loop(
     // It feeds goal-drift nudges into pending_tx. On tick the daemon will pick them up
     // between turns via the pending_rx arm.
     {
-        let cron = CronService::new(agent.pending_tx.clone(), agent.goals.clone());
+        let cron = CronService::new(agent.pending_tx.clone(), goals_for_product.clone());
         let owner = bastion::agent::loop_::DEFAULT_OWNER.to_string();
         // Only spawn heartbeat if there are goals to nudge (fire-and-forget task)
         tokio::spawn(async move {
@@ -746,7 +780,7 @@ async fn daemon_loop(
                 description: "Return the embedding vector for a text (dedup similarity)"
                     .to_string(),
                 schema: serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}),
-                mcp: agent.mcp.clone(),
+                mcp: mcp_for_product.clone(),
                 // memupalace's memory_embed is NOT local (Plan 10-08) — preserves
                 // today's exact behavior unchanged.
                 is_local_override: false,

@@ -95,9 +95,11 @@ async fn make_agent(db_path: &str) -> (AgentLoop, SharedMemory) {
 
     // connect_all with a non-existent path returns an empty (zero-tool) client — no
     // network I/O, mirrors the existing test convention in src/agent/loop_.rs::tests.
-    let mcp = McpClient::connect_all("nonexistent_mcp.json")
-        .await
-        .expect("connect_all empty");
+    let mcp = Arc::new(
+        McpClient::connect_all("nonexistent_mcp.json")
+            .await
+            .expect("connect_all empty"),
+    );
 
     let provider: SharedProvider =
         Arc::new(RwLock::new(Box::new(MockProvider) as Box<dyn Provider>));
@@ -110,7 +112,7 @@ async fn make_agent(db_path: &str) -> (AgentLoop, SharedMemory) {
         10.0,
         make_registry(),
         memory.clone(),
-        GoalEngine::new(db_path, ScoringConfig::default()),
+        Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],
         db_path,
         Arc::new(bastion::eval::failure_sink::EvalFailureSink),
