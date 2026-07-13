@@ -72,7 +72,7 @@ Decisão: **sem validação ao vivo neste marco** — os débitos live herdados 
 - [ ] **M1-04** Lista de APIs públicas mínimas a estabilizar: `Runtime::run_turn(TurnRequest) -> TurnResult`; `Capability`/`CapabilityRegistry`/`InvokeContext`; `ContextProvider`/`ContextBlock`; `SessionStore`; `Provider`; `Observer`/event contract; ports opcionais de approval/budget/policy; `AgentDefinition` + bindings; `Memory`/`Belief`/proveniência; learning delta + interop; `ExtensionManifest`/`PackManifest` + lifecycle + permissões; `Loadout` resolvido + lockfile; delegação de subagente + ownership de agente coletivo; `AgentRuntime`; `AuthProfileRef`; `VersionedContextArtifact`/`ContextRevision`; `DeliberationStrategy` + Cabinet (contrato estável — decisão #6).
 - [ ] **M1-05** Matriz mechanism/policy: o que é mecanismo OSS compartilhado vs. política do Agent vs. política de host externo.
 - [ ] **M1-06** Política de estabilidade por crate (kernel semver estrito; cognição `0.x` exceto Cabinet; produto sem promessa de lib).
-- [ ] **M1-07** Testes de caracterização das invariantes de policy boundary — escritos **antes** de mover qualquer código sensível.
+- [x] **M1-07** Caracterização das invariantes (mapa em `docs/revamp/M1-07-characterization-map.md`; 5 testes novos em `tests/characterization_boundary.rs`; 1 gap estrutural documentado).
 
 Topologia alvo (decisão #1 — intermediária, 10 crates + app; confirmar destino fino em M1-02):
 
