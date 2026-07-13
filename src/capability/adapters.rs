@@ -61,10 +61,14 @@ impl Capability for McpToolAdapter {
     fn is_trusted(&self) -> bool {
         self.trusted_override || self.is_local_override
     }
-    async fn invoke(&self, args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
+    async fn invoke(&self, args: Value, ctx: &InvokeCtx) -> anyhow::Result<Value> {
         // Delegate to McpClient — no business logic here (thin adapter).
         // call_tool_with_timeout looks up server_label via internal ToolRegistry.
-        self.mcp.call_tool_with_timeout(&self.tool_name, args).await
+        // ctx.owner threaded through for Composio's owner-scoped refresh retry
+        // (milestone-close code review, 2026-07-13).
+        self.mcp
+            .call_tool_with_timeout(&self.tool_name, args, &ctx.owner)
+            .await
     }
 }
 

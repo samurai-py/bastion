@@ -248,7 +248,17 @@ impl McpClient {
         &self.registry
     }
 
-    pub async fn call_tool_with_timeout(&self, name: &str, args: Value) -> anyhow::Result<Value> {
+    /// `owner` is the resolved owner for this call — threaded through only so
+    /// the Composio bounded-retry below can refresh the RIGHT owner's OAuth
+    /// connection (milestone-close code review, 2026-07-13: previously
+    /// hardcoded to `DEFAULT_OWNER`, silently refreshing the wrong/nonexistent
+    /// connection for any non-default owner in a multi-owner deployment).
+    pub async fn call_tool_with_timeout(
+        &self,
+        name: &str,
+        args: Value,
+        owner: &str,
+    ) -> anyhow::Result<Value> {
         let server_label = match self.registry.server_for(name) {
             Some(label) => label.to_owned(),
             None => anyhow::bail!("tool '{}' not found in any connected MCP server", name),
@@ -275,10 +285,7 @@ impl McpClient {
                             error = %e,
                             "tool call failed on a Composio-backed server — refreshing connection and retrying once"
                         );
-                        if let Err(refresh_err) = oauth
-                            .refresh_if_expired(crate::agent::loop_::DEFAULT_OWNER, toolkit)
-                            .await
-                        {
+                        if let Err(refresh_err) = oauth.refresh_if_expired(owner, toolkit).await {
                             tracing::warn!(event = "composio_refresh_failed", error = %refresh_err);
                         }
                         self.dispatch_call(&server_label, name, &args).await
@@ -516,7 +523,7 @@ mod tests {
         };
 
         let result = client
-            .call_tool_with_timeout("send_email", serde_json::json!({}))
+            .call_tool_with_timeout("send_email", serde_json::json!({}), "alice")
             .await;
 
         assert!(result.is_err(), "scripted server always errors");
@@ -568,7 +575,7 @@ mod tests {
         };
 
         let result = client
-            .call_tool_with_timeout("recall", serde_json::json!({}))
+            .call_tool_with_timeout("recall", serde_json::json!({}), "alice")
             .await;
 
         assert!(result.is_err());

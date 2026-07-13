@@ -74,7 +74,14 @@ fn authenticate_token(
 
     tokens
         .iter()
-        .find(|(configured, _)| constant_time_eq(configured.as_bytes(), presented.as_bytes()))
+        // Milestone-close code review (2026-07-13): an empty-string presented
+        // token must never authenticate, even against a misconfigured empty
+        // configured entry — `constant_time_eq("", "")` would otherwise be
+        // `true`, silently granting that entry's permissions to any caller
+        // who supplied no `x-bastion-token` at all.
+        .find(|(configured, _)| {
+            !configured.is_empty() && constant_time_eq(configured.as_bytes(), presented.as_bytes())
+        })
         .map(|(_, perms)| perms.clone())
         .ok_or_else(|| {
             tracing::warn!(
@@ -390,6 +397,24 @@ mod tests {
         let meta = meta_with_token("anything");
         assert!(authenticate_token(&tokens, Some(&meta)).is_err());
         assert!(authenticate_token(&tokens, None).is_err());
+    }
+
+    /// Regression (milestone-close code review, 2026-07-13): a misconfigured
+    /// empty-string configured token must never authenticate a caller who
+    /// presented no `x-bastion-token` at all — `constant_time_eq("", "")`
+    /// would otherwise be `true`.
+    #[test]
+    fn empty_configured_token_never_authenticates_missing_header() {
+        let tokens = tokens_with("", rw_perms("alice"));
+        assert!(
+            authenticate_token(&tokens, None).is_err(),
+            "an empty configured token must never grant access to a caller with no token"
+        );
+        let meta = meta_with_token("");
+        assert!(
+            authenticate_token(&tokens, Some(&meta)).is_err(),
+            "an empty configured token must never grant access to an explicit empty token either"
+        );
     }
 
     #[test]

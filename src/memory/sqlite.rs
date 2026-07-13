@@ -308,7 +308,7 @@ impl Memory for SqliteMemory {
         let owner_id = owner_id.to_owned();
         task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
             let mut stmt = conn.prepare(
                 "SELECT id, owner_id, persona_tag, content, weight, is_core, privacy_tier, \
                         kind, keywords, issue, helpful_count, harmful_count, neutral_count, \

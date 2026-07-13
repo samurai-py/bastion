@@ -1,12 +1,20 @@
 //! Approval-intent detection: natural-language yes/no resolution for pending
 //! `approval_queue` rows (SEC-01, D-02 — "linguagem natural é o mecanismo BASE").
 //!
-//! This is the SAME idiom as [`crate::hooks::output_validator::detect_contestation`]:
-//! a pure, offline, case-insensitive substring match against a fixed bilingual
-//! phrase list — never an LLM call, never fuzzy matching. It is intentionally NOT
-//! a clone of `CONTESTATION_PHRASES` — those phrases mean "you're wrong about X"
-//! (belief revocation intent), a semantically unrelated concept from "yes, go
-//! ahead" / "no, cancel that" (approval-queue resolution intent).
+//! Similar idiom to [`crate::hooks::output_validator::detect_contestation`]: a
+//! pure, offline, case-insensitive phrase match against a fixed bilingual list
+//! — never an LLM call, never fuzzy matching. It is intentionally NOT a clone of
+//! `CONTESTATION_PHRASES` — those phrases mean "you're wrong about X" (belief
+//! revocation intent), a semantically unrelated concept from "yes, go ahead" /
+//! "no, cancel that" (approval-queue resolution intent).
+//!
+//! Unlike `detect_contestation`'s low-stakes substring match, a false positive
+//! here silently approves-and-dispatches (or rejects) a pending, potentially
+//! financial/irreversible action with no real owner confirmation (AGENTS.md:
+//! "financial/irreversible actions need explicit user confirmation; never
+//! autonomous") — so matching is word-boundary-based, not raw substring: "sim"
+//! matches "Sim, pode fazer" but not "simular uma situação"; "no" matches "no"
+//! but not "novo" / "noite" / "Not now" (milestone-close code review, 2026-07-13).
 
 /// Phrase set for APPROVAL intent (pt-BR + en, case-insensitive).
 const APPROVAL_PHRASES: &[&str] = &[
@@ -27,29 +35,52 @@ const REJECTION_PHRASES: &[&str] = &[
     "não", "nao", "rejeito", "cancela", "cancelar", "no", "reject", "cancel", "deny",
 ];
 
-/// Returns `true` when `text` contains a natural-language approval phrase.
-///
-/// Matching is case-insensitive and substring-based — same known limitation as
-/// `detect_contestation`: a word that merely CONTAINS one of the phrases as a
-/// substring (e.g. "simular uma situação" contains "sim") will false-positive.
-/// This is an accepted, documented limitation, not a required negative case —
-/// `detect_contestation` has the identical class of limitation and it was
-/// accepted there too.
+/// Returns `true` when `phrase` occurs in `text` at a word boundary — i.e. the
+/// character immediately before and after the match, if any, is not
+/// alphanumeric. Prevents "sim" from matching inside "simular", or "no" from
+/// matching inside "novo"/"noite"/"Not" — a plain `str::contains` would.
+fn contains_word_boundary(text: &str, phrase: &str) -> bool {
+    let mut search_start = 0;
+    while let Some(offset) = text[search_start..].find(phrase) {
+        let match_start = search_start + offset;
+        let match_end = match_start + phrase.len();
+        let before_is_boundary = text[..match_start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_is_boundary = text[match_end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_is_boundary && after_is_boundary {
+            return true;
+        }
+        // Advance by at least one byte past this (non-matching) occurrence's
+        // start to find the next candidate — `phrase` is never empty here.
+        search_start = match_start + phrase.len().max(1);
+        if search_start > text.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Returns `true` when `text` contains a natural-language approval phrase at
+/// a word boundary (case-insensitive).
 pub fn detect_approval_intent(text: &str) -> bool {
     let lower = text.to_lowercase();
     APPROVAL_PHRASES
         .iter()
-        .any(|&phrase| lower.contains(phrase))
+        .any(|&phrase| contains_word_boundary(&lower, phrase))
 }
 
-/// Returns `true` when `text` contains a natural-language rejection phrase.
-///
-/// Same case-insensitive substring-match idiom as [`detect_approval_intent`].
+/// Returns `true` when `text` contains a natural-language rejection phrase at
+/// a word boundary (case-insensitive). Same idiom as [`detect_approval_intent`].
 pub fn detect_rejection_intent(text: &str) -> bool {
     let lower = text.to_lowercase();
     REJECTION_PHRASES
         .iter()
-        .any(|&phrase| lower.contains(phrase))
+        .any(|&phrase| contains_word_boundary(&lower, phrase))
 }
 
 #[cfg(test)]
@@ -75,16 +106,35 @@ mod tests {
         assert!(detect_approval_intent("YES, APPROVE IT"));
     }
 
-    /// Test 3: an unrelated message is not detected as approval. The
-    /// "simular uma situação" case is documented as a KNOWN, accepted substring
-    /// false-positive (same class of limitation as `detect_contestation`) — it is
-    /// asserted here as CURRENT behavior, not as a required negative case.
+    /// Test 3: an unrelated message is not detected as approval, INCLUDING when
+    /// a phrase occurs only as a substring of an unrelated word — the word-
+    /// boundary fix (milestone-close code review, 2026-07-13) closes exactly
+    /// this class of false positive.
     #[test]
     fn detect_approval_intent_current_behavior_on_unrelated_and_substring_input() {
         assert!(!detect_approval_intent("what's the weather?"));
-        // Known limitation: "sim" is a substring of "simular" — accepted, matches
-        // detect_contestation's own documented substring-matching limitation.
-        assert!(detect_approval_intent("simular uma situação"));
+        // "sim" is a substring of "simular" but not a whole word here — must
+        // NOT match (this used to be an accepted false positive; now fixed).
+        assert!(!detect_approval_intent("simular uma situação"));
+    }
+
+    /// Regression (milestone-close code review, 2026-07-13): concrete real-world
+    /// phrases that used to misfire via raw substring matching must not anymore.
+    /// A pending SEC-01 approval row must never be resolved by these.
+    #[test]
+    fn word_boundary_fix_prevents_concrete_real_world_false_positives() {
+        // "no" is a substring of "Not"/"now"/"novo"/"noite" — none of these are
+        // the rejection word "no" on its own.
+        assert!(!detect_rejection_intent("Not now, I'm driving"));
+        assert!(!detect_rejection_intent("novo pedido chegou"));
+        assert!(!detect_rejection_intent("boa noite!"));
+        // "sim" is a substring of "simples"/"simular" — not the approval word
+        // "sim" on its own.
+        assert!(!detect_approval_intent("simples assim!"));
+        assert!(!detect_approval_intent("vou simular uma proposta"));
+        // Sanity: the real words, as actual standalone words, still match.
+        assert!(detect_rejection_intent("no, cancela isso"));
+        assert!(detect_approval_intent("sim, pode confirmar"));
     }
 
     /// Test 4: explicit rejection phrases are NOT detected as approval, and vice

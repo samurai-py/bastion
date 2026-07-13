@@ -46,7 +46,7 @@ async fn mcp_client_unavailable_external_server_is_non_fatal() -> anyhow::Result
 async fn mcp_client_unknown_tool_fails_before_dispatch() -> anyhow::Result<()> {
     let client = McpClient::connect_from_config(&HashMap::new()).await?;
     let err = client
-        .call_tool_with_timeout("echo", json!({"message": "hello"}))
+        .call_tool_with_timeout("echo", json!({"message": "hello"}), "alice")
         .await
         .expect_err("unknown tool must fail");
 

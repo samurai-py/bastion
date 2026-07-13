@@ -1154,7 +1154,11 @@ impl AgentLoop {
                                 Ok(()) => {
                                     let value = self
                                         .mcp
-                                        .call_tool_with_timeout(&tc.name, tc.arguments.clone())
+                                        .call_tool_with_timeout(
+                                            &tc.name,
+                                            tc.arguments.clone(),
+                                            owner,
+                                        )
                                         .await
                                         .unwrap_or_else(|e| {
                                             // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
@@ -1263,12 +1267,47 @@ impl AgentLoop {
                     // `dispatch_single_or_parallel`'s caller). Restored whether the
                     // call succeeds or errors, before the `?` propagates.
                     let next_response = if round_untrusted {
+                        // Milestone-close code review (2026-07-13): the manual
+                        // drain/restore bracket below (unavoidable — a live
+                        // `TurnCapabilityScope` can't be held across this
+                        // `&mut self` call, same reasoning as
+                        // `dispatch_single_or_parallel`'s caller) previously had
+                        // no panic-safety: a panic between `drain_all()` and
+                        // `restore()` (e.g. T-08-08-01's accepted missing-API-key
+                        // panic, reachable here via `resolve_fallback_provider`)
+                        // would skip `restore()`. `catch_unwind` guarantees
+                        // `restore()` always runs before the panic continues
+                        // propagating via `resume_unwind` — this does NOT change
+                        // whether the process crashes (it still does; `dispatch_tool_loop`
+                        // runs un-spawned on the daemon's single root task), it
+                        // only guarantees the registry is consistent on the way out.
+                        use futures_util::FutureExt as _;
                         let backup = self.capability_registry.drain_all();
-                        let result = self
-                            .complete_with_fallback_ladder(history, config, resolved_tier)
+                        // `config` is built once before the tool loop starts and
+                        // reused across rounds — passing it through unchanged
+                        // here would still advertise the full (pre-drain) tool
+                        // schema to the provider even though invoke() would
+                        // reject any resulting call. Rebuild `.tools` from the
+                        // now-drained (empty) registry, same as the turn-level
+                        // `untrusted` path already does, so the model genuinely
+                        // sees zero capabilities for this quarantined round.
+                        let quarantined_config = CallConfig {
+                            tools: self.capability_registry.list_tool_defs(),
+                            ..config.clone()
+                        };
+                        let panic_result =
+                            std::panic::AssertUnwindSafe(self.complete_with_fallback_ladder(
+                                history,
+                                &quarantined_config,
+                                resolved_tier,
+                            ))
+                            .catch_unwind()
                             .await;
                         self.capability_registry.restore(backup);
-                        result?
+                        match panic_result {
+                            Ok(result) => result?,
+                            Err(panic_payload) => std::panic::resume_unwind(panic_payload),
+                        }
                     } else {
                         self.complete_with_fallback_ladder(history, config, resolved_tier)
                             .await?
@@ -1575,7 +1614,7 @@ impl AgentLoop {
                                 Err(e) => serde_json::json!({ "error": e.to_string() }),
                                 Ok(()) => self
                                     .mcp
-                                    .call_tool_with_timeout(&tc.name, tc.arguments.clone())
+                                    .call_tool_with_timeout(&tc.name, tc.arguments.clone(), owner)
                                     .await
                                     .unwrap_or_else(
                                         |e| serde_json::json!({ "error": e.to_string() }),
@@ -1732,6 +1771,20 @@ fn estimate_cost_usd(provider: &str, usage: &TokenUsage) -> f64 {
             let output_cost = usage.output_tokens as f64 * 2.5 / 1_000_000.0;
             input_cost + output_cost
         }
+        // Groq aggregates several open models at different price points and,
+        // like OpenRouter/Gemini, never populates a per-request cost field
+        // (GroqProvider::map_usage doesn't set actual_cost_usd) — this arm is
+        // the ONLY path ever consulted for Groq (milestone-close code review,
+        // 2026-07-13: same SEC-02 zero-cost-bypass defect already fixed above
+        // for openrouter/gemini, missed for the native groq provider added
+        // this same milestone). Conservative blended-average across Groq's
+        // published per-model pricing as of 2026-07 (console.groq.com/docs/pricing)
+        // — never 0.0 for a paid provider.
+        "groq" => {
+            let input_cost = usage.input_tokens as f64 * 0.2 / 1_000_000.0;
+            let output_cost = usage.output_tokens as f64 * 0.5 / 1_000_000.0;
+            input_cost + output_cost
+        }
         "ollama" => 0.0, // local — no cost
         _ => 0.0,
     }
@@ -1826,6 +1879,21 @@ mod tests {
             ..Default::default()
         };
         assert!(estimate_cost_usd("openrouter", &usage) > 0.0);
+    }
+
+    /// Regression (milestone-close code review, 2026-07-13): groq was added as
+    /// a native provider this milestone but had no arm here, so it fell through
+    /// to `_ => 0.0` — the exact SEC-02 zero-cost budget bypass already fixed
+    /// above for openrouter/gemini.
+    #[test]
+    fn estimate_cost_usd_groq_fallback_is_never_zero() {
+        let usage = TokenUsage {
+            actual_cost_usd: None,
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        };
+        assert!(estimate_cost_usd("groq", &usage) > 0.0);
     }
 
     #[test]
@@ -3004,6 +3072,122 @@ mod tests {
             agent.capability_registry.list_tool_defs().len(),
             1,
             "the capability must remain registered/usable after the whole turn completes"
+        );
+    }
+
+    /// Provider that records `config.tools.len()` on every non-router
+    /// `complete()` call, in call order — used to prove the round-level SEC-05
+    /// quarantine actually hides tools from the LLM-facing request, not just
+    /// from `invoke()` (milestone-close code review, 2026-07-13 regression).
+    struct ToolVisibilityRecordingProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        tool_name: String,
+        seen_tool_counts: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ToolVisibilityRecordingProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            config: &CallConfig,
+        ) -> anyhow::Result<LlmResponse> {
+            if config.response_format.is_some() {
+                return Ok(LlmResponse {
+                    text: serde_json::json!({
+                        "personas": ["TestPersona"],
+                        "mode": "single",
+                        "convene_reason": null,
+                    })
+                    .to_string(),
+                    tool_calls: None,
+                    usage: TokenUsage::default(),
+                });
+            }
+            self.seen_tool_counts
+                .lock()
+                .expect("mutex not poisoned")
+                .push(config.tools.len());
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                Ok(LlmResponse {
+                    text: String::new(),
+                    tool_calls: Some(vec![crate::types::ToolCall {
+                        id: "t0".to_owned(),
+                        name: self.tool_name.clone(),
+                        arguments: serde_json::json!({}),
+                        extra: None,
+                    }]),
+                    usage: TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        ..Default::default()
+                    },
+                })
+            } else {
+                Ok(LlmResponse {
+                    text: "done".to_owned(),
+                    tool_calls: None,
+                    usage: TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        ..Default::default()
+                    },
+                })
+            }
+        }
+        async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
+            Ok("s".to_owned())
+        }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    /// Regression (milestone-close code review, 2026-07-13): the round-level
+    /// SEC-05 quarantine must rebuild `CallConfig.tools` from the drained
+    /// registry for the quarantined round's LLM request — not just block
+    /// `invoke()` — so the model genuinely sees zero tools, matching the
+    /// turn-level `untrusted` path's already-correct behavior.
+    #[tokio::test]
+    async fn dispatch_tool_loop_untrusted_round_hides_tools_from_the_llm_request() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        let seen_tool_counts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        agent.provider = Arc::new(RwLock::new(Box::new(ToolVisibilityRecordingProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_name: "untrusted_visibility_cap".to_owned(),
+            seen_tool_counts: seen_tool_counts.clone(),
+        }) as Box<dyn Provider>));
+        agent
+            .capability_registry
+            .register(Arc::new(CountingUntrustedCap {
+                name: "untrusted_visibility_cap".to_owned(),
+                schema: serde_json::json!({}),
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }))
+            .expect("register untrusted_visibility_cap");
+
+        let resp = agent
+            .run_turn("trigger one untrusted round")
+            .await
+            .expect("run_turn must complete");
+        assert_eq!(resp, "done");
+
+        let counts = seen_tool_counts.lock().expect("mutex not poisoned");
+        assert_eq!(
+            *counts,
+            vec![1, 0],
+            "round 0 (initial) must see the 1 registered tool; round 1 (quarantined \
+             by round 0's untrusted result) must see ZERO tools in the LLM-facing \
+             request, not just have invoke() blocked"
         );
     }
 
