@@ -46,7 +46,7 @@ Três modos operacionais: (1) conversa por inferência nativa — Bastion possui
 
 **Ordem:** A-01/A-02 rodam em paralelo a M1 (são contrato+testes, não conflitam com inventário). A-03 em diante só depois de M2, pra nascerem na crate certa (`bastion-agent-runtime`).
 
-- [ ] **A-01** Contrato `AgentRuntime` + threat model: `start`/`resume`, `run_task`, eventos tipados, `steer`, `cancel`, status, timeout, workspace, sandbox, permission profile, approvals, usage, artefatos, correlação OTel.
+- [x] **A-01** Contrato `AgentRuntime` + threat model (draft em `docs/revamp/A-01-agentruntime-contract.md`): `start`/`resume`, `run_task`, eventos tipados, `steer`, `cancel`, status, timeout, workspace, sandbox, permission profile, approvals, usage, artefatos, correlação OTel.
 - [ ] **A-02** Conformance suite comum (antes dos adapters): start/resume/steer/cancel/timeout/queue/streaming/diff+artefatos/permission profile/restart+crash recovery/OTel/auth-profile ref + declaração honesta de quais ações passaram pelo registry vs. ocorreram no sandbox externo. Teste negativo: rejeita stdout humano/ANSI e adapter incompatível; falha do client não corrompe sessão Bastion.
 - [ ] **A-03** `CodexAppServerRuntime` nativo (Codex app-server): lifecycle, auth existente, sessões, eventos, steer/cancel, usage, artifacts.
 - [ ] **A-04** `AcpxAgentRuntime`: processo `acpx` supervisionado, JSON-RPC/NDJSON `json-strict`, version pin, health/doctor. Tipos/paths/lifecycle do acpx não vazam pra API pública; cliente ACP Rust pode substituí-lo depois sem mudar `BackendProfile`.
@@ -60,9 +60,9 @@ Três modos operacionais: (1) conversa por inferência nativa — Bastion possui
 
 Decisão: **sem validação ao vivo neste marco** — os débitos live herdados da v1.1 (UAT-01, FLUT-01, SO-05, canal externo) descem pra M7/uso real; UAT-02 morre absorvido pela Trilha A (A-08).
 
-- [ ] **M0-01** Tag imutável `v1.1.0-pre-revamp` + métricas baseline registradas: testes, tamanho de binário, startup, memória idle, tempo de turn, superfícies públicas.
-- [ ] **M0-02** Gate: checkout limpo; `cargo fmt --check` / `clippy -D warnings` / `cargo test` verdes; nenhum finding crítico aberto.
-- [ ] **M0-03** Inventário de legado: classificar tudo como `keep|move|shim|delete-later` (alimenta a limpeza do M6).
+- [x] **M0-01** Tag imutável `v1.1.0-pre-revamp` (→ 1528759) + métricas em `docs/revamp/BASELINE.md` (525 testes, binário 24MB ⚠️>20MB, 33k LOC, 283 pub).
+- [x] **M0-02** Gates verdes: fmt limpo, clippy exit 0 (future-incompat de dep anotado), 525 testes.
+- [x] **M0-03** Inventário `keep|move|shim|delete-later` em `docs/revamp/LEGACY-INVENTORY.md` (3 itens `?` pra resolver antes do M6).
 
 ## M1. Boundaries antes de mover código
 
