@@ -1,70 +1,108 @@
 # 🏰 Bastion
 
-> Self-hosted, privacy-first AI agent. Your personal Life OS — running entirely on your own machine.
+> Self-hosted, privacy-first AI agent runtime and personal agent — written in Rust.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**[Português](docs/pt-br/README.md)** · **[English](docs/en/README.md)**
+## Current status
 
----
+Bastion is a native Rust/Tokio daemon. The old OpenClaw/Python/Node v2 implementation is no longer present.
 
-Bastion is a self-hosted AI orchestrator built on [OpenClaw](https://openclaw.ai). It connects to the messaging apps you already use (Telegram, WhatsApp, Discord, Slack), routes conversations through the LLM provider of your choice, and organizes your life through **personas** — behavioral profiles for each area of your life.
+- **Branch:** v1.1 — Cognition, Connection & Hardening.
+- **Implementation observed:** commit 297841f, reconciled 2026-07-13.
+- **v1.0:** shipped in the repository history.
+- **v1.1:** phases 7–11 are code-complete; phase 12 live UAT plus the accumulated code/security review still gate release.
+- **Documentation authority:** .planning/PROJECT.md and .planning/REQUIREMENTS.md define intent; .planning/STATE.md records execution; this README summarizes observed code. Pending work lives in .planning/todos/pending/.
 
-Your data never leaves your machine. No subscriptions. No cloud lock-in.
+“Implemented” below means present and covered by repository tests. It does not imply live verification against every provider, channel account or audio device.
 
-## Quick Start
+## What Bastion does
 
-```bash
-bash <(curl -fsSL https://bastion.run/install)
-```
+Bastion hosts a longitudinal personal agent with multiple personas, persistent and contestable memory, tools, channels, proactive behavior and bounded autonomous execution. It is a host and agent runtime, not a workflow/DAG engine.
 
-Takes 5 minutes. You'll need Docker and two API keys:
-- **LLM** — OpenRouter, Anthropic, OpenAI, Gemini, or Groq (OpenRouter has free models)
-- **[Composio](https://composio.dev)** — for external integrations (Google Calendar, Notion, GitHub, etc.)
+One policy boundary, CapabilityRegistry::invoke, mediates every tool call. New behavior enters through traits, MCP servers, channels or extensions rather than rewrites of the agent loop.
 
-## How It Works
+## Implemented capabilities
 
-Bastion uses **personas** — each one is a specialized agent for a different area of your life (work, health, business, studies). When you send a message, Bastion automatically detects which persona should respond based on context and keywords.
+- **Agent runtime:** serialized Tokio daemon, tool loop, typed errors, SQLite WAL sessions and per-owner isolation.
+- **Providers:** Anthropic, OpenAI, Gemini, Groq, OpenRouter and Ollama, plus the current terminal-agent adapter; structured-output fallback and bounded provider fallback.
+- **Personas:** SOUL profiles, LLM routing, parallel execution and bounded Cabinet deliberation.
+- **Memory and learning:** contestable beliefs with provenance/privacy tiers, bi-temporal validity, Dream consolidation, Reflector procedural learning and contestable stigmergic autonomous mode.
+- **Tools and interoperability:** capability registry, MCP client, Bastion as an MCP server, portable seams and inference gateway for sidecars.
+- **Channels:** terminal, Telegram and webhook; WhatsApp, Discord, Slack, email and local voice are implemented in code but remain part of the phase-12 live-verification gate.
+- **Proactivity:** goals, heartbeat/event/idle triggers, cron scheduling and background learning.
+- **Mesh:** encrypted selective context/belief exchange with owner allowlists and fail-closed egress checks.
+- **Security:** authorization allowlists, privacy-tier egress, approval queue for destructive actions, untrusted-content spotlighting, capability quarantine, OAuth state protection and agent identity/card.
+- **Observability:** OpenTelemetry GenAI spans/events with stdout and OTLP sinks.
+- **Companion surface:** webhook/SSE APIs and the current companion/PokeDev clients; the revamp’s unified embedded Agent UI is planned, not claimed as complete.
 
-Each persona has its own memory, tone, and set of skills. They share a common life-log for cross-context recall.
+## Explicit non-features
 
-## Key Features
+- No OpenClaw, ClawHub, Node.js gateway or Python agent core.
+- No central DAG/workflow orchestrator.
+- No raw SQL tool path.
+- No commercial cloud control plane inside the OSS core.
+- No enterprise entity OCC, Redlock or business-object timeline; those belong to the enterprise host above the runtime.
+- No claim that code-only channel/provider support has passed phase-12 live UAT.
 
-- **Persona system** — separate agents per life area, with dynamic weight-based routing
-- **Life-log** — semantic memory with vector search (RAG) across all interactions
-- **Crisis mode** — emergency replanning algorithm that frees up Deep Work time
-- **Mobile app** — self-hosted iOS/Android app with secure JWT pairing
-- **Skill system** — extensible via bundled skills and the ClawHub marketplace
-- **TOTP auth** — every session requires a 6-digit code from your authenticator app
-- **Anti-injection** — all external content treated as data, never as instructions
+## Build and run
 
-## Stack
+Prerequisites: a Rust toolchain and configuration in bastion.toml/.env.
 
-- **Runtime**: OpenClaw (Node.js) + Docker + Caddy
-- **Skills**: Python 3 with Hypothesis property-based testing
-- **Mobile plugin**: TypeScript + Express + fast-check
-- **Memory**: SQLite with vector search (sqlite-vec)
-- **Security**: Sage plugin, TOTP, JWT, user allowlist
+~~~bash
+cargo build
+cargo test --workspace
+cargo run -- daemon
+~~~
 
-## Documentation
+Repository quality gates:
 
-- 🇧🇷 [Documentação em Português](docs/pt-br/README.md)
-- 🇺🇸 [English Documentation](docs/en/README.md)
-- 📐 [Architecture Blueprint](docs/BLUEPRINT.md)
+~~~bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --workspace
+~~~
+
+See AGENTS.md and .planning/codebase/ before changing code.
+
+## Architecture at a glance
+
+~~~text
+channels / CLI / companion
+          │
+      AgentHandle
+          │
+      AgentLoop
+  ┌───────┼────────┐
+personas  providers  hooks
+          │
+ CapabilityRegistry
+   ┌──────┼──────────┐
+  MCP   direct tools  extensions
+          │
+ SQLite memory/session + OTel
+~~~
+
+The stable integration surface is AgentLoop, CapabilityRegistry, TurnContextProvider, session storage and neutral OTel events.
 
 ## Roadmap
 
-| Status | Milestone |
-|--------|-----------|
-| ✅ | Bastion v1 — initial release |
-| ✅ | Bastion v2 — OpenClaw-based, mobile app, RAG, PBT |
-| 🔜 | Self-hosted mobile app (APK/IPA distribution) |
-| 🔜 | Token cost optimization and local LLM support |
-| 🔜 | Container isolation ([NanoClaw](https://github.com/qwibitai/nanoclaw)-inspired sandboxing) |
-| 🔜 | Installer improvements and self-hosted LLM automation |
-| 🔮 | Bastion v3 — [ZeroClaw](https://github.com/openagen/zeroclaw) Rust core + [memU](https://github.com/NevaMind-AI/memUBot) memory system |
-| 🔮 | Bastion Cloud — managed deployment for non-technical users |
+1. **Finish v1.1:** phase-12 live UAT, accumulated code/security review and release gates.
+2. **Bastion Core revamp:** extract stable Rust crates and host protocols without reducing the flagship Agent.
+3. **Bastion Agent:** preserve the personal product, embedded local/hosted UI, extensions/packs/loadouts and structured task runtimes.
+4. **Cloud readiness:** daemon lifecycle, health, volumes, secret references, import/export and auth hooks; the commercial cloud control plane remains external.
+5. **Community:** conformance-tested extensions and packs, clear permissions and a competitive feature cadence.
+
+Detailed private planning and product boundaries are maintained outside this public README; public implementation claims must remain verifiable in this repository.
+
+## Documentation
+
+- .planning/PROJECT.md — product intent and validated capabilities
+- .planning/REQUIREMENTS.md — current milestone requirements
+- .planning/STATE.md — execution state and gates
+- .planning/codebase/ — code-derived architecture
+- docs/pt-br/README.md and docs/en/README.md — archived v2 documentation until rewritten for the Rust runtime
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see LICENSE.
