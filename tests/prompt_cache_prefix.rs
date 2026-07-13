@@ -107,7 +107,7 @@ async fn make_agent(db_path: &str) -> (AgentLoop, SharedMemory) {
     let agent = AgentLoop::new(
         provider,
         SessionManager::new(db_path),
-        mcp,
+        Arc::new(bastion::mcp::McpToolSource::new(mcp)),
         session.create_session().await.expect("create_session 2"),
         10.0,
         Arc::new(PersonaResponder::new(make_registry())),
@@ -116,6 +116,7 @@ async fn make_agent(db_path: &str) -> (AgentLoop, SharedMemory) {
         vec![],
         db_path,
         Arc::new(bastion::eval::failure_sink::EvalFailureSink),
+        bastion::agent::default_context_providers(&memory),
     );
 
     (agent, memory)

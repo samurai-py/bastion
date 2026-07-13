@@ -1,12 +1,12 @@
-use crate::agent::command::{handle_command, CommandResources, CommandResult};
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
-use crate::agent::identity::IdentityProvider;
-use crate::agent::ports::{FailureSink, GoalPort, Responder, ToolSource, TurnContext, TurnKernel};
+use crate::agent::ports::{
+    CommandHandler, CommandResult, FailureSink, GoalPort, Responder, ToolSource, TurnContext,
+    TurnKernel,
+};
 use crate::hooks::egress::EgressHook;
 use crate::hooks::guardrails::InputGuardrail;
 use crate::hooks::output_validator::OutputValidator;
-use crate::mcp::{tool_source::McpToolSource, McpClient};
 use crate::memory::SharedMemory;
 use crate::provider::{call_with_retry, SharedProvider};
 use crate::session::SessionManager;
@@ -93,13 +93,22 @@ type FallbackResolverOverride =
     Box<dyn Fn(&str) -> anyhow::Result<Box<dyn crate::provider::Provider>> + Send + Sync>;
 
 impl AgentLoop {
-    // Wires 8 independent subsystems (provider, session, mcp, registry, memory, goals…).
+    // Wires 8 independent subsystems (provider, session, tool source, memory, goals…).
     // A params struct would just be a one-call-site bag — no shared shape to extract.
+    //
+    // M2 step 3b (D2): the constructor is now pure kernel wiring. It receives the
+    // `ToolSource` port already built (instead of a concrete `Arc<McpClient>` it
+    // used to wrap itself) and the SEAM #2 `context_providers` already composed
+    // (instead of instantiating Identity/MemoryRag/ProceduralBelief providers —
+    // cognition — inline). Populating `capability_registry` from connected MCP
+    // tools is MCP logic and moved VERBATIM to
+    // `mcp::registry_setup::register_mcp_tools`, called by the composition root
+    // (`main.rs`) right after this constructor, against the same registry.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: SharedProvider,
         session: SessionManager,
-        mcp: Arc<McpClient>,
+        tool_source: Arc<dyn ToolSource>,
         session_id: String,
         daily_budget_usd: f64,
         responder: Arc<dyn Responder>,
@@ -108,17 +117,10 @@ impl AgentLoop {
         fallback_models: Vec<String>,
         db_path: &str,
         failure_sink: Arc<dyn FailureSink>,
+        context_providers: Vec<Box<dyn TurnContextProvider>>,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
-        // BIG-1 (Gap 2): McpClient is shared by-Arc so each McpToolAdapter can hold a
-        // reference and route tool calls through capability_registry.invoke. Callers
-        // (main.rs) share this SAME Arc with other product-level MCP consumers
-        // (e.g. the Reflector's directly-registered McpToolAdapter) — never a
-        // second connection.
-        // P3 `ToolSource` port: wraps the SAME Arc<McpClient> shared with the
-        // McpToolAdapters registered into capability_registry below.
-        let tool_source: Arc<dyn ToolSource> = Arc::new(McpToolSource::new(mcp.clone()));
-        let mut agent = Self {
+        Self {
             provider,
             session,
             tool_source,
@@ -137,7 +139,7 @@ impl AgentLoop {
             capability_registry: crate::capability::CapabilityRegistry::new().with_approval_queue(
                 Arc::new(crate::capability::approval::ApprovalQueue::new(db_path)),
             ),
-            context_providers: vec![],
+            context_providers,
             pending_tx,
             pending_rx: Some(pending_rx),
             forced_persona: None,
@@ -145,109 +147,7 @@ impl AgentLoop {
             failure_sink,
             #[cfg(test)]
             fallback_resolver_override: None,
-        };
-        // M1: registrar IdentityProvider para injeção do bloco de identidade via SEAM #2.
-        // No primeiro uso retorna o ONBOARDING_PROMPT; nos subsequentes retorna o bloco gravado.
-        agent
-            .context_providers
-            .push(Box::new(IdentityProvider::new(agent.memory.clone())));
-
-        // SEAM #2 — MemoryRagProvider: recall de beliefs por injeção (perna "RAG" do
-        // BIG-1, decisão de híbrido ainda pendente → opt-in). Funciona com qualquer
-        // provider — incluindo terminal-agents (PROV-09) que nunca emitem tool_calls —
-        // e é egress-safe: blocos separados por tier, build_system_prompt derruba
-        // por bloco. Default-off porque providers com function-calling já recebem as
-        // tools de memória (injetar também duplicaria exposição e cresce o prompt).
-        let memory_rag_on = std::env::var("BASTION_MEMORY_RAG")
-            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        if memory_rag_on {
-            agent.context_providers.push(Box::new(
-                crate::agent::memory_rag::MemoryRagProvider::new(agent.memory.clone()),
-            ));
-            tracing::info!(event = "memory_rag_enabled");
         }
-
-        // LEARN-03 — ProceduralBeliefProvider: recall de beliefs PROCEDURAIS (kind=
-        // 'procedural') por injeção de contexto, mesma mecânica de MemoryRagProvider
-        // (tier-split, egress-safe por bloco). Always-on (não gated por env, ao
-        // contrário do BASTION_MEMORY_RAG acima): procedural é entregável de primeira
-        // classe da Fase 7, não uma perna experimental do RAG híbrido do BIG-1.
-        agent.context_providers.push(Box::new(
-            crate::agent::procedural::ProceduralBeliefProvider::new(agent.memory.clone()),
-        ));
-        tracing::info!(event = "procedural_belief_provider_enabled");
-
-        // BIG-1 (Gap 2): populate the capability_registry from every connected MCP tool.
-        // Without this the registry stays empty, list_tool_defs() returns [] (so the normal
-        // persona path offers ZERO tools to the LLM), and the is_empty() fast-path in
-        // dispatch_tool_loop bypasses the egress/approval gate. Registering one McpToolAdapter
-        // per tool makes ALL tool calls flow through capability_registry.invoke (D-13).
-        // Snapshot tool metadata first (owned) so the mcp borrow is released before we
-        // mutably borrow agent.capability_registry.
-        let mcp_tools: Vec<(String, String, serde_json::Value, String, bool, bool, bool)> = mcp
-            .registry()
-            .list_tool_names()
-            .iter()
-            .map(|name| {
-                let server_label = mcp.registry().server_for(name).unwrap_or("").to_string();
-                let schema = mcp
-                    .registry()
-                    .get_tool_schema(name)
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-                let description = mcp
-                    .registry()
-                    .get_tool_description(name)
-                    .unwrap_or("")
-                    .to_string();
-                // Plan 10-08: the load-bearing lookup — any tool whose owning MCP
-                // server is config-flagged `is_local = true` (e.g. the voice sidecar,
-                // Plan 10-03/10-09's `[mcp.servers.voice]`) is automatically registered
-                // as a local capability below, with zero tool-name string matching.
-                let is_local = mcp.registry().is_local(name);
-                // Plan 11-04: the load-bearing lookup — a tool whose own MCP server
-                // self-reported `ToolAnnotations.destructive_hint` (or omitted it,
-                // fail-cautious) is automatically registered as needing owner
-                // approval below, with zero tool-name string matching. `trusted`
-                // mirrors `is_local`'s threading, sourced from the owning server's
-                // `McpServerEntry.trusted` config.
-                let needs_approval = mcp.registry().needs_approval(name);
-                let trusted = mcp.registry().is_trusted(name);
-                (
-                    name.to_string(),
-                    server_label,
-                    schema,
-                    description,
-                    is_local,
-                    needs_approval,
-                    trusted,
-                )
-            })
-            .collect();
-        for (tool_name, server_label, schema, description, is_local, needs_approval, trusted) in
-            mcp_tools
-        {
-            let adapter = crate::capability::McpToolAdapter {
-                tool_name: tool_name.clone(),
-                server_label,
-                description,
-                schema,
-                mcp: mcp.clone(),
-                is_local_override: is_local,
-                needs_approval_override: needs_approval,
-                trusted_override: trusted,
-            };
-            if let Err(e) = agent.capability_registry.register(Arc::new(adapter)) {
-                tracing::warn!(event = "mcp_capability_register_failed", tool = %tool_name, err = %e);
-            }
-        }
-        let registered = agent.capability_registry.list_tool_defs().len();
-        tracing::info!(
-            event = "capability_registry_populated",
-            mcp_tools = registered
-        );
-
-        agent
     }
 
     /// P5 despejo (M2): generic SEAM #2 registration, used after `AgentLoop::new()`
@@ -1421,32 +1321,29 @@ impl AgentLoop {
         Ok(final_text)
     }
 
-    /// P5 despejo (M2): `otc_store`/`composio_oauth` are no longer `AgentLoop`
-    /// fields (product/UX concepts, not kernel state — the kernel never knew
-    /// what OTC pairing or Composio OAuth are). The caller composes a
-    /// `CommandResources` (today: `main.rs::daemon_loop`) and passes it per call.
-    ///
-    /// P1 `Responder` (M2): `registry` moved into the `Responder`'s own field
-    /// (the kernel no longer holds `AgentLoop.registry`), so `/as`/`/cabinet`
-    /// name-validation — which lives in `command::handle_command`, not the
-    /// Responder — reads its own handle from `resources.registry` instead.
+    /// P6 `CommandHandler` port (M2 step 3b, D3): the kernel no longer names
+    /// `agent::command` at all. The caller composes a concrete handler (today:
+    /// `agent::command::CockpitCommandHandler` built in `main.rs::daemon_loop`,
+    /// closing over the product-level `CommandResources` — OTC store, Composio
+    /// OAuth, `PersonaRegistry`) and passes it per call, exactly like the
+    /// `&CommandResources` argument it replaces. This wrapper hands the handler
+    /// the kernel-side state the old free-function call forwarded: `provider`,
+    /// `memory`, and `&mut forced_persona`.
     pub async fn handle_command(
         &mut self,
         input: &str,
         owner: &str,
-        resources: &CommandResources,
+        handler: &dyn CommandHandler,
     ) -> anyhow::Result<CommandResult> {
-        handle_command(
-            input,
-            &self.provider,
-            &resources.registry,
-            &self.memory,
-            &mut self.forced_persona,
-            resources.otc_store.as_ref(),
-            resources.composio_oauth.as_deref(),
-            owner,
-        )
-        .await
+        handler
+            .handle(
+                input,
+                &self.provider,
+                &self.memory,
+                &mut self.forced_persona,
+                owner,
+            )
+            .await
     }
 
     /// Drain an `AgentHandle` receiver, serializing channel messages through `run_turn_for`.
@@ -1798,7 +1695,7 @@ mod tests {
 
         // connect_all with non-existent path returns empty client (load_mcp_config returns {})
         let mcp = Arc::new(
-            McpClient::connect_all("nonexistent_mcp.json")
+            crate::mcp::McpClient::connect_all("nonexistent_mcp.json")
                 .await
                 .expect("connect_all empty"),
         );
@@ -1806,15 +1703,16 @@ mod tests {
         AgentLoop::new(
             make_provider("TestPersona"),
             session,
-            mcp,
+            Arc::new(crate::mcp::McpToolSource::new(mcp)),
             session_id,
             10.0,
             Arc::new(PersonaResponder::new(make_registry("TestPersona"))),
-            memory,
+            memory.clone(),
             Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
             vec![],
             db_path,
             Arc::new(crate::eval::failure_sink::EvalFailureSink),
+            crate::agent::default_context_providers(&memory),
         )
     }
 
@@ -2288,7 +2186,7 @@ mod tests {
             Box::new(SqliteMemory::new(&path)) as Box<dyn crate::memory::Memory>
         ));
         let mcp = Arc::new(
-            McpClient::connect_all("nonexistent_mcp.json")
+            crate::mcp::McpClient::connect_all("nonexistent_mcp.json")
                 .await
                 .expect("connect_all empty"),
         );
@@ -2314,15 +2212,16 @@ mod tests {
         let mut agent = AgentLoop::new(
             provider,
             session,
-            mcp,
+            Arc::new(crate::mcp::McpToolSource::new(mcp)),
             session_id,
             10.0,
             Arc::new(PersonaResponder::new(registry)),
-            memory,
+            memory.clone(),
             Some(Arc::new(GoalEngine::new(&path, ScoringConfig::default()))),
             vec![],
             &path,
             Arc::new(crate::eval::failure_sink::EvalFailureSink),
+            crate::agent::default_context_providers(&memory),
         );
 
         // CloudOk persona + cloud provider: the multi-round tool loop must complete,

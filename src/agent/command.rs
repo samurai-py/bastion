@@ -40,13 +40,52 @@ pub struct CommandResources {
     pub registry: PersonaRegistry,
 }
 
-pub enum CommandResult {
-    /// Carries the user-facing text — the stdin console prints it, the webhook
-    /// channel (WEB-CMD-01) puts it straight in the JSON reply. Neither path
-    /// duplicates formatting logic; this function is the only place that builds it.
-    Handled(String),
-    Stop,
-    Unknown(String),
+/// Moved to `agent::ports::CommandResult` (M2 step 3b, D3 — it is the type
+/// the kernel's `CommandHandler` port returns). Re-exported here so every
+/// existing `agent::command::CommandResult` path keeps compiling unchanged.
+pub use crate::agent::ports::CommandResult;
+
+/// P6 `CommandHandler` implementation — the product cockpit (M2 step 3b, D3).
+///
+/// Closes over the product-level [`CommandResources`] (OTC pairing store,
+/// Composio OAuth client, `PersonaRegistry` handle) at construction in the
+/// composition root (`main.rs::daemon_loop`, after the webhook-gated block
+/// populates `otc_store`/`composio_oauth` — the same values the per-call
+/// `&CommandResources` argument used to carry). The kernel loop only ever
+/// sees the `CommandHandler` trait object.
+pub struct CockpitCommandHandler {
+    resources: CommandResources,
+}
+
+impl CockpitCommandHandler {
+    /// Wrap fully-populated command resources.
+    pub fn new(resources: CommandResources) -> Self {
+        Self { resources }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::ports::CommandHandler for CockpitCommandHandler {
+    async fn handle(
+        &self,
+        input: &str,
+        provider: &SharedProvider,
+        memory: &SharedMemory,
+        forced_persona: &mut Option<String>,
+        owner: &str,
+    ) -> anyhow::Result<CommandResult> {
+        handle_command(
+            input,
+            provider,
+            &self.resources.registry,
+            memory,
+            forced_persona,
+            self.resources.otc_store.as_ref(),
+            self.resources.composio_oauth.as_deref(),
+            owner,
+        )
+        .await
+    }
 }
 
 /// CR-02: generate an unguessable one-time pairing code, e.g. `BAST-7K2M-9QXR`.

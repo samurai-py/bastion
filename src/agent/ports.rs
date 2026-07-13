@@ -78,6 +78,52 @@ pub trait GoalPort: Send + Sync {
     async fn list_goals(&self, owner_id: &str) -> anyhow::Result<Vec<Goal>>;
 }
 
+/// The result of dispatching one slash command. Moved VERBATIM from
+/// `agent/command.rs` (M2 step 3b, decision D3): it is the type the kernel's
+/// `AgentLoop::handle_command` wrapper returns, so it lives with the port;
+/// `agent::command` re-exports it so every existing path keeps compiling.
+pub enum CommandResult {
+    /// Carries the user-facing text — the stdin console prints it, the webhook
+    /// channel (WEB-CMD-01) puts it straight in the JSON reply. Neither path
+    /// duplicates formatting logic; this function is the only place that builds it.
+    Handled(String),
+    Stop,
+    Unknown(String),
+}
+
+/// P6 `CommandHandler` — cockpit/slash-command dispatch (M2 step 3b, D3).
+///
+/// Absorbs the loop's dependency on `agent::command::{handle_command,
+/// CommandResources}` (product/UX: OTC pairing store, Composio OAuth,
+/// `PersonaRegistry` for `/as` and `/cabinet` validation). The kernel wrapper
+/// (`AgentLoop::handle_command`) hands the handler exactly the kernel state
+/// the old free-function call forwarded — `provider`, `memory`,
+/// `&mut forced_persona` — and the concrete implementation
+/// (`agent::command::CockpitCommandHandler`) closes over the product-level
+/// `CommandResources` at construction in the composition root (`main.rs`).
+///
+/// Divergence from the design sketch (documented, not silent): the sketch
+/// proposed `handle(&self, input, owner, session_id) ->
+/// Result<Option<CommandOutcome>>`. The real wrapper passes no `session_id`,
+/// and "not a command" is already an in-band [`CommandResult::Unknown`]
+/// variant (callers pre-filter on a leading `/` before ever calling), so this
+/// signature mirrors the existing wrapper exactly — same semantics, no new
+/// `Option` layer.
+#[async_trait::async_trait]
+pub trait CommandHandler: Send + Sync {
+    /// Dispatch one slash command. The argument list mirrors what the loop's
+    /// wrapper forwarded to `agent::command::handle_command` (kernel-side
+    /// state only — product resources live inside the implementation).
+    async fn handle(
+        &self,
+        input: &str,
+        provider: &SharedProvider,
+        memory: &crate::memory::SharedMemory,
+        forced_persona: &mut Option<String>,
+        owner: &str,
+    ) -> anyhow::Result<CommandResult>;
+}
+
 /// P1 — narrow kernel capability handle exposed to a [`Responder`] via
 /// [`TurnContext`].
 ///

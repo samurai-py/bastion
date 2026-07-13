@@ -1,6 +1,7 @@
 pub mod client;
 pub mod oauth;
 pub mod registry;
+pub mod registry_setup;
 pub mod server;
 pub mod tool_source;
 pub use client::McpClient;

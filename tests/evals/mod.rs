@@ -957,17 +957,18 @@ async fn cli_session_deterministic_across_turns() {
     let mut agent = AgentLoop::new(
         provider,
         SessionManager::new(&path),
-        mcp,
+        SArc::new(bastion::mcp::McpToolSource::new(mcp)),
         new_sess.clone(),
         10.0,
         SArc::new(PersonaResponder::new(PersonaRegistry::new_from_map(
             personas,
         ))),
-        memory,
+        memory.clone(),
         Some(SArc::new(GoalEngine::new(&path, ScoringConfig::default()))),
         vec![],
         &path,
         SArc::new(bastion::eval::failure_sink::EvalFailureSink),
+        bastion::agent::default_context_providers(&memory),
     );
 
     // Two consecutive CLI turns — both must succeed.

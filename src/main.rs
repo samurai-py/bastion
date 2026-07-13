@@ -231,10 +231,18 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
+    // M2 step 3b (D2): the composition root builds the `ToolSource` port and
+    // the SEAM #2 context providers, and populates the capability registry
+    // from the connected MCP tools — the kernel constructor no longer does any
+    // of this itself.
+    // P3 `ToolSource` port: wraps the SAME Arc<McpClient> shared with the
+    // McpToolAdapters registered into capability_registry below.
+    let tool_source: std::sync::Arc<dyn bastion::agent::ports::ToolSource> =
+        std::sync::Arc::new(bastion::mcp::McpToolSource::new(mcp_client.clone()));
     let mut agent = AgentLoop::new(
         provider.clone(),
         session,
-        mcp_client,
+        tool_source,
         session_id,
         daily_budget,
         responder,
@@ -243,7 +251,11 @@ async fn main() -> anyhow::Result<()> {
         cfg.agent.fallback_models.clone(),
         &db_path,
         std::sync::Arc::new(bastion::eval::failure_sink::EvalFailureSink),
+        bastion::agent::default_context_providers(&memory),
     );
+    // BIG-1 (Gap 2): one McpToolAdapter per connected MCP tool, into the SAME
+    // registry instance the loop owns (moved verbatim out of `AgentLoop::new`).
+    bastion::mcp::registry_setup::register_mcp_tools(&mut agent.capability_registry, &mcp_client);
 
     match cli.command {
         Command::Agent { message } => {
@@ -881,6 +893,14 @@ async fn daemon_loop(
     // with a small fixed set of owners (T-05-02-03 accepted risk).
     let mut session_locks: HashMap<String, Arc<Mutex<()>>> = HashMap::new();
 
+    // M2 step 3b (D3): the P6 `CommandHandler` implementation, built AFTER the
+    // webhook-gated block above (the only place that ever populates
+    // `command_resources.otc_store`/`.composio_oauth`) so it closes over the
+    // fully-populated resources — the same values the per-call
+    // `&command_resources` argument used to carry into `agent.handle_command`.
+    let command_handler =
+        bastion::agent::command::CockpitCommandHandler::new(command_resources.clone());
+
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
     // In a detached container (`docker compose up -d`) stdin is closed and returns EOF
     // immediately. The daemon must keep running to serve channels (Telegram), so we track
@@ -907,7 +927,7 @@ async fn daemon_loop(
                             .handle_command(
                                 s.trim(),
                                 bastion::agent::loop_::DEFAULT_OWNER,
-                                &command_resources,
+                                &command_handler,
                             )
                             .await?
                         {
@@ -978,7 +998,7 @@ async fn daemon_loop(
                     Ok(format!("{cmd} is console-only — not allowed remotely."))
                 } else if command_token.is_some() {
                     match agent
-                        .handle_command(trimmed, &req.owner, &command_resources)
+                        .handle_command(trimmed, &req.owner, &command_handler)
                         .await
                     {
                         Ok(CommandResult::Handled(msg)) => Ok(msg),
