@@ -464,6 +464,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bastion-memory",
  "bastion-runtime",
  "bastion-types",
  "chrono",
@@ -516,6 +517,20 @@ dependencies = [
  "tracing-test",
  "unicode-width",
  "url",
+]
+
+[[package]]
+name = "bastion-memory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bastion-runtime",
+ "bastion-types",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

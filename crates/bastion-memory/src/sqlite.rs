@@ -1,6 +1,4 @@
-use crate::memory::{
-    Belief, BeliefDraft, BeliefKind, Memory, Outcome, PendingCorrection, PrivacyTier,
-};
+use crate::{Belief, BeliefDraft, BeliefKind, Memory, Outcome, PendingCorrection, PrivacyTier};
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -539,8 +537,8 @@ impl Memory for SqliteMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::Memory;
-    use crate::session::sqlite::SessionManager;
+    use crate::Memory;
+    use bastion_runtime::session::sqlite::SessionManager;
     use tempfile::NamedTempFile;
 
     async fn make_db() -> (NamedTempFile, SqliteMemory) {
@@ -789,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_privacy_tier_deserialize() {
-        use crate::memory::PrivacyTier;
+        use crate::PrivacyTier;
         // serde kebab-case: "local-only" and "cloud-ok"
         let t: PrivacyTier = serde_json::from_str("\"local-only\"").expect("local-only");
         assert_eq!(t, PrivacyTier::LocalOnly);
@@ -797,134 +795,20 @@ mod tests {
         assert_eq!(t2, PrivacyTier::CloudOk);
     }
 
-    #[tokio::test]
-    async fn test_tier_persists_and_survives_filter_for_mesh() {
-        use crate::memory::PrivacyTier;
-        use crate::mesh::allowlist::{filter_for_mesh, OwnerAllowlist};
-
-        let (_f, mem) = make_db().await;
-
-        // Store a CloudOk belief with a tag in the allowlist
-        mem.store_belief(
-            "owner1",
-            Some("mercado"),
-            "Alice spends 2k/month on groceries",
-            "sess1",
-            "user",
-            false,
-            Some(PrivacyTier::CloudOk),
-        )
-        .await
-        .expect("store cloud-ok belief");
-
-        // Store a LocalOnly belief — should be stripped
-        mem.store_belief(
-            "owner1",
-            Some("mercado"),
-            "Alice's bank password",
-            "sess2",
-            "user",
-            false,
-            Some(PrivacyTier::LocalOnly),
-        )
-        .await
-        .expect("store local-only belief");
-
-        // Retrieve from real DB (not hand-built Beliefs)
-        let beliefs = mem
-            .retrieve_tagged("owner1", Some("mercado"))
-            .await
-            .expect("retrieve");
-        assert_eq!(beliefs.len(), 2, "both beliefs should be retrieved");
-
-        // filter_for_mesh with allowlist that includes 'mercado'
-        let allowlist = OwnerAllowlist {
-            owner_id: "owner1".to_string(),
-            allowed_tags: vec!["mercado".to_string()],
-        };
-        let passed = filter_for_mesh(beliefs, &allowlist);
-
-        // Only CloudOk belief survives
-        assert_eq!(
-            passed.len(),
-            1,
-            "only CloudOk belief must survive filter_for_mesh"
-        );
-        assert_eq!(passed[0].content, "Alice spends 2k/month on groceries");
-        assert_eq!(passed[0].tier, Some(PrivacyTier::CloudOk));
-    }
-
-    #[tokio::test]
-    async fn test_procedural_kind_tier_persists_and_survives_filter_for_mesh() {
-        use crate::memory::{BeliefDraft, BeliefKind};
-        use crate::mesh::allowlist::{filter_for_mesh, OwnerAllowlist};
-
-        let (_f, mem) = make_db().await;
-
-        // Store a CloudOk procedural belief with a tag in the allowlist
-        mem.store_procedural_belief(BeliefDraft {
-            owner_id: "owner1".to_string(),
-            persona_tag: Some("mercado".to_string()),
-            issue: Some("Overspending on groceries".to_string()),
-            insight: "Alice spends 2k/month on groceries".to_string(),
-            keywords: vec!["budget".to_string()],
-            session_id: "sess1".to_string(),
-            source: "reflector".to_string(),
-            tier: Some(PrivacyTier::CloudOk),
-        })
-        .await
-        .expect("store cloud-ok procedural belief");
-
-        // Store a LocalOnly procedural belief — should be stripped
-        mem.store_procedural_belief(BeliefDraft {
-            owner_id: "owner1".to_string(),
-            persona_tag: Some("mercado".to_string()),
-            issue: Some("Sensitive info".to_string()),
-            insight: "Alice's bank password".to_string(),
-            keywords: vec!["secret".to_string()],
-            session_id: "sess2".to_string(),
-            source: "reflector".to_string(),
-            tier: Some(PrivacyTier::LocalOnly),
-        })
-        .await
-        .expect("store local-only procedural belief");
-
-        // Retrieve from real DB (not hand-built Beliefs)
-        let beliefs = mem
-            .retrieve_tagged("owner1", Some("mercado"))
-            .await
-            .expect("retrieve");
-        assert_eq!(beliefs.len(), 2, "both beliefs should be retrieved");
-        assert!(
-            beliefs.iter().all(|b| b.kind == BeliefKind::Procedural),
-            "both retrieved beliefs must decode as Procedural"
-        );
-
-        // filter_for_mesh with allowlist that includes 'mercado'
-        let allowlist = OwnerAllowlist {
-            owner_id: "owner1".to_string(),
-            allowed_tags: vec!["mercado".to_string()],
-        };
-        let passed = filter_for_mesh(beliefs, &allowlist);
-
-        // Only CloudOk belief survives
-        assert_eq!(
-            passed.len(),
-            1,
-            "only CloudOk procedural belief must survive filter_for_mesh"
-        );
-        assert_eq!(passed[0].content, "Alice spends 2k/month on groceries");
-        assert_eq!(passed[0].tier, Some(PrivacyTier::CloudOk));
-        assert_eq!(
-            passed[0].kind,
-            BeliefKind::Procedural,
-            "kind must survive retrieve_tagged -> filter_for_mesh unchanged"
-        );
-    }
+    // NOTE (M2 step 4 — bastion-memory extraction): the two
+    // `test_*_tier_persists_and_survives_filter_for_mesh` tests that used to live here
+    // exercised `SqliteMemory` together with `mesh::allowlist::filter_for_mesh` — a
+    // cross-cutting integration test between the memory backend and the mesh privacy
+    // filter, not a memory-only unit test. `bastion-memory` cannot depend on `mesh`
+    // (mesh stays in the app / becomes `bastion-mesh` in M2 step 5, extracted AFTER
+    // memory — that would be a back-edge). Rather than inverting `filter_for_mesh`'s
+    // signature for two tests with no production caller, the tests moved verbatim to
+    // `src/mesh/allowlist.rs`, which already legally depends on both. Test count is
+    // unchanged, just relocated.
 
     #[tokio::test]
     async fn test_store_procedural_belief_round_trip() {
-        use crate::memory::{BeliefDraft, BeliefKind};
+        use crate::{BeliefDraft, BeliefKind};
 
         let (_f, mem) = make_db().await;
         let draft = BeliefDraft {
@@ -967,7 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_legacy_store_belief_defaults_kind_factual() {
-        use crate::memory::BeliefKind;
+        use crate::BeliefKind;
 
         // OLD store_belief call shape (unchanged signature, Phase 1-6 behavior) —
         // proves the additive migration is invisible to existing callers.
@@ -1000,7 +884,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_belief_outcome_increments_exactly_one_counter() {
-        use crate::memory::Outcome;
+        use crate::Outcome;
 
         let (_f, mem) = make_db().await;
         let id = mem
@@ -1037,7 +921,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_belief_outcome_cross_owner_errors() {
-        use crate::memory::Outcome;
+        use crate::Outcome;
 
         // IDOR guard: owner2 cannot record an outcome on owner1's belief.
         let (_f, mem) = make_db().await;
@@ -1144,7 +1028,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_pending_correction_rejects_cross_owner_belief() {
-        use crate::memory::BeliefDraft;
+        use crate::BeliefDraft;
         let (_f, mem) = make_db().await;
         // alice owns a procedural belief.
         let alice_belief = mem
