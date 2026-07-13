@@ -969,6 +969,11 @@ async fn cli_session_deterministic_across_turns() {
         &path,
         SArc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
+        SArc::new(bastion::provider::registry::RegistryProviderResolver),
+        Some(SArc::new(bastion::agent::dream::DreamFlush::new(
+            memory.clone(),
+        ))),
+        Some(SArc::new(bastion::agent::skills::SkillReloadObserver)),
     );
 
     // Two consecutive CLI turns — both must succeed.

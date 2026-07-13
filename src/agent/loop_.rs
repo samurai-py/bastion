@@ -1,8 +1,8 @@
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::ports::{
-    CommandHandler, CommandResult, FailureSink, GoalPort, Responder, ToolSource, TurnContext,
-    TurnKernel,
+    CommandHandler, CommandResult, FailureSink, GoalPort, PreCompactionFlush, ProviderResolver,
+    Responder, ToolResultObserver, ToolSource, TurnContext, TurnKernel,
 };
 use crate::hooks::egress::EgressHook;
 use crate::hooks::guardrails::InputGuardrail;
@@ -77,20 +77,23 @@ pub struct AgentLoop {
     /// `PrivacyEgressBlocked` arm). Injected at construction — the kernel no
     /// longer names `crate::eval` directly.
     pub failure_sink: Arc<dyn FailureSink>,
-    /// Test-only seam (mirrors `#[cfg(test)] pub async fn drain_handle` below): lets unit
-    /// tests inject a scripted `Provider` for the fallback ladder's provider-switch rung
-    /// instead of a real, network/credential-backed one from `registry::resolve_provider`.
-    /// Always `None` outside test builds — production always resolves through the real
-    /// registry; this field does not exist in non-test compilations.
-    #[cfg(test)]
-    fallback_resolver_override: Option<FallbackResolverOverride>,
+    /// A3 `ProviderResolver` port (M2 step 3b): resolves a fallback-ladder
+    /// candidate model name to a live `Provider` (D-10 rung 3). Production
+    /// injects the registry-backed implementation
+    /// (`provider::registry::RegistryProviderResolver`); unit tests inject a
+    /// scripted resolver through this SAME field — it replaces the old
+    /// `#[cfg(test)] fallback_resolver_override` seam entirely.
+    pub provider_resolver: Arc<dyn ProviderResolver>,
+    /// A1 `PreCompactionFlush` port (M2 step 3b, MEM-09): flushed right before
+    /// `AutoCompact::compact`. `None` = no flush configured; production
+    /// injects `agent::dream::DreamFlush` (which closes over the memory).
+    pub pre_compaction_flush: Option<Arc<dyn PreCompactionFlush>>,
+    /// A2 `ToolResultObserver` port (M2 step 3b, D-06/Gap 1): consulted on
+    /// every tool result on both dispatch paths (where `handle_skill_reload`
+    /// used to be called). `None` = no observer; production injects
+    /// `agent::skills::SkillReloadObserver`.
+    pub tool_result_observer: Option<Arc<dyn ToolResultObserver>>,
 }
-
-/// Test-only alias for the scripted-provider-resolution closure type (keeps the
-/// `fallback_resolver_override` field declaration under clippy's type-complexity limit).
-#[cfg(test)]
-type FallbackResolverOverride =
-    Box<dyn Fn(&str) -> anyhow::Result<Box<dyn crate::provider::Provider>> + Send + Sync>;
 
 impl AgentLoop {
     // Wires 8 independent subsystems (provider, session, tool source, memory, goals…).
@@ -118,6 +121,9 @@ impl AgentLoop {
         db_path: &str,
         failure_sink: Arc<dyn FailureSink>,
         context_providers: Vec<Box<dyn TurnContextProvider>>,
+        provider_resolver: Arc<dyn ProviderResolver>,
+        pre_compaction_flush: Option<Arc<dyn PreCompactionFlush>>,
+        tool_result_observer: Option<Arc<dyn ToolResultObserver>>,
     ) -> Self {
         let (pending_tx, pending_rx) = mpsc::channel(32);
         Self {
@@ -145,8 +151,9 @@ impl AgentLoop {
             forced_persona: None,
             fallback_models,
             failure_sink,
-            #[cfg(test)]
-            fallback_resolver_override: None,
+            provider_resolver,
+            pre_compaction_flush,
+            tool_result_observer,
         }
     }
 
@@ -528,8 +535,16 @@ impl AgentLoop {
         let used_tokens: u32 = AutoCompact::estimate_tokens(&history);
         let context_limit = self.provider.read().await.context_limit();
         if self.compactor.needs_compaction(used_tokens, context_limit) {
-            // MEM-09: flush distilled beliefs to memory before compacting
-            crate::agent::dream::memory_flush(&history, &self.memory, owner).await;
+            // MEM-09: flush distilled beliefs to memory before compacting.
+            // A1 `PreCompactionFlush` port (M2 step 3b) — the concrete
+            // `DreamFlush` swallows its own errors exactly like the old
+            // direct `dream::memory_flush` call did; a port-level error is
+            // logged and never aborts the turn (same contract).
+            if let Some(flush) = &self.pre_compaction_flush {
+                if let Err(e) = flush.flush(&history, owner).await {
+                    tracing::warn!(event = "pre_compaction_flush_error", error = %e);
+                }
+            }
 
             let provider_ref = self.provider.read().await;
             history = self
@@ -620,100 +635,6 @@ impl AgentLoop {
         turn_span.end();
 
         Ok(final_text)
-    }
-
-    /// D-06: handle the `skill_reloaded` signal emitted by the skill-writer
-    /// container after a skill is created/updated by natural language.
-    ///
-    /// Gap 1 fix: this was previously inline in `run_provider_fallback` only,
-    /// which is unreachable on normal persona turns — so skill-writer-by-NL never
-    /// reloaded in normal conversation. Extracted into a shared helper called by
-    /// BOTH `run_provider_fallback` and `dispatch_tool_loop`, so the skill becomes
-    /// available on the very next turn regardless of which path produced it.
-    ///
-    /// Synchronous (no awaits): `SkillsLoader::rescan` and the path checks are sync.
-    fn handle_skill_reload(&self, result: &serde_json::Value) {
-        // CR-02 path-safety: rebase skill_path to core's own SKILLS_DIR —
-        // skill-writer returns /skills/<name>/SKILL.md (its container path).
-        if result.get("skill_reloaded").and_then(|v| v.as_bool()) == Some(true) {
-            if let Some(raw_path) = result.get("skill_path").and_then(|v| v.as_str()) {
-                let skills_dir =
-                    std::env::var("SKILLS_DIR").unwrap_or_else(|_| "/skills".to_string());
-                // SEC: skill_path crosses the skill-writer→core container trust
-                // boundary. Keep ONLY Normal components — discarding RootDir,
-                // Prefix, CurDir and ParentDir ("..") — so a malicious segment
-                // cannot escape SKILLS_DIR.
-                let normals: Vec<std::path::PathBuf> = std::path::Path::new(raw_path)
-                    .components()
-                    .filter_map(|c| match c {
-                        std::path::Component::Normal(s) => Some(std::path::PathBuf::from(s)),
-                        _ => None,
-                    })
-                    .collect();
-                let skills_base = std::path::Path::new(&skills_dir);
-                // Strip the shared skills-base prefix and keep the FULL relative
-                // remainder (e.g. "personas/<slug>/<name>/SKILL.md" for private
-                // skills). Taking only the last two components would drop the
-                // personas/<slug>/ segment and rescan the wrong slot (WR-01).
-                let base_norm_count = skills_base
-                    .components()
-                    .filter(|c| matches!(c, std::path::Component::Normal(_)))
-                    .count();
-                let tail_components: Vec<std::path::PathBuf> = if normals.len() > base_norm_count {
-                    normals[base_norm_count..].to_vec()
-                } else {
-                    normals.clone()
-                };
-                // Require the reload target to be <name>/SKILL.md (at least two
-                // components, ending in SKILL.md) — guards the format coupling.
-                let last_is_skill_md =
-                    tail_components.last().and_then(|p| p.to_str()) == Some("SKILL.md");
-                if tail_components.len() < 2 || !last_is_skill_md {
-                    tracing::warn!(
-                        event = "skill_reload_rejected",
-                        raw_path = %raw_path,
-                        reason = "path does not resolve to <name>/SKILL.md under SKILLS_DIR"
-                    );
-                } else {
-                    let tail: std::path::PathBuf = tail_components.iter().collect();
-                    let local_path = skills_base.join(&tail);
-                    // Defense in depth: Normal-only components cannot escape
-                    // skills_base lexically, but a symlink planted inside
-                    // SKILLS_DIR could still redirect rescan outside it. Resolve
-                    // symlinks before the containment check. A not-yet-existing
-                    // path can't be canonicalized — fall back to the lexical
-                    // check; rescan then fails closed on the missing file.
-                    let canon_base = std::fs::canonicalize(skills_base)
-                        .unwrap_or_else(|_| skills_base.to_path_buf());
-                    let contained = match std::fs::canonicalize(&local_path) {
-                        Ok(canon) => canon.starts_with(&canon_base),
-                        Err(_) => local_path.starts_with(skills_base),
-                    };
-                    if !contained {
-                        tracing::warn!(
-                            event = "skill_reload_rejected",
-                            path = %local_path.to_string_lossy(),
-                            reason = "resolved path escapes SKILLS_DIR"
-                        );
-                    } else {
-                        let path_str = local_path.to_string_lossy();
-                        tracing::info!(event = "skill_reload_signal", path = %path_str);
-                        match crate::agent::skills::SkillsLoader::rescan(&path_str) {
-                            Ok(meta) => tracing::info!(
-                                event = "skill_loaded",
-                                name = %meta.name,
-                                path = %path_str
-                            ),
-                            Err(e) => tracing::warn!(
-                                event = "skill_reload_failed",
-                                path = %path_str,
-                                err = %e
-                            ),
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// Dispatch tool-loop for a single LLM response (BIG-1).
@@ -888,9 +809,12 @@ impl AgentLoop {
                         }
 
                         // Gap 1 (SC#2): skill-writer-by-NL must reload on the normal
-                        // persona path too, not only in run_provider_fallback. Shared
-                        // helper handles the skill_reloaded signal.
-                        self.handle_skill_reload(&result);
+                        // persona path too, not only in run_provider_fallback. A2
+                        // `ToolResultObserver` port handles the skill_reloaded signal
+                        // (concrete impl: `agent::skills::SkillReloadObserver`).
+                        if let Some(obs) = &self.tool_result_observer {
+                            obs.on_tool_result(&result);
+                        }
 
                         // SEC-04 (spotlighting): the ONE formatting decision point
                         // (D-08) — trusted results render exactly as today
@@ -1050,28 +974,16 @@ impl AgentLoop {
 
     /// Resolve the fallback candidate's `Provider` instance (D-10 rung 3).
     ///
-    /// Production always delegates to the real `registry::resolve_provider` (which
-    /// constructs a live, credential/network-backed provider). Test builds check
-    /// `fallback_resolver_override` first so unit tests can inject a scripted `Provider`
-    /// without real network or provider credentials (mirrors the `#[cfg(test)]
-    /// drain_handle` seam elsewhere in this file).
-    #[cfg(not(test))]
+    /// A3 `ProviderResolver` port (M2 step 3b): production injects the
+    /// registry-backed resolver (constructs a live, credential/network-backed
+    /// provider); unit tests inject a scripted resolver through the SAME
+    /// production field — this replaces the old `#[cfg(test)]/#[cfg(not(test))]`
+    /// pair and the `fallback_resolver_override` seam entirely.
     fn resolve_fallback_provider(
         &self,
         candidate: &str,
     ) -> anyhow::Result<Box<dyn crate::provider::Provider>> {
-        crate::provider::registry::resolve_provider(candidate)
-    }
-
-    #[cfg(test)]
-    fn resolve_fallback_provider(
-        &self,
-        candidate: &str,
-    ) -> anyhow::Result<Box<dyn crate::provider::Provider>> {
-        match &self.fallback_resolver_override {
-            Some(f) => f(candidate),
-            None => crate::provider::registry::resolve_provider(candidate),
-        }
+        self.provider_resolver.resolve(candidate)
     }
 
     /// D-10 fallback ladder — rung 1 (transient retry) + rung 3 (provider-switch on
@@ -1297,8 +1209,11 @@ impl AgentLoop {
                             };
 
                         // D-06: handle skill_reloaded signal from skill-writer container
-                        // (shared helper — also used by dispatch_tool_loop, Gap 1 fix).
-                        self.handle_skill_reload(&result);
+                        // (A2 `ToolResultObserver` port — also consulted by
+                        // dispatch_tool_loop, Gap 1 fix).
+                        if let Some(obs) = &self.tool_result_observer {
+                            obs.on_tool_result(&result);
+                        }
 
                         let result_str = result.to_string();
                         let tool_msg = Message {
@@ -1713,6 +1628,11 @@ mod tests {
             db_path,
             Arc::new(crate::eval::failure_sink::EvalFailureSink),
             crate::agent::default_context_providers(&memory),
+            Arc::new(crate::provider::registry::RegistryProviderResolver),
+            Some(Arc::new(crate::agent::dream::DreamFlush::new(
+                memory.clone(),
+            ))),
+            Some(Arc::new(crate::agent::skills::SkillReloadObserver)),
         )
     }
 
@@ -2222,6 +2142,11 @@ mod tests {
             &path,
             Arc::new(crate::eval::failure_sink::EvalFailureSink),
             crate::agent::default_context_providers(&memory),
+            Arc::new(crate::provider::registry::RegistryProviderResolver),
+            Some(Arc::new(crate::agent::dream::DreamFlush::new(
+                memory.clone(),
+            ))),
+            Some(Arc::new(crate::agent::skills::SkillReloadObserver)),
         );
 
         // CloudOk persona + cloud provider: the multi-round tool loop must complete,
@@ -2904,12 +2829,24 @@ mod tests {
     // --- Plan 08-08 (SO-03): complete_with_fallback_ladder --------------------------
     //
     // `complete_with_fallback_ladder` is a private method — these are unit tests
-    // (not the `tests/provider_hotswap.rs` integration test) because the ladder's
-    // provider-switch rung is only injectable via the `#[cfg(test)]
-    // fallback_resolver_override` seam, which does not exist in the library as seen
-    // by integration-test binaries (they link the crate compiled WITHOUT `--cfg
-    // test`). Exercising the ladder end-to-end here — directly, via `make_loop` —
-    // is the only place these 3 scenarios can assert on the private swap behavior.
+    // (not the `tests/provider_hotswap.rs` integration test) so they can call it
+    // directly, via `make_loop`. The ladder's provider-switch rung is injected
+    // through the production `provider_resolver` field (A3 `ProviderResolver`
+    // port, M2 step 3b) — the old `#[cfg(test)] fallback_resolver_override`
+    // seam it replaces no longer exists.
+
+    /// Test-local scripted [`crate::agent::ports::ProviderResolver`]: wraps the
+    /// same closure shape the removed `fallback_resolver_override` seam took.
+    struct ScriptedResolver<F>(F);
+
+    impl<F> crate::agent::ports::ProviderResolver for ScriptedResolver<F>
+    where
+        F: Fn(&str) -> anyhow::Result<Box<dyn Provider>> + Send + Sync,
+    {
+        fn resolve(&self, model: &str) -> anyhow::Result<Box<dyn Provider>> {
+            (self.0)(model)
+        }
+    }
 
     struct AlwaysFailProvider;
 
@@ -2980,7 +2917,7 @@ mod tests {
         agent.fallback_models = vec!["mock2".to_owned()];
 
         let resolve_calls = Arc::new(AtomicU32::new(0));
-        agent.fallback_resolver_override = Some(Box::new({
+        agent.provider_resolver = Arc::new(ScriptedResolver({
             let resolve_calls = resolve_calls.clone();
             move |candidate: &str| {
                 assert_eq!(candidate, "mock2");
@@ -3081,7 +3018,7 @@ mod tests {
         agent.fallback_models = vec!["gpt-4o".to_owned()];
 
         let called = Arc::new(AtomicBool::new(false));
-        agent.fallback_resolver_override = Some(Box::new({
+        agent.provider_resolver = Arc::new(ScriptedResolver({
             let called = called.clone();
             move |_candidate: &str| {
                 Ok(Box::new(NeverCalledCloudProvider {

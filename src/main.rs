@@ -252,6 +252,16 @@ async fn main() -> anyhow::Result<()> {
         &db_path,
         std::sync::Arc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
+        // A3 `ProviderResolver`: registry-backed fallback-ladder resolution.
+        std::sync::Arc::new(bastion::provider::registry::RegistryProviderResolver),
+        // A1 `PreCompactionFlush`: MEM-09 dream flush, closing over the memory.
+        Some(std::sync::Arc::new(bastion::agent::dream::DreamFlush::new(
+            memory.clone(),
+        ))),
+        // A2 `ToolResultObserver`: skill-writer hot-reload signal (D-06/Gap 1).
+        Some(std::sync::Arc::new(
+            bastion::agent::skills::SkillReloadObserver,
+        )),
     );
     // BIG-1 (Gap 2): one McpToolAdapter per connected MCP tool, into the SAME
     // registry instance the loop owns (moved verbatim out of `AgentLoop::new`).

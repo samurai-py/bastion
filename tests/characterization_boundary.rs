@@ -377,6 +377,11 @@ async fn make_agent(db_path: &str) -> AgentLoop {
         db_path,
         Arc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
+        Arc::new(bastion::provider::registry::RegistryProviderResolver),
+        Some(Arc::new(bastion::agent::dream::DreamFlush::new(
+            memory.clone(),
+        ))),
+        Some(Arc::new(bastion::agent::skills::SkillReloadObserver)),
     )
 }
 

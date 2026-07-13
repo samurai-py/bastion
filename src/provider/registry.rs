@@ -37,6 +37,18 @@ pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
     }
 }
 
+/// A3 `ProviderResolver` implementation (M2 step 3b): the registry-backed
+/// resolver `main.rs` injects into the loop's `provider_resolver` field —
+/// production's fallback-ladder rung 3 (D-10) delegates here, exactly like
+/// the old direct `registry::resolve_provider` call it replaces.
+pub struct RegistryProviderResolver;
+
+impl crate::agent::ports::ProviderResolver for RegistryProviderResolver {
+    fn resolve(&self, model: &str) -> anyhow::Result<Box<dyn Provider>> {
+        resolve_provider(model)
+    }
+}
+
 /// Resolve the `Provider` instance the offline Reflector should call (LEARN-05: budget,
 /// interval AND model are configurable independently).
 ///

@@ -146,6 +146,109 @@ impl SkillsLoader {
     }
 }
 
+/// A2 `ToolResultObserver` implementation (M2 step 3b): the loop's old
+/// `handle_skill_reload` helper, moved here VERBATIM — including ALL of the
+/// SEC/CR-02 path sanitization, which protects the rescan and therefore
+/// belongs with the implementation, not the kernel.
+///
+/// D-06: handles the `skill_reloaded` signal emitted by the skill-writer
+/// container after a skill is created/updated by natural language.
+///
+/// Gap 1 fix: this was previously inline in `run_provider_fallback` only,
+/// which is unreachable on normal persona turns — so skill-writer-by-NL never
+/// reloaded in normal conversation. The kernel consults the observer on BOTH
+/// `run_provider_fallback` and `dispatch_tool_loop`, so the skill becomes
+/// available on the very next turn regardless of which path produced it.
+///
+/// Synchronous (no awaits): `SkillsLoader::rescan` and the path checks are sync.
+pub struct SkillReloadObserver;
+
+impl crate::agent::ports::ToolResultObserver for SkillReloadObserver {
+    fn on_tool_result(&self, result: &serde_json::Value) {
+        // CR-02 path-safety: rebase skill_path to core's own SKILLS_DIR —
+        // skill-writer returns /skills/<name>/SKILL.md (its container path).
+        if result.get("skill_reloaded").and_then(|v| v.as_bool()) == Some(true) {
+            if let Some(raw_path) = result.get("skill_path").and_then(|v| v.as_str()) {
+                let skills_dir =
+                    std::env::var("SKILLS_DIR").unwrap_or_else(|_| "/skills".to_string());
+                // SEC: skill_path crosses the skill-writer→core container trust
+                // boundary. Keep ONLY Normal components — discarding RootDir,
+                // Prefix, CurDir and ParentDir ("..") — so a malicious segment
+                // cannot escape SKILLS_DIR.
+                let normals: Vec<std::path::PathBuf> = std::path::Path::new(raw_path)
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => Some(std::path::PathBuf::from(s)),
+                        _ => None,
+                    })
+                    .collect();
+                let skills_base = std::path::Path::new(&skills_dir);
+                // Strip the shared skills-base prefix and keep the FULL relative
+                // remainder (e.g. "personas/<slug>/<name>/SKILL.md" for private
+                // skills). Taking only the last two components would drop the
+                // personas/<slug>/ segment and rescan the wrong slot (WR-01).
+                let base_norm_count = skills_base
+                    .components()
+                    .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                    .count();
+                let tail_components: Vec<std::path::PathBuf> = if normals.len() > base_norm_count {
+                    normals[base_norm_count..].to_vec()
+                } else {
+                    normals.clone()
+                };
+                // Require the reload target to be <name>/SKILL.md (at least two
+                // components, ending in SKILL.md) — guards the format coupling.
+                let last_is_skill_md =
+                    tail_components.last().and_then(|p| p.to_str()) == Some("SKILL.md");
+                if tail_components.len() < 2 || !last_is_skill_md {
+                    tracing::warn!(
+                        event = "skill_reload_rejected",
+                        raw_path = %raw_path,
+                        reason = "path does not resolve to <name>/SKILL.md under SKILLS_DIR"
+                    );
+                } else {
+                    let tail: std::path::PathBuf = tail_components.iter().collect();
+                    let local_path = skills_base.join(&tail);
+                    // Defense in depth: Normal-only components cannot escape
+                    // skills_base lexically, but a symlink planted inside
+                    // SKILLS_DIR could still redirect rescan outside it. Resolve
+                    // symlinks before the containment check. A not-yet-existing
+                    // path can't be canonicalized — fall back to the lexical
+                    // check; rescan then fails closed on the missing file.
+                    let canon_base = std::fs::canonicalize(skills_base)
+                        .unwrap_or_else(|_| skills_base.to_path_buf());
+                    let contained = match std::fs::canonicalize(&local_path) {
+                        Ok(canon) => canon.starts_with(&canon_base),
+                        Err(_) => local_path.starts_with(skills_base),
+                    };
+                    if !contained {
+                        tracing::warn!(
+                            event = "skill_reload_rejected",
+                            path = %local_path.to_string_lossy(),
+                            reason = "resolved path escapes SKILLS_DIR"
+                        );
+                    } else {
+                        let path_str = local_path.to_string_lossy();
+                        tracing::info!(event = "skill_reload_signal", path = %path_str);
+                        match SkillsLoader::rescan(&path_str) {
+                            Ok(meta) => tracing::info!(
+                                event = "skill_loaded",
+                                name = %meta.name,
+                                path = %path_str
+                            ),
+                            Err(e) => tracing::warn!(
+                                event = "skill_reload_failed",
+                                path = %path_str,
+                                err = %e
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

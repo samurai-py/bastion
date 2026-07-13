@@ -9,7 +9,7 @@
 use bastion_types::{FailureKind, Goal, PrivacyTier};
 
 use crate::capability::CapabilityRegistry;
-use crate::provider::SharedProvider;
+use crate::provider::{Provider, SharedProvider};
 use crate::types::{CallConfig, LlmResponse, Message};
 
 /// P2 — failure telemetry sink.
@@ -76,6 +76,54 @@ pub trait ToolSource: Send + Sync {
 pub trait GoalPort: Send + Sync {
     /// Return all goals for `owner_id`.
     async fn list_goals(&self, owner_id: &str) -> anyhow::Result<Vec<Goal>>;
+}
+
+/// Pre-compaction memory flush (M2 step 3b, decision A1 — MEM-09).
+///
+/// Absorbs the loop's direct call to `agent::dream::memory_flush` (cognition:
+/// heuristic belief distillation) right before `AutoCompact::compact`. The
+/// concrete implementation (`agent::dream::DreamFlush`) closes over the
+/// `SharedMemory` at construction — the kernel does not pass memory through
+/// this port. `None` = no flush configured (compaction proceeds without it);
+/// production injects `Some(...)`.
+#[async_trait::async_trait]
+pub trait PreCompactionFlush: Send + Sync {
+    /// Distill and persist whatever this implementation wants from `history`
+    /// before the kernel compacts it. Failure must not abort the turn — the
+    /// kernel logs and proceeds (mirrors `memory_flush`'s swallow-errors
+    /// contract).
+    async fn flush(&self, history: &[Message], owner: &str) -> anyhow::Result<()>;
+}
+
+/// Tool-result observer (M2 step 3b, decision A2 — D-06/Gap 1).
+///
+/// Absorbs the loop's `handle_skill_reload` helper: product-level reaction to
+/// a tool result (today: the skill-writer `skill_reloaded` hot-reload signal,
+/// including its SEC/CR-02 path sanitization — all moved VERBATIM into the
+/// concrete `agent::skills::SkillReloadObserver`). Called by the kernel on
+/// EVERY tool result, on both dispatch paths (`dispatch_tool_loop` and
+/// `run_provider_fallback`), exactly where `handle_skill_reload` was called.
+/// `None` = no observer configured.
+pub trait ToolResultObserver: Send + Sync {
+    /// Inspect one raw tool-result value. Must be cheap and non-blocking
+    /// (the current implementation is synchronous filesystem checks gated on
+    /// a JSON flag) and must never panic.
+    fn on_tool_result(&self, result: &serde_json::Value);
+}
+
+/// Provider resolution by model name (M2 step 3b, decision A3 — D-10 rung 3).
+///
+/// Absorbs the loop's direct call to `provider::registry::resolve_provider`
+/// in the fallback ladder's provider-switch rung. This production field
+/// replaces the old `#[cfg(test)] fallback_resolver_override` seam — unit
+/// tests now inject a scripted resolver through the same field production
+/// uses (`main.rs` injects the registry-backed implementation,
+/// `provider::registry::RegistryProviderResolver`).
+pub trait ProviderResolver: Send + Sync {
+    /// Construct the `Provider` for `model` (may be credential/network-backed
+    /// in production). Errors are handled defensively by the caller (an
+    /// unresolvable candidate falls back to the original ladder error).
+    fn resolve(&self, model: &str) -> anyhow::Result<Box<dyn Provider>>;
 }
 
 /// The result of dispatching one slash command. Moved VERBATIM from

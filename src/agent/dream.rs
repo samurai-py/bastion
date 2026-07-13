@@ -1,6 +1,31 @@
 use crate::memory::{Belief, SharedMemory};
 use crate::types::Message;
 
+/// A1 `PreCompactionFlush` implementation (M2 step 3b): the MEM-09 flush the
+/// loop used to invoke directly as `dream::memory_flush(&history, &self.memory,
+/// owner)`. Closes over the `SharedMemory` at construction — the kernel port
+/// carries only `(history, owner)`.
+pub struct DreamFlush {
+    memory: SharedMemory,
+}
+
+impl DreamFlush {
+    /// Wrap the shared memory backend the flush distills beliefs into.
+    pub fn new(memory: SharedMemory) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::ports::PreCompactionFlush for DreamFlush {
+    async fn flush(&self, history: &[Message], owner: &str) -> anyhow::Result<()> {
+        // `memory_flush` logs and swallows its own errors (flush failure must
+        // not abort the turn) — identical contract to the old direct call.
+        memory_flush(history, &self.memory, owner).await;
+        Ok(())
+    }
+}
+
 /// Consolidation decisions produced by `Dream::consolidate()` (MEM-02). Pure data —
 /// the caller (`proactive::idle_tick`) applies each decision via
 /// `Memory::supersede_belief` / `Memory::revoke_belief`. Never carries side effects
