@@ -172,6 +172,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Init persona registry (load from "./personas/" directory; empty if missing — PERS-07)
     let registry = PersonaRegistry::load_dir(".").await?;
+    // M2 (P1 `Responder`): `registry` moves into `PersonaResponder` below — the
+    // kernel no longer holds `AgentLoop.registry`. Several product-level
+    // consumers (BastionMcpServer's resources, .af export/import) still need a
+    // `PersonaRegistry` handle; keep a clone from BEFORE the move, same pattern
+    // as `goals_for_product`/`mcp_for_product` above.
+    let registry_for_product = registry.clone();
+    let responder: Arc<dyn bastion::agent::ports::Responder> =
+        Arc::new(bastion::persona::responder::PersonaResponder::new(registry));
 
     // Init shared memory
     let memory: bastion::memory::SharedMemory = Arc::new(RwLock::new(Box::new(SqliteMemory::new(
@@ -229,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
         mcp_client,
         session_id,
         daily_budget,
-        registry,
+        responder,
         memory.clone(),
         Some(std::sync::Arc::new(goals)),
         cfg.agent.fallback_models.clone(),
@@ -250,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
                 composio_oauth,
                 goals_for_product,
                 mcp_for_product,
+                registry_for_product,
             )
             .await?;
         }
@@ -259,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
             let token_perms = build_token_perms(&cfg);
             let local_owner = std::env::var("BASTION_OWNER_ID")
                 .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
-            let personas = Arc::new(agent.registry.clone());
+            let personas = Arc::new(registry_for_product.clone());
             let mcp_server = bastion::mcp::server::BastionMcpServer::new(
                 Arc::new(agent.capability_registry.clone()),
                 memory.clone(),
@@ -296,7 +305,7 @@ async fn main() -> anyhow::Result<()> {
                     };
                     bastion::interop::export::export_full(
                         &memory,
-                        &agent.registry,
+                        &registry_for_product,
                         &goals_for_product,
                         &cfg,
                         identity,
@@ -308,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
                     if with_identity {
                         anyhow::bail!("--with-identity is only valid with --mode full");
                     }
-                    bastion::interop::export::export_template(&agent.registry, &cfg).await?
+                    bastion::interop::export::export_template(&registry_for_product, &cfg).await?
                 }
                 other => {
                     anyhow::bail!("Invalid export mode '{}'. Use 'full' or 'template'.", other)
@@ -347,7 +356,7 @@ async fn main() -> anyhow::Result<()> {
             let restored = bastion::interop::import::import(
                 af,
                 &memory,
-                &agent.registry,
+                &registry_for_product,
                 &goals_for_product,
                 &owner_id,
             )
@@ -391,6 +400,11 @@ async fn daemon_loop(
     // directly-registered `McpToolAdapter` below — the SAME connected client
     // `agent.tool_source` wraps, shared by-Arc from `main()`.
     mcp_for_product: Arc<McpClient>,
+    // M2 (P1 `Responder`): concrete `PersonaRegistry` for `BastionMcpServer`'s
+    // resources and `CommandResources` (`/as`/`/cabinet` validation) — the SAME
+    // registry `PersonaResponder` wraps, cloned in `main()` before it moved
+    // into the responder.
+    registry_for_product: PersonaRegistry,
 ) -> anyhow::Result<()> {
     use bastion::agent::command::{CommandResources, CommandResult};
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -407,10 +421,18 @@ async fn daemon_loop(
     // M2 (P5 despejo): `otc_store`/`composio_oauth` are no longer `AgentLoop`
     // fields — this replaces `agent.set_otc_store`/`agent.set_composio_oauth`.
     // Declared here (before the webhook-gated block below, which is the only
-    // place that ever populates it — same condition as before) so BOTH select!
-    // arms below (`stdin` and `inbound_rx`) that call `agent.handle_command`
-    // see the same resources the removed setters used to inject onto `agent`.
-    let mut command_resources = CommandResources::default();
+    // place that ever populates otc_store/composio_oauth — same condition as
+    // before) so BOTH select! arms below (`stdin` and `inbound_rx`) that call
+    // `agent.handle_command` see the same resources the removed setters used
+    // to inject onto `agent`.
+    // M2 (P1 `Responder`): `registry` is set unconditionally right away
+    // (unlike otc_store/composio_oauth) — `/as`/`/cabinet` validation needs it
+    // regardless of whether the webhook channel is running, matching the
+    // original `self.registry` field's always-present behavior.
+    let mut command_resources = CommandResources {
+        registry: registry_for_product.clone(),
+        ..Default::default()
+    };
 
     // CR-07: create AgentHandle + inbound receiver BEFORE the select! loop.
     // Channels (Telegram, webhook) hold clones of `handle` and send messages into `inbound_rx`.
@@ -520,7 +542,7 @@ async fn daemon_loop(
             // Clone AgentLoop components that BastionMcpServer needs.
             let cap_registry = Arc::new(agent.capability_registry.clone());
             let mem = agent.memory.clone();
-            let personas = Arc::new(agent.registry.clone());
+            let personas = Arc::new(registry_for_product.clone());
             let goals = goals_for_product.clone();
             let local_owner = std::env::var("BASTION_OWNER_ID")
                 .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());

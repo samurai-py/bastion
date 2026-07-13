@@ -2,10 +2,12 @@
 // Each Persona is parsed from a SOUL.md file (front-matter + body).
 // The registry is built at startup and consulted by the router and runner.
 
+pub mod responder;
 pub mod router;
 pub mod runner;
 pub mod soul;
 
+pub use responder::PersonaResponder;
 pub use soul::{parse_soul, BastionBlock, PersonaFront};
 
 use crate::memory::PrivacyTier;

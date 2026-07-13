@@ -8,7 +8,10 @@
 
 use bastion_types::FailureKind;
 
+use crate::capability::CapabilityRegistry;
 use crate::memory::PrivacyTier;
+use crate::provider::SharedProvider;
+use crate::types::{CallConfig, LlmResponse, Message};
 
 /// P2 — failure telemetry sink.
 ///
@@ -74,4 +77,137 @@ pub trait ToolSource: Send + Sync {
 pub trait GoalPort: Send + Sync {
     /// Return all goals for `owner_id`.
     async fn list_goals(&self, owner_id: &str) -> anyhow::Result<Vec<crate::goal::Goal>>;
+}
+
+/// P1 — narrow kernel capability handle exposed to a [`Responder`] via
+/// [`TurnContext`].
+///
+/// The M2-ports-design.md sketch describes `Responder` absorbing
+/// route/runner/cabinet dispatch wholesale, hiding "persona routing,
+/// single/parallel dispatch and any deliberation" behind one call. In the real
+/// code, the moved logic (`dispatch_single_or_parallel`, formerly a private
+/// `AgentLoop` method) ALSO calls back into two things that are genuinely
+/// kernel-side, not persona/cabinet-side: the capability-registry-gated tool
+/// loop (`dispatch_tool_loop`) and the SEAM #2 system-prompt builder
+/// (`build_system_prompt`, which reads `context_providers` — opaque blocks the
+/// kernel never interprets). Neither references a persona/cabinet type.
+/// `TurnKernel` is the minimal seam that lets the moved code keep calling
+/// them without the kernel handing the WHOLE `AgentLoop` (and hence every
+/// other kernel method) to the `Responder`, and without `Responder`
+/// duplicating tool-loop/system-prompt logic. `AgentLoop` is the only
+/// implementer.
+#[async_trait::async_trait]
+pub trait TurnKernel: Send + Sync {
+    /// The kernel's single policy-enforcement point (BIG-1) — mutable access
+    /// so persona/cabinet dispatch functions (which already take
+    /// `&mut CapabilityRegistry` directly: `persona::router::route`,
+    /// `cabinet::orchestrator::deliberate`, `cabinet::synth::synthesize`) can
+    /// reach it without the kernel losing ownership.
+    fn capability_registry(&mut self) -> &mut CapabilityRegistry;
+
+    /// SEAM #2: builds the dynamic system prompt for this turn from the
+    /// kernel's own `context_providers` — opaque to the `Responder`.
+    async fn build_system_prompt(
+        &self,
+        owner: &str,
+        turn_msg: &str,
+        persona: Option<&str>,
+    ) -> String;
+
+    /// Appends one message to the session transcript (`SessionManager::append`).
+    async fn session_append(
+        &self,
+        session_id: &str,
+        msg: Message,
+        output_tokens: Option<u32>,
+    ) -> anyhow::Result<()>;
+
+    /// Runs the capability-registry-gated tool loop to completion
+    /// (`AgentLoop::dispatch_tool_loop`) for one persona's initial LLM
+    /// response — pure kernel logic (capability_registry + egress + session +
+    /// tool_source), no persona/cabinet knowledge.
+    async fn run_tool_loop(
+        &mut self,
+        history: &mut Vec<Message>,
+        session_id: &str,
+        config: &CallConfig,
+        initial_response: LlmResponse,
+        owner: &str,
+        resolved_tier: Option<PrivacyTier>,
+    ) -> anyhow::Result<String>;
+}
+
+/// The built turn context a [`Responder`] consumes to produce the final
+/// assistant response. Deliberately carries no persona/cabinet type — only
+/// kernel types (`SharedProvider`, `TurnKernel`, `Message`) and plain data.
+pub struct TurnContext<'a> {
+    /// Cloned `Arc` — cheap, and avoids the `Responder` needing a `&mut`
+    /// borrow of the kernel just to read the active provider.
+    pub provider: SharedProvider,
+    /// Handle back into the kernel for the two capabilities described on
+    /// [`TurnKernel`] (capability registry, system prompt, tool loop, session
+    /// append). `AgentLoop` reborrows itself (`&mut *self`) to build this —
+    /// freed again as soon as `Responder::respond` returns.
+    pub kernel: &'a mut dyn TurnKernel,
+    /// Conversation history for this turn — loaded/compacted by the kernel
+    /// before `respond` is called; mutated in place (assistant/tool messages
+    /// pushed as the dispatch proceeds), mirroring today's `&mut history`.
+    pub history: &'a mut Vec<Message>,
+    pub session_id: &'a str,
+    pub owner: &'a str,
+    pub user_input: &'a str,
+    /// SEC-05/D-09: true when `user_input` originates from an untrusted
+    /// source — the `Responder` must genuinely drain/restore the capability
+    /// registry around dispatch, exactly like `run_turn_for_with_trust` did
+    /// inline before this port.
+    pub untrusted: bool,
+    /// Taken from `AgentLoop.forced_persona` (`/as` command) by the kernel
+    /// BEFORE constructing this context — passed by value since it is a
+    /// take-once read, never restored.
+    pub forced_persona: Option<String>,
+    /// SEAM #4: the turn's root OTel span, so the `Responder` can stamp
+    /// `gen_ai.agent.name` once the persona is known (matches today's
+    /// `turn_span.set_attribute(...)` call site exactly). An OTel
+    /// infrastructure type, not a cognition type.
+    pub turn_span: &'a mut opentelemetry::global::BoxedSpan,
+}
+
+/// P1 `Responder` — quem responde e como.
+///
+/// Absorbs `persona::router::{route, RouterDecision, ResponseMode}`,
+/// `persona::runner::{run, RunnerOutput}`,
+/// `cabinet::{build_table, orchestrator::deliberate, synth::{synthesize, CabinetVerdict}}`,
+/// and `render_verdict`. The kernel's `AgentLoop` no longer names any of
+/// these types; it only knows `Responder`/`TurnContext`/`RespondOutcome`.
+///
+/// Divergence from the design-doc sketch: `respond` takes `TurnContext<'_>`
+/// BY VALUE, not `&TurnContext<'_>` — the context carries `&mut` fields
+/// (`kernel`, `history`) that a shared reference to the struct could not
+/// re-borrow mutably (`&TurnContext` would only ever yield `&&mut dyn
+/// TurnKernel`, unusable for mutation). Passing the struct by value moves
+/// those borrows in without that restriction, while `respond` itself stays
+/// `&self` (the design's actual intent — a `Responder` is stored as
+/// `Arc<dyn Responder>` and must not need unique access to itself).
+#[async_trait::async_trait]
+pub trait Responder: Send + Sync {
+    /// Given the built turn context, produce the final assistant response.
+    /// Hides persona routing, single/parallel dispatch and any deliberation.
+    async fn respond(&self, turn: TurnContext<'_>) -> anyhow::Result<RespondOutcome>;
+}
+
+/// The `Responder`'s output.
+pub struct RespondOutcome {
+    pub text: String,
+    /// Which agent definition(s) produced it — for session/OTel labeling.
+    /// Doubles as the "matched persona" the kernel needs post-routing (was
+    /// `turn_persona` in the pre-port code): `attribution.first()`.
+    pub attribution: Vec<String>,
+    /// Resolved `PrivacyTier` of the persona that handled this turn (`None`
+    /// when no persona matched). Deliberate addition beyond the design doc's
+    /// `text`/`attribution` sketch: the kernel still needs this for
+    /// `run_provider_fallback`'s egress gate and the `FailureSink` call on
+    /// the empty-text fallback path, but `PersonaRegistry` — the only thing
+    /// that can resolve a persona name to a tier — now lives inside the
+    /// `Responder`, not the kernel.
+    pub turn_tier: Option<PrivacyTier>,
 }

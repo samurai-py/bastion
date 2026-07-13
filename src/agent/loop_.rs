@@ -2,13 +2,12 @@ use crate::agent::command::{handle_command, CommandResources, CommandResult};
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::identity::IdentityProvider;
-use crate::agent::ports::{FailureSink, GoalPort, ToolSource};
+use crate::agent::ports::{FailureSink, GoalPort, Responder, ToolSource, TurnContext, TurnKernel};
 use crate::hooks::egress::EgressHook;
 use crate::hooks::guardrails::InputGuardrail;
 use crate::hooks::output_validator::OutputValidator;
 use crate::mcp::{tool_source::McpToolSource, McpClient};
 use crate::memory::SharedMemory;
-use crate::persona::PersonaRegistry;
 use crate::provider::{call_with_retry, SharedProvider};
 use crate::session::SessionManager;
 use crate::types::{
@@ -35,8 +34,11 @@ pub struct AgentLoop {
     pub compactor: AutoCompact,
     pub session_id: String,
     pub daily_budget_usd: f64,
-    /// Registry of loaded personas.
-    pub registry: PersonaRegistry,
+    /// P1 `Responder` port — hides persona routing, single/parallel dispatch,
+    /// and Cabinet deliberation. `PersonaRegistry` used to be a loop field
+    /// (`registry`); it now lives inside the concrete `Responder`
+    /// (`PersonaResponder`) — the kernel never names a persona/cabinet type.
+    pub responder: Arc<dyn Responder>,
     /// Shared memory backend (beliefs + provenance).
     pub memory: SharedMemory,
     /// P4 `GoalPort` — optional goal engine for drift nudges. `None` degrades
@@ -100,7 +102,7 @@ impl AgentLoop {
         mcp: Arc<McpClient>,
         session_id: String,
         daily_budget_usd: f64,
-        registry: PersonaRegistry,
+        responder: Arc<dyn Responder>,
         memory: SharedMemory,
         goals: Option<Arc<dyn GoalPort>>,
         fallback_models: Vec<String>,
@@ -123,7 +125,7 @@ impl AgentLoop {
             compactor: AutoCompact::new(),
             session_id,
             daily_budget_usd,
-            registry,
+            responder,
             memory,
             goals,
             input_guard: InputGuardrail::default(),
@@ -637,121 +639,30 @@ impl AgentLoop {
             drop(provider_ref);
         }
 
-        // 4. Router — classify the message into a RouterDecision.
-        //    If /as forced a persona, override the router's choice.
-        let mut decision = {
-            let provider_ref = self.provider.read().await;
-            crate::persona::router::route(
-                &**provider_ref,
-                &self.registry,
-                user_input,
+        // 4./5. Route + dispatch (persona router → single/parallel/Cabinet) is the
+        // P1 `Responder` port (M2) — hides RouterDecision/ResponseMode/RunnerOutput/
+        // CabinetVerdict from the kernel entirely. `forced_persona` is taken here
+        // (kernel-side `/as` state) and handed over by value; the provider is
+        // cloned (cheap Arc) so the Responder doesn't need a borrow of `self`
+        // alongside the `kernel` handle below.
+        let forced_persona = self.forced_persona.take();
+        let provider = self.provider.clone();
+        let responder = self.responder.clone();
+        let outcome = responder
+            .respond(TurnContext {
+                provider,
+                kernel: &mut *self,
+                history: &mut history,
+                session_id: &session_id,
                 owner,
-                &mut self.capability_registry,
-            )
-            .await?
-        };
-
-        if let Some(ref forced) = self.forced_persona.take() {
-            decision.personas = vec![forced.clone()];
-            decision.mode = crate::persona::router::ResponseMode::Single;
-            decision.convene_reason = None;
-        }
-
-        // SEAM #4: registrar persona no span raiz via atributo (span name é imutável).
-        // Após routing — persona é conhecida agora.
-        let agent_name = decision
-            .personas
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "default".to_string());
-        turn_span.set_attribute(KeyValue::new("gen_ai.agent.name", agent_name));
-
-        // WR-01 (review #2): capture the turn's privacy tier from the handling persona
-        // ONCE, before `decision` is moved into the dispatch match below. Threaded into
-        // run_provider_fallback so the fallback path no longer re-reads the already-taken
-        // `self.forced_persona` (collapsed to None — over-blocked a forced CloudOk persona
-        // and relied on accidental fail-closed for LocalOnly). None stays fail-closed.
-        let turn_tier: Option<crate::memory::PrivacyTier> = decision
-            .personas
-            .first()
-            .and_then(|name| self.registry.get(name).map(|p| p.tier));
-
-        // SEAM #2: the active persona name scopes belief recall (persona-tagged + global).
-        // Resolved ONCE here (like turn_tier) and threaded into build_system_prompt on BOTH
-        // the single/parallel path and the fallback path, so recall never crosses persona
-        // boundaries. `None` (no persona matched) keeps global-only recall — the fail-safe.
-        let turn_persona: Option<String> = decision.personas.first().cloned();
-
-        // 5. Dispatch on decision.mode → build response text.
-        //    Empty registry → route_text will be empty → fall back to provider.
-        let route_text = match decision.mode {
-            crate::persona::router::ResponseMode::Cabinet => {
-                // Cabinet path: build_table → deliberate → synthesize (D-07 unified voice + dissent)
-                let table = crate::cabinet::build_table(&self.registry, &decision, None)?;
-                let transcript = crate::cabinet::orchestrator::deliberate(
-                    &table,
-                    self.provider.clone(),
-                    crate::cabinet::orchestrator::DEFAULT_ROUNDS,
-                    &self.capability_registry,
-                )
-                .await?;
-                // CR-02: fail-closed egress on synthesis — the transcript may contain LocalOnly
-                // content. Gate synthesis on the table tier before touching the cloud provider.
-                let synth_provider_name = self.provider.read().await.name().to_owned();
-                crate::hooks::egress::check_egress(Some(table.tier), &synth_provider_name)?;
-                let provider_ref = self.provider.read().await;
-                let verdict = crate::cabinet::synth::synthesize(
-                    &**provider_ref,
-                    &transcript,
-                    &mut self.capability_registry,
-                )
-                .await?;
-                drop(provider_ref);
-                render_verdict(&verdict)
-            }
-            _ => {
-                // SEC-05/D-09: when this turn's input is untrusted (received email
-                // content; a public-channel Discord/Slack message), the ENTIRE
-                // Single/Parallel dispatch section below — including where
-                // `config.tools` is snapshotted from `capability_registry` — runs
-                // with every pre-existing capability genuinely drained/invisible.
-                //
-                // This is NOT expressed as a `TurnCapabilityScope` value held alive
-                // across the call, because `dispatch_single_or_parallel` (like
-                // `dispatch_tool_loop` inside it) takes `&mut self` — a scope
-                // borrowing `self.capability_registry` cannot coexist with a
-                // subsequent call needing ALL of `self`. `drain_all()`/`restore()`
-                // achieve the identical guarantee (genuinely empty for the call's
-                // duration, fully restored after) without holding a live borrow
-                // across it; restoration happens whether the call returns `Ok` or
-                // `Err`, exactly like the RAII guard would.
-                if untrusted {
-                    let backup = self.capability_registry.drain_all();
-                    let result = self
-                        .dispatch_single_or_parallel(
-                            decision,
-                            &mut history,
-                            &session_id,
-                            owner,
-                            user_input,
-                            turn_persona.as_deref(),
-                        )
-                        .await;
-                    self.capability_registry.restore(backup);
-                    result?
-                } else {
-                    self.dispatch_single_or_parallel(
-                        decision,
-                        &mut history,
-                        &session_id,
-                        owner,
-                        user_input,
-                        turn_persona.as_deref(),
-                    )
-                    .await?
-                }
-            }
-        };
+                user_input,
+                untrusted,
+                forced_persona,
+                turn_span: &mut turn_span,
+            })
+            .await?;
+        let route_text = outcome.text;
+        let turn_tier = outcome.turn_tier;
 
         // 6. Graceful degradation: if route_text is empty (no persona matched, or Cabinet
         //    produced no output), fall back to plain tool-loop provider.
@@ -766,7 +677,7 @@ impl AgentLoop {
                     owner,
                     user_input,
                     turn_tier,
-                    turn_persona.as_deref(),
+                    outcome.attribution.first().map(|s| s.as_str()),
                 )
                 .await
             {
@@ -903,115 +814,6 @@ impl AgentLoop {
                 }
             }
         }
-    }
-
-    /// Single/Parallel path via runner (BIG-1) — extracted from `run_turn_for_with_trust`
-    /// so its caller can wrap the WHOLE call (including where `config.tools` is
-    /// snapshotted from `capability_registry`) in a quarantine window (SEC-05)
-    /// via `drain_all()`/`restore()` around the call, rather than a
-    /// `TurnCapabilityScope` value that cannot outlive a `&mut self` method
-    /// call like this one.
-    async fn dispatch_single_or_parallel(
-        &mut self,
-        decision: crate::persona::router::RouterDecision,
-        history: &mut Vec<Message>,
-        session_id: &str,
-        owner: &str,
-        user_input: &str,
-        turn_persona: Option<&str>,
-    ) -> anyhow::Result<String> {
-        // Build CallConfig with tools from capability_registry (BIG-1).
-        // SEAM #2: system_prompt built dynamically — context_providers inject opaque blocks.
-        let system_prompt = self
-            .build_system_prompt(owner, user_input, turn_persona)
-            .await;
-        let tools = self.capability_registry.list_tool_defs();
-        let config = CallConfig {
-            system_prompt, // ← dinâmico via SEAM #2
-            max_tokens: 4096,
-            tools,
-            ..Default::default()
-        };
-
-        let output = crate::persona::runner::run(
-            decision,
-            &self.registry,
-            self.provider.clone(),
-            history.as_slice(),
-            &config,
-        )
-        .await?;
-
-        // Process tool_calls if present via dispatch_tool_loop (BIG-1).
-        Ok(match output {
-            crate::persona::runner::RunnerOutput::Single(pid, response) => {
-                // WR-04 / CR-01: resolve PrivacyTier from the persona actually
-                // handling this turn (router-chosen or /as-forced). Re-reading
-                // self.forced_persona here was a privacy bug: it was already
-                // consumed by .take() above (line ~211), so a forced LocalOnly
-                // persona resolved to None and got stamped CloudOk in
-                // dispatch_tool_loop — a LocalOnly→cloud downgrade.
-                let resolved_tier: Option<crate::memory::PrivacyTier> =
-                    self.registry.get(&pid).map(|p| p.tier);
-                let text = self
-                    .dispatch_tool_loop(
-                        history,
-                        session_id,
-                        &config,
-                        response,
-                        owner,
-                        resolved_tier,
-                    )
-                    .await?;
-                // Persist the assistant response (dispatch_tool_loop handles intermediate turns)
-                self.session
-                    .append(
-                        session_id,
-                        Message {
-                            role: Role::Assistant,
-                            content: crate::types::MessageContent::Text(text.clone()),
-                        },
-                        None,
-                    )
-                    .await?;
-                text
-            }
-            crate::persona::runner::RunnerOutput::Parallel(results) => {
-                // Parallel: run tool-loop for each persona result and collect texts.
-                let mut texts: Vec<String> = Vec::new();
-                for (pid, response) in results {
-                    // CR-01: resolve tier per-persona — each parallel persona may
-                    // carry a different tier. fail-closed via check_egress inside
-                    // dispatch_tool_loop (None → blocked, not defaulted to cloud).
-                    let resolved_tier: Option<crate::memory::PrivacyTier> =
-                        self.registry.get(&pid).map(|p| p.tier);
-                    let text = self
-                        .dispatch_tool_loop(
-                            history,
-                            session_id,
-                            &config,
-                            response,
-                            owner,
-                            resolved_tier,
-                        )
-                        .await?;
-                    texts.push(text);
-                }
-                let combined = texts.join("\n\n");
-                self.session
-                    .append(
-                        session_id,
-                        Message {
-                            role: Role::Assistant,
-                            content: crate::types::MessageContent::Text(combined.clone()),
-                        },
-                        None,
-                    )
-                    .await?;
-                combined
-            }
-            crate::persona::runner::RunnerOutput::ConveneCabinet(_) => String::new(),
-        })
     }
 
     /// Dispatch tool-loop for a single LLM response (BIG-1).
@@ -1623,6 +1425,11 @@ impl AgentLoop {
     /// fields (product/UX concepts, not kernel state — the kernel never knew
     /// what OTC pairing or Composio OAuth are). The caller composes a
     /// `CommandResources` (today: `main.rs::daemon_loop`) and passes it per call.
+    ///
+    /// P1 `Responder` (M2): `registry` moved into the `Responder`'s own field
+    /// (the kernel no longer holds `AgentLoop.registry`), so `/as`/`/cabinet`
+    /// name-validation — which lives in `command::handle_command`, not the
+    /// Responder — reads its own handle from `resources.registry` instead.
     pub async fn handle_command(
         &mut self,
         input: &str,
@@ -1632,7 +1439,7 @@ impl AgentLoop {
         handle_command(
             input,
             &self.provider,
-            &self.registry,
+            &resources.registry,
             &self.memory,
             &mut self.forced_persona,
             resources.otc_store.as_ref(),
@@ -1676,19 +1483,53 @@ impl AgentLoop {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Render helpers
-// ---------------------------------------------------------------------------
-
-fn render_verdict(verdict: &crate::cabinet::synth::CabinetVerdict) -> String {
-    let mut out = verdict.recommendation.clone();
-    if !verdict.dissents.is_empty() {
-        out.push_str("\n\n**Dissenting views:**");
-        for d in &verdict.dissents {
-            out.push_str(&format!("\n- {}: {}", d.persona, d.position));
-        }
+/// P1 `Responder` port: the narrow kernel-capability surface `PersonaResponder`
+/// (and any future `Responder` impl) calls back into. Every method here is a
+/// thin forward to an existing `AgentLoop` method/field — no new logic, only a
+/// trait-shaped seam so the Responder never needs the whole `AgentLoop`.
+#[async_trait::async_trait]
+impl TurnKernel for AgentLoop {
+    fn capability_registry(&mut self) -> &mut crate::capability::CapabilityRegistry {
+        &mut self.capability_registry
     }
-    out
+
+    async fn build_system_prompt(
+        &self,
+        owner: &str,
+        turn_msg: &str,
+        persona: Option<&str>,
+    ) -> String {
+        AgentLoop::build_system_prompt(self, owner, turn_msg, persona).await
+    }
+
+    async fn session_append(
+        &self,
+        session_id: &str,
+        msg: Message,
+        output_tokens: Option<u32>,
+    ) -> anyhow::Result<()> {
+        self.session.append(session_id, msg, output_tokens).await
+    }
+
+    async fn run_tool_loop(
+        &mut self,
+        history: &mut Vec<Message>,
+        session_id: &str,
+        config: &CallConfig,
+        initial_response: crate::types::LlmResponse,
+        owner: &str,
+        resolved_tier: Option<crate::memory::PrivacyTier>,
+    ) -> anyhow::Result<String> {
+        self.dispatch_tool_loop(
+            history,
+            session_id,
+            config,
+            initial_response,
+            owner,
+            resolved_tier,
+        )
+        .await
+    }
 }
 
 /// Simple cost estimation for budget tracking.
@@ -1816,7 +1657,7 @@ mod tests {
     use crate::goal::{GoalEngine, ScoringConfig};
     use crate::memory::sqlite::SqliteMemory;
     use crate::memory::PrivacyTier;
-    use crate::persona::{Persona, PersonaRegistry};
+    use crate::persona::{Persona, PersonaRegistry, PersonaResponder};
     use crate::provider::{Provider, SharedProvider};
     use crate::types::{CallConfig, LlmResponse, Message};
     use async_trait::async_trait;
@@ -1968,7 +1809,7 @@ mod tests {
             mcp,
             session_id,
             10.0,
-            make_registry("TestPersona"),
+            Arc::new(PersonaResponder::new(make_registry("TestPersona"))),
             memory,
             Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
             vec![],
@@ -2476,7 +2317,7 @@ mod tests {
             mcp,
             session_id,
             10.0,
-            registry,
+            Arc::new(PersonaResponder::new(registry)),
             memory,
             Some(Arc::new(GoalEngine::new(&path, ScoringConfig::default()))),
             vec![],

@@ -40,7 +40,7 @@ use bastion::goal::{GoalEngine, ScoringConfig};
 use bastion::mcp::McpClient;
 use bastion::memory::sqlite::SqliteMemory;
 use bastion::memory::{Memory, PrivacyTier, SharedMemory};
-use bastion::persona::{Persona, PersonaRegistry};
+use bastion::persona::{Persona, PersonaRegistry, PersonaResponder};
 use bastion::provider::{Provider, SharedProvider};
 use bastion::session::SessionManager;
 use bastion::types::{CallConfig, LlmResponse, Message, TokenUsage};
@@ -370,7 +370,7 @@ async fn make_agent(db_path: &str) -> AgentLoop {
         mcp,
         session.create_session().await.expect("create_session"),
         10.0,
-        make_registry_for_agent(),
+        Arc::new(PersonaResponder::new(make_registry_for_agent())),
         memory,
         Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],

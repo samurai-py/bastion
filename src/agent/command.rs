@@ -28,10 +28,16 @@ pub const KNOWN_COMMANDS: &[&str] = &[
 /// `AgentLoop` no longer holds them as fields — the call site (channel/api,
 /// today only `main.rs::daemon_loop`) composes a `CommandResources` and
 /// passes it into `AgentLoop::handle_command` per call.
+///
+/// `registry` is here too (M2 P1 `Responder`): `PersonaRegistry` moved into
+/// `PersonaResponder`, so `/as` and `/cabinet` name-validation — which lives
+/// in this module's `handle_command`, not the Responder — needs its own
+/// handle, cloned by the caller from the SAME registry the responder wraps.
 #[derive(Clone, Default)]
 pub struct CommandResources {
     pub otc_store: Option<crate::channel::webhook::OtcStore>,
     pub composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
+    pub registry: PersonaRegistry,
 }
 
 pub enum CommandResult {

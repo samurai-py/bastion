@@ -872,7 +872,7 @@ async fn cli_session_deterministic_across_turns() {
     use bastion::goal::{GoalEngine, ScoringConfig};
     use bastion::mcp::McpClient;
     use bastion::memory::sqlite::SqliteMemory;
-    use bastion::persona::{Persona, PersonaRegistry};
+    use bastion::persona::{Persona, PersonaRegistry, PersonaResponder};
     use bastion::provider::Provider;
     use bastion::session::SessionManager;
     use bastion::types::{CallConfig, LlmResponse, Message, TokenUsage};
@@ -960,7 +960,9 @@ async fn cli_session_deterministic_across_turns() {
         mcp,
         new_sess.clone(),
         10.0,
-        PersonaRegistry::new_from_map(personas),
+        SArc::new(PersonaResponder::new(PersonaRegistry::new_from_map(
+            personas,
+        ))),
         memory,
         Some(SArc::new(GoalEngine::new(&path, ScoringConfig::default()))),
         vec![],
