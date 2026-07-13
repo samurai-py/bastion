@@ -278,6 +278,7 @@ GEMINI.md
 # aag:ignore:start
 # Local AAG graph and agent-integration artifacts. Keep .mcp.json versioned.
 .aag/
+.aag.lock
 .claude/settings.json
 .claude/skills/aag-*/
 .cursor/mcp.json
