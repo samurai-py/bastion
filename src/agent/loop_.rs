@@ -568,8 +568,20 @@ impl AgentLoop {
         // SEC-01 / Plan 11-04 (D-02): the owner's plain-language "sim"/"não"
         // reply resolves a pending approval-queue row, channel-agnostically,
         // before any LLM call — same early-exit shape as cockpit_command above.
-        if let Some(result) = self.approval_resolution(user_input, owner).await {
-            return result;
+        //
+        // Gated on `!untrusted` (milestone-close security review, 2026-07-13):
+        // `owner` here is only as trustworthy as the channel that resolved it.
+        // Email's `From:` header and Discord/Slack public-channel senders are
+        // NOT cryptographically authenticated (unlike Telegram's session-bound
+        // chat_id) — resolving a pending row on unauthenticated free text would
+        // let anyone who can forge/guess the owner's address approve a queued
+        // irreversible action with a bare "sim"/"yes", defeating SEC-01's
+        // explicit-confirmation guarantee. Untrusted input still falls through
+        // to a normal (quarantined) turn; the pending row is left untouched.
+        if !untrusted {
+            if let Some(result) = self.approval_resolution(user_input, owner).await {
+                return result;
+            }
         }
 
         // SEAM #4: span raiz invoke_agent por turn.
@@ -2079,6 +2091,46 @@ mod tests {
                 .expect("pending_for_owner")
                 .is_empty(),
             "row must no longer be pending after resolution"
+        );
+    }
+
+    /// Regression (milestone-close security review, 2026-07-13): an
+    /// `untrusted` turn (email `From:` header, Discord/Slack public channel —
+    /// none cryptographically authenticated) must NEVER resolve a pending
+    /// approval-queue row, even with a matching "sim"/"yes" phrase. Proves
+    /// `run_turn_for_with_trust(..., true)` skips `approval_resolution`
+    /// entirely: the capability never dispatches and the row stays pending.
+    #[tokio::test]
+    async fn approval_resolution_skipped_when_turn_is_untrusted() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+        let calls = queue_one_pending(&mut agent, "dangerous_action", "alice").await;
+
+        let resp = agent
+            .run_turn_for_with_trust("sim, pode confirmar", "alice", true)
+            .await
+            .expect("run_turn_for_with_trust must succeed");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an untrusted 'sim' must never dispatch the pending capability"
+        );
+        assert!(
+            !resp.contains("dangerous_action"),
+            "an untrusted turn must never produce an approval confirmation; got: {resp:?}"
+        );
+
+        let queue = agent.capability_registry.approval_queue().unwrap();
+        assert_eq!(
+            queue
+                .pending_for_owner("alice")
+                .await
+                .expect("pending_for_owner")
+                .len(),
+            1,
+            "row must remain pending — untrusted input must never resolve it"
         );
     }
 

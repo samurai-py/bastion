@@ -59,10 +59,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
-/// 09-REVIEW.md CR-01/CR-02: shared fail-closed token check used by `call_tool`,
-/// `list_resources`, and `read_resource`. A missing token, an empty token map, or a
-/// token that doesn't match any configured entry is rejected — never defaulted to a
-/// permissive local-owner grant.
+/// 09-REVIEW.md CR-01/CR-02: shared fail-closed token check used by `list_tools`,
+/// `call_tool`, `list_resources`, and `read_resource`. A missing token, an empty
+/// token map, or a token that doesn't match any configured entry is rejected —
+/// never defaulted to a permissive local-owner grant.
 fn authenticate_token(
     tokens: &HashMap<String, TokenPermissions>,
     meta: Option<&Meta>,
@@ -141,24 +141,31 @@ impl ServerHandler for BastionMcpServer {
 
     fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
-        let tools: Vec<Tool> = self
-            .registry
-            .list_tool_defs()
-            .into_iter()
-            .map(|def| {
-                let name = def["name"].as_str().unwrap_or("unknown").to_string();
-                let description = def["description"].as_str().unwrap_or("").to_string();
-                let schema_obj = match def.get("input_schema") {
-                    Some(Value::Object(obj)) => obj.clone(),
-                    _ => serde_json::Map::new(),
-                };
-                Tool::new(name, description, Arc::new(schema_obj))
-            })
-            .collect();
-        std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
+        let meta = request.and_then(|r| r.meta);
+        let token_permissions = self.token_permissions.clone();
+        let registry = self.registry.clone();
+
+        async move {
+            authenticate_token(&token_permissions, meta.as_ref())?;
+
+            let tools: Vec<Tool> = registry
+                .list_tool_defs()
+                .into_iter()
+                .map(|def| {
+                    let name = def["name"].as_str().unwrap_or("unknown").to_string();
+                    let description = def["description"].as_str().unwrap_or("").to_string();
+                    let schema_obj = match def.get("input_schema") {
+                        Some(Value::Object(obj)) => obj.clone(),
+                        _ => serde_json::Map::new(),
+                    };
+                    Tool::new(name, description, Arc::new(schema_obj))
+                })
+                .collect();
+            Ok(ListToolsResult::with_all_items(tools))
+        }
     }
 
     fn call_tool(
