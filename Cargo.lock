@@ -465,6 +465,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bastion-memory",
+ "bastion-providers",
  "bastion-runtime",
  "bastion-types",
  "chrono",
@@ -534,6 +535,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bastion-providers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-trait",
+ "bastion-runtime",
+ "bastion-types",
+ "futures-util",
+ "reqwest 0.13.3",
+ "schemars 0.8.22",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bastion-runtime"
 version = "0.1.0"
 dependencies = [
@@ -555,6 +573,7 @@ name = "bastion-types"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

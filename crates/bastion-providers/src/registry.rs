@@ -43,7 +43,7 @@ pub fn resolve_provider(model_name: &str) -> anyhow::Result<Box<dyn Provider>> {
 /// the old direct `registry::resolve_provider` call it replaces.
 pub struct RegistryProviderResolver;
 
-impl crate::agent::ports::ProviderResolver for RegistryProviderResolver {
+impl bastion_runtime::agent::ports::ProviderResolver for RegistryProviderResolver {
     fn resolve(&self, model: &str) -> anyhow::Result<Box<dyn Provider>> {
         resolve_provider(model)
     }

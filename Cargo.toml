@@ -28,6 +28,7 @@ all = "warn"
 bastion-types      = { path = "crates/bastion-types" }
 bastion-runtime    = { path = "crates/bastion-runtime" }
 bastion-memory     = { path = "crates/bastion-memory" }
+bastion-providers  = { path = "crates/bastion-providers" }
 tokio              = { version = "1",    features = ["full"] }
 async-openai       = { version = "0.38", features = ["chat-completion"] }
 reqwest            = { version = "0.13", features = ["json", "stream"] }

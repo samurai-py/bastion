@@ -10,35 +10,17 @@
 //! D-08: the full debate transcript is opt-in (exposed via `/cabinet`); this function
 //! only returns the synthesized verdict, not the raw transcript.
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-
 use crate::cabinet::Turn;
 use crate::capability::CapabilityRegistry;
 use crate::provider::Provider;
 use crate::types::{CallConfig, Message, MessageContent, Role};
-
-/// A single persona's dissenting stance.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Dissent {
-    /// Name of the dissenting persona.
-    pub persona: String,
-    /// The position that differs from the recommendation.
-    pub position: String,
-}
-
-/// The unified output of Cabinet synthesis.
-///
-/// `dissents` is a REQUIRED field (not Option) — the LLM is instructed to populate it
-/// whenever any persona's position diverged from the recommendation. Callers must never
-/// treat an empty `dissents` as proof of consensus; they should inspect the transcript.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CabinetVerdict {
-    /// The Cabinet's unified recommendation (single voice).
-    pub recommendation: String,
-    /// Explicit dissenting positions. Empty only when ALL personas were aligned.
-    pub dissents: Vec<Dissent>,
-}
+// `CabinetVerdict`/`Dissent` moved to `bastion-types` (M2 step 5) — pure
+// JsonSchema-deriving data shared with `bastion-providers`' ollama.rs
+// diagnostic test. Re-exported `pub` here (via the `crate::types` /
+// `bastion_types::*` shim) so external paths like
+// `crate::cabinet::synth::CabinetVerdict` (e.g. `persona/responder.rs`)
+// keep resolving unchanged.
+pub use crate::types::{CabinetVerdict, Dissent};
 
 /// Synthesize the Cabinet transcript into a `CabinetVerdict`.
 ///

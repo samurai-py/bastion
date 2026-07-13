@@ -526,7 +526,7 @@ mod tests {
     /// findings.
     #[test]
     fn cabinet_verdict_production_schema_ref_defs_diagnostic() {
-        let schema = schemars::schema_for!(crate::cabinet::synth::CabinetVerdict);
+        let schema = schemars::schema_for!(crate::types::CabinetVerdict);
         let value = serde_json::to_value(&schema).expect("schema serializes");
 
         let has_ref_defs = schema_contains_ref_or_defs(&value);

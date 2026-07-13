@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -292,6 +293,32 @@ pub struct Belief {
     pub superseded_by: Option<i64>,
     /// Timestamp (nanos) at which this belief was superseded, if any.
     pub supersedes_at: Option<i64>,
+}
+
+/// A single persona's dissenting stance (Cabinet synthesis, CAB-05/D-07).
+/// Moved here from `src/cabinet/synth.rs` (M2 step 5) — pure `JsonSchema`-deriving
+/// data referenced by `bastion-providers`' ollama.rs GBNF-diagnostic test, which
+/// must not depend on the product-level Cabinet synthesis logic itself.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Dissent {
+    /// Name of the dissenting persona.
+    pub persona: String,
+    /// The position that differs from the recommendation.
+    pub position: String,
+}
+
+/// The unified output of Cabinet synthesis.
+///
+/// `dissents` is a REQUIRED field (not Option) — the LLM is instructed to populate it
+/// whenever any persona's position diverged from the recommendation. Callers must never
+/// treat an empty `dissents` as proof of consensus; they should inspect the transcript.
+/// Moved here from `src/cabinet/synth.rs` (M2 step 5, same rationale as [`Dissent`]).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CabinetVerdict {
+    /// The Cabinet's unified recommendation (single voice).
+    pub recommendation: String,
+    /// Explicit dissenting positions. Empty only when ALL personas were aligned.
+    pub dissents: Vec<Dissent>,
 }
 
 #[derive(Debug, thiserror::Error)]
