@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members  = []
+members  = ["crates/*"]
 
 [package]
 name        = "bastion"
@@ -25,6 +25,7 @@ unsafe_code = "forbid"
 all = "warn"
 
 [dependencies]
+bastion-types      = { path = "crates/bastion-types" }
 tokio              = { version = "1",    features = ["full"] }
 async-openai       = { version = "0.38", features = ["chat-completion"] }
 reqwest            = { version = "0.13", features = ["json", "stream"] }
