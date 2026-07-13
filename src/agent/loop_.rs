@@ -1,4 +1,4 @@
-use crate::agent::command::{handle_command, CommandResult};
+use crate::agent::command::{handle_command, CommandResources, CommandResult};
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::identity::IdentityProvider;
@@ -65,15 +65,6 @@ pub struct AgentLoop {
     pub pending_rx: Option<mpsc::Receiver<String>>,
     /// Forced persona for the next turn (set by /as command).
     pub forced_persona: Option<String>,
-    /// CR-02: shared OTC store handle, injected by main.rs when the webhook channel
-    /// starts. `/connect-app` writes one-time codes here for the mobile pairing flow
-    /// (`/auth/exchange`). `None` when the webhook channel is not running.
-    pub otc_store: Option<crate::channel::webhook::OtcStore>,
-    /// SEC-03: Composio OAuth client, injected by main.rs when `COMPOSIO_API_KEY` is
-    /// configured. `/connect-app-composio` uses this to initiate real OAuth
-    /// connections. `None` (the opt-in default) degrades the command to an
-    /// "unavailable" message rather than panicking the daemon.
-    pub composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
     /// D-11 (Plan 08-01) / SO-03 (Plan 08-08): ordered list of model-name strings tried,
     /// in order, when the primary provider suffers a hard/persistent failure
     /// (`complete_with_fallback_ladder`'s rung 3). Sourced from `AgentConfig.fallback_models`
@@ -148,8 +139,6 @@ impl AgentLoop {
             pending_tx,
             pending_rx: Some(pending_rx),
             forced_persona: None,
-            otc_store: None,
-            composio_oauth: None,
             fallback_models,
             failure_sink,
             #[cfg(test)]
@@ -259,31 +248,14 @@ impl AgentLoop {
         agent
     }
 
-    /// Register MeshSliceProvider (SEAM #2 for mesh slices from remote owners).
-    ///
-    /// Called after AgentLoop::new() when mesh is configured (MESH_IDENTITY_KEY set).
-    /// The slice_store is shared with the ingest_handler via AppState so that received
-    /// slices become visible in the system prompt on the very next agent turn.
-    ///
-    /// WR-06: uses the real owner_id (BASTION_OWNER_ID env var) rather than session_id
-    /// as the local_owner passed to MeshSliceProvider. session_id is a per-session UUID
-    /// that changes across restarts — it is NOT a stable owner identifier.
-    pub fn add_mesh_slice_provider(
-        &mut self,
-        store: crate::mesh::context_provider::MeshSliceStore,
-    ) {
-        // WR-06: read real owner_id from env; fall back to DEFAULT_OWNER (not session_id).
-        // BASTION_OWNER_ID is the stable identity used by P2PTransport and the mesh config.
-        let local_owner = std::env::var("BASTION_OWNER_ID")
-            .or_else(|_| std::env::var("MESH_OWNER_ID"))
-            .unwrap_or_else(|_| DEFAULT_OWNER.to_string());
-        let mesh_provider =
-            crate::mesh::context_provider::MeshSliceProvider::from_store(local_owner, store);
-        self.context_providers.push(Box::new(mesh_provider));
-        tracing::info!(
-            event = "mesh_slice_provider_registered",
-            "MeshSliceProvider registered in context_providers (SEAM #2)"
-        );
+    /// P5 despejo (M2): generic SEAM #2 registration, used after `AgentLoop::new()`
+    /// to add any already-built `TurnContextProvider` (e.g. mesh slices from
+    /// remote owners) — the loop only ever receives the boxed trait object, it
+    /// never knows what a "mesh slice" is. Constructing the concrete provider
+    /// (e.g. `MeshSliceProvider::from_store`, resolving `BASTION_OWNER_ID`) is
+    /// the caller's job now (`main.rs::daemon_loop`), not the kernel's.
+    pub fn add_context_provider(&mut self, provider: Box<dyn TurnContextProvider>) {
+        self.context_providers.push(provider);
     }
 
     /// SEAM #2 — Constrói o system prompt para o turn atual.
@@ -313,7 +285,7 @@ impl AgentLoop {
     /// `build_system_prompt_parts` (below) is the pub seam `tests/prompt_cache_prefix.rs`
     /// uses to assert `parts[0..2]` stays byte-identical across turns with different
     /// volatile content (D-14b regression guard) — do NOT reorder `context_providers` in
-    /// `AgentLoop::new`/`add_mesh_slice_provider` without updating that test's `k`.
+    /// `AgentLoop::new`/`add_context_provider` without updating that test's `k`.
     async fn build_system_prompt(
         &self,
         owner: &str,
@@ -1647,24 +1619,15 @@ impl AgentLoop {
         Ok(final_text)
     }
 
-    /// CR-02: inject the shared OTC store handle so `/connect-app` can mint pairing
-    /// codes that `/auth/exchange` (in the webhook server) consumes. Called by main.rs
-    /// after `new_otc_store()`; the same Arc is also moved into `serve_with_mesh`.
-    pub fn set_otc_store(&mut self, store: crate::channel::webhook::OtcStore) {
-        self.otc_store = Some(store);
-    }
-
-    /// SEC-03: inject the Composio OAuth client so `/connect-app-composio` can
-    /// initiate real OAuth connections. Called by main.rs when `COMPOSIO_API_KEY`
-    /// is configured (opt-in — mirrors `set_otc_store`'s shape exactly).
-    pub fn set_composio_oauth(&mut self, oauth: std::sync::Arc<crate::mcp::oauth::ComposioOAuth>) {
-        self.composio_oauth = Some(oauth);
-    }
-
+    /// P5 despejo (M2): `otc_store`/`composio_oauth` are no longer `AgentLoop`
+    /// fields (product/UX concepts, not kernel state — the kernel never knew
+    /// what OTC pairing or Composio OAuth are). The caller composes a
+    /// `CommandResources` (today: `main.rs::daemon_loop`) and passes it per call.
     pub async fn handle_command(
         &mut self,
         input: &str,
         owner: &str,
+        resources: &CommandResources,
     ) -> anyhow::Result<CommandResult> {
         handle_command(
             input,
@@ -1672,8 +1635,8 @@ impl AgentLoop {
             &self.registry,
             &self.memory,
             &mut self.forced_persona,
-            self.otc_store.as_ref(),
-            self.composio_oauth.as_deref(),
+            resources.otc_store.as_ref(),
+            resources.composio_oauth.as_deref(),
             owner,
         )
         .await

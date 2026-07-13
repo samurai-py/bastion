@@ -392,7 +392,7 @@ async fn daemon_loop(
     // `agent.tool_source` wraps, shared by-Arc from `main()`.
     mcp_for_product: Arc<McpClient>,
 ) -> anyhow::Result<()> {
-    use bastion::agent::command::CommandResult;
+    use bastion::agent::command::{CommandResources, CommandResult};
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -403,6 +403,14 @@ async fn daemon_loop(
         .pending_rx
         .take()
         .expect("pending_rx must be available at daemon start");
+
+    // M2 (P5 despejo): `otc_store`/`composio_oauth` are no longer `AgentLoop`
+    // fields — this replaces `agent.set_otc_store`/`agent.set_composio_oauth`.
+    // Declared here (before the webhook-gated block below, which is the only
+    // place that ever populates it — same condition as before) so BOTH select!
+    // arms below (`stdin` and `inbound_rx`) that call `agent.handle_command`
+    // see the same resources the removed setters used to inject onto `agent`.
+    let mut command_resources = CommandResources::default();
 
     // CR-07: create AgentHandle + inbound receiver BEFORE the select! loop.
     // Channels (Telegram, webhook) hold clones of `handle` and send messages into `inbound_rx`.
@@ -458,11 +466,27 @@ async fn daemon_loop(
                 );
                 let shared: bastion::mesh::SharedMeshTransport = Arc::new(transport);
 
-                // MeshSliceProvider::new returns (provider, store); add_mesh_slice_provider
-                // constructs from the store — so we use from_store path via add_mesh_slice_provider.
+                // MeshSliceProvider::new returns (provider, store); build the `from_store`
+                // provider here (M2 P5 despejo — `add_mesh_slice_provider` is gone from the
+                // loop; it only receives an already-built `TurnContextProvider` boxed now).
                 let (_, store) =
                     bastion::mesh::context_provider::MeshSliceProvider::new(local_owner.clone());
-                agent.add_mesh_slice_provider(store.clone());
+                // WR-06: mirrors the removed `add_mesh_slice_provider`'s OWN owner
+                // resolution exactly (BASTION_OWNER_ID, then MESH_OWNER_ID, then
+                // DEFAULT_OWNER) — deliberately NOT the outer `local_owner` above (no
+                // MESH_OWNER_ID fallback there); preserved verbatim, not reconciled.
+                let local_owner_for_mesh_provider = std::env::var("BASTION_OWNER_ID")
+                    .or_else(|_| std::env::var("MESH_OWNER_ID"))
+                    .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+                let mesh_provider = bastion::mesh::context_provider::MeshSliceProvider::from_store(
+                    local_owner_for_mesh_provider,
+                    store.clone(),
+                );
+                agent.add_context_provider(Box::new(mesh_provider));
+                tracing::info!(
+                    event = "mesh_slice_provider_registered",
+                    "MeshSliceProvider registered in context_providers (SEAM #2)"
+                );
 
                 // Periodic mesh sync (mesh.sync_interval minutes, default 15; 0 = disable)
                 let sync_interval = cfg.mesh.sync_interval;
@@ -535,13 +559,13 @@ async fn daemon_loop(
         // The same Arc is injected into the agent so the /connect-app REPL command
         // writes codes the webhook server reads (06-08 OTC-writer wiring).
         let otc_store = bastion::channel::webhook::new_otc_store();
-        agent.set_otc_store(otc_store.clone());
+        command_resources.otc_store = Some(otc_store.clone());
 
         // SEC-03: mirrors the OTC store wiring above — inject the same ComposioOAuth
-        // Arc into both the agent (for /connect-app-composio) and serve_with_mesh
-        // (for the /auth/composio/callback route), only when configured.
+        // Arc into both the command dispatch (for /connect-app-composio) and
+        // serve_with_mesh (for the /auth/composio/callback route), only when configured.
         if let Some(oauth) = &composio_oauth {
-            agent.set_composio_oauth(oauth.clone());
+            command_resources.composio_oauth = Some(oauth.clone());
         }
 
         // WhatsApp (CHAN-01): reuses this same webhook router (10-RESEARCH.md
@@ -858,7 +882,11 @@ async fn daemon_loop(
                     Some(s) if s.trim().is_empty() => continue,
                     Some(s) if s.trim().starts_with('/') => {
                         match agent
-                            .handle_command(s.trim(), bastion::agent::loop_::DEFAULT_OWNER)
+                            .handle_command(
+                                s.trim(),
+                                bastion::agent::loop_::DEFAULT_OWNER,
+                                &command_resources,
+                            )
                             .await?
                         {
                             CommandResult::Stop => break,
@@ -927,7 +955,10 @@ async fn daemon_loop(
                 {
                     Ok(format!("{cmd} is console-only — not allowed remotely."))
                 } else if command_token.is_some() {
-                    match agent.handle_command(trimmed, &req.owner).await {
+                    match agent
+                        .handle_command(trimmed, &req.owner, &command_resources)
+                        .await
+                    {
                         Ok(CommandResult::Handled(msg)) => Ok(msg),
                         Ok(CommandResult::Unknown(cmd)) => {
                             Ok(format!("Unknown command: {cmd}. Type /help."))

@@ -20,6 +20,20 @@ pub const KNOWN_COMMANDS: &[&str] = &[
     "/help",
 ];
 
+/// P5 despejo (M2): product-level resources a command dispatch needs beyond
+/// what the kernel loop itself tracks — the shared OTC pairing store
+/// (`/connect-app`) and the opt-in Composio OAuth client
+/// (`/connect-app-composio`). Neither is a kernel concept (OTC pairing is
+/// mobile-cockpit UX; Composio is a third-party product integration), so
+/// `AgentLoop` no longer holds them as fields — the call site (channel/api,
+/// today only `main.rs::daemon_loop`) composes a `CommandResources` and
+/// passes it into `AgentLoop::handle_command` per call.
+#[derive(Clone, Default)]
+pub struct CommandResources {
+    pub otc_store: Option<crate::channel::webhook::OtcStore>,
+    pub composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
+}
+
 pub enum CommandResult {
     /// Carries the user-facing text — the stdin console prints it, the webhook
     /// channel (WEB-CMD-01) puts it straight in the JSON reply. Neither path
