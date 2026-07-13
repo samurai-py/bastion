@@ -201,6 +201,99 @@ pub struct Goal {
     pub last_confirmed: Option<i64>,
 }
 
+/// Belief kind — factual (default, Phase 1-6 behavior) or procedural (LEARN-01).
+/// Defaults to `Factual` so every pre-Phase-7 row (DB default `'factual'`) decodes
+/// identically to before this column existed — zero behavior change for existing data.
+///
+/// Moved here from `src/memory/mod.rs` (M2 3b, decision D1 — pure data in the
+/// `Memory` trait's signatures; the trait itself lives in `bastion-runtime`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BeliefKind {
+    #[default]
+    Factual,
+    Procedural,
+}
+
+/// Outcome signal for a procedural belief's helpful/harmful/neutral counters.
+/// Maps 1:1 onto `record_belief_outcome`'s counter-increment column choice.
+/// Moved here from `src/memory/mod.rs` (M2 3b, decision D1).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Outcome {
+    Helpful,
+    Harmful,
+    Neutral,
+}
+
+/// Builder-style draft for a new procedural belief. Used by `store_procedural_belief`
+/// instead of widening `store_belief`'s already-7-argument signature (Pitfall 5).
+/// `insight` maps onto the existing `content` column (ACE terminology overlay) —
+/// there is no parallel content field.
+/// Moved here from `src/memory/mod.rs` (M2 3b, decision D1).
+pub struct BeliefDraft {
+    pub owner_id: String,
+    pub persona_tag: Option<String>,
+    pub issue: Option<String>,
+    pub insight: String,
+    pub keywords: Vec<String>,
+    pub session_id: String,
+    pub source: String,
+    pub tier: Option<PrivacyTier>,
+}
+
+/// A queued, metadata-only "this belief needs a corrected re-learn" signal (LEARN-04
+/// edit half). NEVER carries raw correction text — content lives only in the
+/// tier-gated life-log/OTel stream the Reflector (07-05) already reads; this row
+/// only points at WHICH belief and WHAT tier.
+/// Moved here from `src/memory/mod.rs` (M2 3b, decision D1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingCorrection {
+    pub id: i64,
+    pub belief_id: i64,
+    pub owner_id: String,
+    pub tier: Option<PrivacyTier>,
+    pub created_at: i64,
+}
+
+/// A retrieved belief (read-only view of the beliefs table row).
+/// Moved here from `src/memory/mod.rs` (M2 3b, decision D1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Belief {
+    pub id: i64,
+    pub owner_id: String,
+    pub persona_tag: Option<String>,
+    pub content: String,
+    pub weight: f64,
+    pub is_core: bool,
+    /// Privacy tier — None if column absent or unset in DB (treated as LocalOnly by egress gate).
+    pub tier: Option<PrivacyTier>,
+    /// Factual (default) or procedural (LEARN-01). Never `Option` — decodes to
+    /// `Factual` on NULL/unrecognized column value, matching the SQL `DEFAULT 'factual'`.
+    pub kind: BeliefKind,
+    /// Procedural skill-matching tags. Empty vec on NULL or malformed JSON — never panics.
+    pub keywords: Vec<String>,
+    /// The problem/context a procedural belief addresses (ACE "issue" terminology).
+    pub issue: Option<String>,
+    pub helpful_count: i64,
+    pub harmful_count: i64,
+    pub neutral_count: i64,
+    /// Start of this belief's valid-time window (bi-temporal, MEM-01/D-11).
+    /// `None` means open from the beginning of time — permissive.
+    pub valid_from: Option<i64>,
+    /// End of this belief's valid-time window (bi-temporal, MEM-01/D-11). `None`
+    /// means open/no-expiry — a PERMISSIVE convention that deliberately diverges
+    /// from `tier: Option<PrivacyTier>` 15 lines above in this same struct, whose
+    /// `None` is treated as deny-on-ambiguity by the egress gate. Do NOT "fix" this
+    /// field by analogy to `tier`'s convention — NULL here means valid, not denied.
+    pub valid_until: Option<i64>,
+    /// Id of the belief that superseded this one, if any (soft-supersession, D-11).
+    /// `None` means this belief has not been superseded.
+    pub superseded_by: Option<i64>,
+    /// Timestamp (nanos) at which this belief was superseded, if any.
+    pub supersedes_at: Option<i64>,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BastionError {

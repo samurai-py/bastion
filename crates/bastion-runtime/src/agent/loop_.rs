@@ -1466,14 +1466,10 @@ mod cache_usage_attributes_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::goal::{GoalEngine, ScoringConfig};
-    use crate::memory::sqlite::SqliteMemory;
     use crate::memory::PrivacyTier;
-    use crate::persona::{Persona, PersonaRegistry, PersonaResponder};
     use crate::provider::{Provider, SharedProvider};
     use crate::types::{CallConfig, LlmResponse, Message};
     use async_trait::async_trait;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio::sync::RwLock;
@@ -1583,20 +1579,176 @@ mod tests {
         }) as Box<dyn Provider>))
     }
 
-    fn make_registry(name: &str) -> PersonaRegistry {
-        let mut personas = HashMap::new();
-        personas.insert(
-            name.to_string(),
-            Persona {
-                name: name.to_string(),
-                description: Some("Test persona".to_string()),
-                system_prompt: format!("You are {name}."),
-                tier: PrivacyTier::CloudOk,
-                weight: 0.8,
-                skills: vec![],
-            },
-        );
-        PersonaRegistry::new_from_map(personas)
+    // ------------------------------------------------------------------
+    // Kernel-local test doubles (M2 step 3b, decision A4): the tests that
+    // remain in this module exercise PRIVATE `AgentLoop` methods
+    // (`approval_resolution`, `complete_with_fallback_ladder`) and therefore
+    // cannot live in an integration-test binary. Their fixture uses these
+    // doubles instead of product types (PersonaResponder / SqliteMemory /
+    // GoalEngine / McpToolSource / EvalFailureSink) — the kernel crate cannot
+    // depend on the app. `ApprovalQueue`/`SessionManager`/`CapabilityRegistry`
+    // are kernel and stay real. Asserts are untouched; only setup changed.
+    // The public-API tests that used the old product-backed fixture moved
+    // VERBATIM to `tests/agent_loop_public.rs` in the app crate.
+    // ------------------------------------------------------------------
+
+    /// Minimal kernel-side `Responder` double: calls the turn's provider once
+    /// (no persona routing, no deliberation) and returns its text — the same
+    /// observable shape the real single-persona dispatch produces for these
+    /// fixtures' `MockProvider` ("response from …").
+    struct MockResponder;
+
+    #[async_trait]
+    impl crate::agent::ports::Responder for MockResponder {
+        async fn respond(
+            &self,
+            turn: crate::agent::ports::TurnContext<'_>,
+        ) -> anyhow::Result<crate::agent::ports::RespondOutcome> {
+            let response = turn
+                .provider
+                .read()
+                .await
+                .complete(turn.history, &CallConfig::default())
+                .await?;
+            Ok(crate::agent::ports::RespondOutcome {
+                text: response.text,
+                attribution: vec![],
+                turn_tier: None,
+            })
+        }
+    }
+
+    struct NoopMemory;
+
+    #[async_trait]
+    impl crate::memory::Memory for NoopMemory {
+        async fn store_belief(
+            &self,
+            _owner_id: &str,
+            _persona_tag: Option<&str>,
+            _content: &str,
+            _session_id: &str,
+            _source: &str,
+            _is_core: bool,
+            _tier: Option<PrivacyTier>,
+        ) -> anyhow::Result<i64> {
+            Ok(1)
+        }
+        async fn retrieve_tagged(
+            &self,
+            _owner_id: &str,
+            _persona_tag: Option<&str>,
+        ) -> anyhow::Result<Vec<crate::memory::Belief>> {
+            Ok(vec![])
+        }
+        async fn revoke_belief(&self, _owner_id: &str, _id: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn supersede_belief(
+            &self,
+            _owner_id: &str,
+            _old_id: i64,
+            _new_id: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn load_core(&self, _owner_id: &str) -> anyhow::Result<Vec<crate::memory::Belief>> {
+            Ok(vec![])
+        }
+        async fn retrieve_all_beliefs(
+            &self,
+            _owner_id: &str,
+        ) -> anyhow::Result<Vec<crate::memory::Belief>> {
+            Ok(vec![])
+        }
+        async fn provenance_for(
+            &self,
+            _owner_id: &str,
+            _belief_id: i64,
+        ) -> anyhow::Result<Vec<(String, String)>> {
+            Ok(vec![])
+        }
+        async fn store_procedural_belief(
+            &self,
+            _draft: crate::memory::BeliefDraft,
+        ) -> anyhow::Result<i64> {
+            Ok(1)
+        }
+        async fn record_belief_outcome(
+            &self,
+            _owner_id: &str,
+            _id: i64,
+            _outcome: crate::memory::Outcome,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn reinforce_belief(
+            &self,
+            _owner_id: &str,
+            _id: i64,
+            _delta: f64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn evaporate_beliefs(
+            &self,
+            _owner_id: &str,
+            _factor: f64,
+            _floor: f64,
+        ) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+        async fn record_pending_correction(
+            &self,
+            _owner_id: &str,
+            _belief_id: i64,
+            _tier: Option<PrivacyTier>,
+        ) -> anyhow::Result<i64> {
+            Ok(1)
+        }
+        async fn take_pending_corrections(
+            &self,
+            _owner_id: &str,
+        ) -> anyhow::Result<Vec<crate::memory::PendingCorrection>> {
+            Ok(vec![])
+        }
+    }
+
+    struct EmptyToolSource;
+
+    #[async_trait]
+    impl crate::agent::ports::ToolSource for EmptyToolSource {
+        async fn tool_defs(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(vec![])
+        }
+        async fn call_tool_with_timeout(
+            &self,
+            name: &str,
+            _args: serde_json::Value,
+            _owner: &str,
+        ) -> anyhow::Result<serde_json::Value> {
+            anyhow::bail!("EmptyToolSource has no tool '{name}'")
+        }
+    }
+
+    struct NoopFailureSink;
+
+    impl crate::agent::ports::FailureSink for NoopFailureSink {
+        fn record_failure(
+            &self,
+            _kind: bastion_types::FailureKind,
+            _tier: Option<PrivacyTier>,
+            _detail: &str,
+        ) {
+        }
+    }
+
+    struct UnreachableResolver;
+
+    impl crate::agent::ports::ProviderResolver for UnreachableResolver {
+        fn resolve(&self, model: &str) -> anyhow::Result<Box<dyn Provider>> {
+            anyhow::bail!("no resolver scripted for '{model}'")
+        }
     }
 
     async fn make_loop(db_path: &str) -> AgentLoop {
@@ -1605,341 +1757,30 @@ mod tests {
         let session_id = session.create_session().await.expect("create_session");
 
         let memory: SharedMemory = Arc::new(RwLock::new(
-            Box::new(SqliteMemory::new(db_path)) as Box<dyn crate::memory::Memory>
+            Box::new(NoopMemory) as Box<dyn crate::memory::Memory>
         ));
-
-        // connect_all with non-existent path returns empty client (load_mcp_config returns {})
-        let mcp = Arc::new(
-            crate::mcp::McpClient::connect_all("nonexistent_mcp.json")
-                .await
-                .expect("connect_all empty"),
-        );
 
         AgentLoop::new(
             make_provider("TestPersona"),
             session,
-            Arc::new(crate::mcp::McpToolSource::new(mcp)),
+            Arc::new(EmptyToolSource),
             session_id,
             10.0,
-            Arc::new(PersonaResponder::new(make_registry("TestPersona"))),
-            memory.clone(),
-            Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
+            Arc::new(MockResponder),
+            memory,
+            None,
             vec![],
             db_path,
-            Arc::new(crate::eval::failure_sink::EvalFailureSink),
-            crate::agent::default_context_providers(&memory),
-            Arc::new(crate::provider::registry::RegistryProviderResolver),
-            Some(Arc::new(crate::agent::dream::DreamFlush::new(
-                memory.clone(),
-            ))),
-            Some(Arc::new(crate::agent::skills::SkillReloadObserver)),
+            Arc::new(NoopFailureSink),
+            vec![],
+            Arc::new(UnreachableResolver),
+            None,
+            None,
         )
-    }
-
-    #[tokio::test]
-    async fn run_turn_benign_message_returns_persona_response() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-
-        let resp = agent
-            .run_turn("hello world")
-            .await
-            .expect("run_turn failed");
-        assert!(
-            !resp.is_empty(),
-            "response must not be empty; got: {resp:?}"
-        );
-    }
-
-    // --- Plan 11-04 (SEC-01): run_turn_for's approval-resolution intercept ----
-
-    /// Stub capability with a call counter — proves whether `invoke()` actually
-    /// dispatched. Mirrors `capability::registry::tests::ApprovalStubCap`
-    /// exactly (that one is private to its own module, so this test module gets
-    /// its own copy).
-    struct ApprovalResolutionStubCap {
-        cap_name: String,
-        schema: serde_json::Value,
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl crate::capability::Capability for ApprovalResolutionStubCap {
-        fn name(&self) -> &str {
-            &self.cap_name
-        }
-        fn description(&self) -> &str {
-            "approval-resolution stub"
-        }
-        fn input_schema(&self) -> &serde_json::Value {
-            &self.schema
-        }
-        async fn invoke(
-            &self,
-            _args: serde_json::Value,
-            _ctx: &crate::capability::InvokeCtx,
-        ) -> anyhow::Result<serde_json::Value> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(serde_json::json!({"dispatched": true}))
-        }
-        fn needs_approval(&self) -> bool {
-            true
-        }
-    }
-
-    fn cloudok_ctx(owner: &str) -> crate::capability::InvokeCtx {
-        // Clears Policy 1 (egress) so enqueue_or_reuse's own invoke() call
-        // reaches Policy 2 (the approval gate) — same convention as
-        // capability::registry::tests::ctx_for.
-        crate::capability::InvokeCtx {
-            owner: owner.to_string(),
-            privacy_tier: Some(PrivacyTier::CloudOk),
-        }
-    }
-
-    /// Queues one `needs_approval()==true` capability call for `owner` via the
-    /// real `invoke()` path (not a direct `ApprovalQueue` call) — proves the
-    /// row this test resolves is the SAME kind of row Policy 2 actually creates.
-    async fn queue_one_pending(
-        agent: &mut AgentLoop,
-        cap_name: &str,
-        owner: &str,
-    ) -> Arc<std::sync::atomic::AtomicUsize> {
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        agent
-            .capability_registry
-            .register(Arc::new(ApprovalResolutionStubCap {
-                cap_name: cap_name.to_string(),
-                schema: serde_json::json!({}),
-                calls: calls.clone(),
-            }))
-            .expect("register stub capability");
-        agent
-            .capability_registry
-            .invoke(cap_name, serde_json::json!({"x": 1}), &cloudok_ctx(owner))
-            .await
-            .expect("first invoke must queue, not error");
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "queuing must not dispatch"
-        );
-        calls
     }
 
     /// Test 1: zero pending rows -> None immediately, regression: normal turn
     /// proceeds unaffected (existing run_turn_for behavior unchanged).
-    #[tokio::test]
-    async fn approval_resolution_returns_none_with_zero_pending_rows() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let agent = make_loop(&path).await;
-
-        assert!(agent.approval_resolution("sim", "alice").await.is_none());
-
-        // Regression: a normal turn still completes end-to-end (the LLM mock
-        // response, not a hardcoded approval string).
-        let mut agent = agent;
-        let resp = agent
-            .run_turn_for("hello there", "alice")
-            .await
-            .expect("run_turn_for must succeed");
-        assert!(resp.contains("response from"), "got: {resp:?}");
-    }
-
-    /// Test 2: one pending row, owner sends "sim" -> approve + real dispatch +
-    /// a confirmation string; the LLM is never invoked for this turn (proven by
-    /// the response NOT being the mock provider's "response from ..." text).
-    #[tokio::test]
-    async fn approval_resolution_approves_and_dispatches_on_sim() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        let calls = queue_one_pending(&mut agent, "dangerous_action", "alice").await;
-
-        let resp = agent
-            .run_turn_for("sim, pode confirmar", "alice")
-            .await
-            .expect("run_turn_for must succeed");
-
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the originally-queued capability must dispatch exactly once"
-        );
-        assert!(
-            resp.contains("dangerous_action"),
-            "confirmation must name the executed capability; got: {resp:?}"
-        );
-        assert!(
-            !resp.contains("response from"),
-            "the LLM mock must never be invoked for an approval-resolution turn; got: {resp:?}"
-        );
-
-        let queue = agent.capability_registry.approval_queue().unwrap();
-        assert!(
-            queue
-                .pending_for_owner("alice")
-                .await
-                .expect("pending_for_owner")
-                .is_empty(),
-            "row must no longer be pending after resolution"
-        );
-    }
-
-    /// Regression (milestone-close security review, 2026-07-13): an
-    /// `untrusted` turn (email `From:` header, Discord/Slack public channel —
-    /// none cryptographically authenticated) must NEVER resolve a pending
-    /// approval-queue row, even with a matching "sim"/"yes" phrase. Proves
-    /// `run_turn_for_with_trust(..., true)` skips `approval_resolution`
-    /// entirely: the capability never dispatches and the row stays pending.
-    #[tokio::test]
-    async fn approval_resolution_skipped_when_turn_is_untrusted() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        let calls = queue_one_pending(&mut agent, "dangerous_action", "alice").await;
-
-        let resp = agent
-            .run_turn_for_with_trust("sim, pode confirmar", "alice", true)
-            .await
-            .expect("run_turn_for_with_trust must succeed");
-
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "an untrusted 'sim' must never dispatch the pending capability"
-        );
-        assert!(
-            !resp.contains("dangerous_action"),
-            "an untrusted turn must never produce an approval confirmation; got: {resp:?}"
-        );
-
-        let queue = agent.capability_registry.approval_queue().unwrap();
-        assert_eq!(
-            queue
-                .pending_for_owner("alice")
-                .await
-                .expect("pending_for_owner")
-                .len(),
-            1,
-            "row must remain pending — untrusted input must never resolve it"
-        );
-    }
-
-    /// Test 3: one pending row, owner sends "não" -> reject; the capability
-    /// never dispatches.
-    #[tokio::test]
-    async fn approval_resolution_rejects_and_never_dispatches_on_nao() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        let calls = queue_one_pending(&mut agent, "dangerous_action", "alice").await;
-
-        let resp = agent
-            .run_turn_for("não, cancela isso", "alice")
-            .await
-            .expect("run_turn_for must succeed");
-
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "a rejected action must never dispatch"
-        );
-        assert!(
-            resp.contains("cancel") || resp.to_lowercase().contains("cancel"),
-            "got: {resp:?}"
-        );
-
-        let queue = agent.capability_registry.approval_queue().unwrap();
-        let pending = queue
-            .pending_for_owner("alice")
-            .await
-            .expect("pending_for_owner");
-        assert!(
-            pending.is_empty(),
-            "rejected row must no longer be 'pending' status"
-        );
-    }
-
-    /// Test 4: one pending row, owner sends an UNRELATED message -> None,
-    /// falling through to a completely normal turn; the pending row is
-    /// untouched (still pending, capability never dispatches).
-    #[tokio::test]
-    async fn approval_resolution_falls_through_on_unrelated_message() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        let calls = queue_one_pending(&mut agent, "dangerous_action", "alice").await;
-
-        let resp = agent
-            .run_turn_for("what's the weather like today?", "alice")
-            .await
-            .expect("run_turn_for must succeed");
-
-        assert!(
-            resp.contains("response from"),
-            "an unrelated message must fall through to a normal LLM turn; got: {resp:?}"
-        );
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "an unrelated message must never dispatch the pending capability"
-        );
-
-        let queue = agent.capability_registry.approval_queue().unwrap();
-        let pending = queue
-            .pending_for_owner("alice")
-            .await
-            .expect("pending_for_owner");
-        assert_eq!(pending.len(), 1, "the pending row must remain untouched");
-    }
-
-    /// Test 5: multiple pending rows for the same owner — a plain "sim" with no
-    /// id resolves the OLDEST pending row only (deterministic tie-break).
-    #[tokio::test]
-    async fn approval_resolution_resolves_oldest_pending_row_only() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-
-        let calls_a = queue_one_pending(&mut agent, "action_a", "alice").await;
-        // Nanosecond-resolution created_at should already differ, but a tiny
-        // sleep makes the ordering assertion deterministic regardless of clock
-        // granularity on any given CI runner.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let calls_b = queue_one_pending(&mut agent, "action_b", "alice").await;
-
-        let resp = agent
-            .run_turn_for("sim", "alice")
-            .await
-            .expect("run_turn_for must succeed");
-
-        assert!(
-            resp.contains("action_a"),
-            "must resolve the OLDEST (first-queued) row; got: {resp:?}"
-        );
-        assert_eq!(
-            calls_a.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "action_a (oldest) must dispatch"
-        );
-        assert_eq!(
-            calls_b.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "action_b (newer) must remain untouched"
-        );
-
-        let queue = agent.capability_registry.approval_queue().unwrap();
-        let pending = queue
-            .pending_for_owner("alice")
-            .await
-            .expect("pending_for_owner");
-        assert_eq!(pending.len(), 1, "only action_b should remain pending");
-        assert_eq!(pending[0].capability_name, "action_b");
-    }
-
     #[tokio::test]
     async fn context_block_local_only_dropped_on_cloud_provider() {
         use crate::agent::context::{ContextBlock, TurnContextProvider};
@@ -1980,850 +1821,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_turn_contestation_phrase_revokes_belief() {
+    async fn approval_resolution_returns_none_with_zero_pending_rows() {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
+        let agent = make_loop(&path).await;
 
-        // Pre-store a belief
-        {
-            let mem = agent.memory.read().await;
-            mem.store_belief(
-                DEFAULT_OWNER,
-                None,
-                "Mario exercises every morning",
-                "sess1",
-                "user",
-                false,
-                None,
-            )
-            .await
-            .expect("store_belief");
-        }
+        assert!(agent.approval_resolution("sim", "alice").await.is_none());
 
-        // Verify belief is stored
-        let before = {
-            let mem = agent.memory.read().await;
-            mem.retrieve_tagged(DEFAULT_OWNER, None)
-                .await
-                .expect("retrieve")
-        };
-        assert_eq!(before.len(), 1, "belief must exist before contestation");
-
-        // Run a turn with a contestation phrase that overlaps with the belief
-        let _ = agent
-            .run_turn("isso não é mais verdade sobre exercises morning")
-            .await;
-
-        // After the turn, the output-validator should have revoked the belief
-        let after = {
-            let mem = agent.memory.read().await;
-            mem.retrieve_tagged(DEFAULT_OWNER, None)
-                .await
-                .expect("retrieve")
-        };
-        assert!(
-            after.is_empty(),
-            "belief must be revoked after contestation turn"
-        );
-    }
-
-    // Guards CR-01/CR-02 (privacy egress through the tool loop):
-    // 1. resolved_tier must come from the persona actually handling the turn
-    //    (the returned pid), not from self.forced_persona — which is already
-    //    consumed by .take() in run_turn_for, so re-reading it yielded None and
-    //    a LocalOnly persona was stamped CloudOk.
-    // 2. the new per-round check_egress in dispatch_tool_loop must NOT over-block
-    //    a legitimate CloudOk persona's multi-round tool loop.
-    #[tokio::test]
-    async fn cloud_ok_persona_tool_loop_passes_egress_gate() {
-        use crate::types::{TokenUsage, ToolCall};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        // Round 0 returns a tool_call (forces a second provider round through
-        // dispatch_tool_loop, where the new egress gate lives); round 1 returns
-        // final text to terminate the loop.
-        struct ToolThenText {
-            calls: AtomicUsize,
-        }
-
-        #[async_trait]
-        impl Provider for ToolThenText {
-            async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
-                let n = self.calls.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
-                    Ok(LlmResponse {
-                        text: String::new(),
-                        tool_calls: Some(vec![ToolCall {
-                            id: "t1".to_owned(),
-                            name: "noop".to_owned(),
-                            arguments: serde_json::json!({}),
-                            extra: None,
-                        }]),
-                        usage: TokenUsage {
-                            input_tokens: 1,
-                            output_tokens: 1,
-                            cache_read: 0,
-                            cache_write: 0,
-                            ..Default::default()
-                        },
-                    })
-                } else {
-                    Ok(LlmResponse {
-                        text: "done".to_owned(),
-                        tool_calls: None,
-                        usage: TokenUsage {
-                            input_tokens: 1,
-                            output_tokens: 1,
-                            cache_read: 0,
-                            cache_write: 0,
-                            ..Default::default()
-                        },
-                    })
-                }
-            }
-            async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
-                Ok("s".to_owned())
-            }
-            fn context_limit(&self) -> usize {
-                8192
-            }
-            fn model_name(&self) -> &str {
-                "mock"
-            }
-            fn name(&self) -> &'static str {
-                "mock"
-            }
-        }
-
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-
-        let session = crate::session::SessionManager::new(&path);
-        session.init_schema().await.expect("init_schema");
-        let session_id = session.create_session().await.expect("create_session");
-        let memory: SharedMemory = Arc::new(RwLock::new(
-            Box::new(SqliteMemory::new(&path)) as Box<dyn crate::memory::Memory>
-        ));
-        let mcp = Arc::new(
-            crate::mcp::McpClient::connect_all("nonexistent_mcp.json")
-                .await
-                .expect("connect_all empty"),
-        );
-
-        let mut personas = HashMap::new();
-        personas.insert(
-            "Cloudy".to_string(),
-            Persona {
-                name: "Cloudy".to_string(),
-                description: Some("Cloud-ok persona".to_string()),
-                system_prompt: "You are Cloudy.".to_string(),
-                tier: PrivacyTier::CloudOk,
-                weight: 0.9,
-                skills: vec![],
-            },
-        );
-        let registry = PersonaRegistry::new_from_map(personas);
-
-        let provider: SharedProvider = Arc::new(RwLock::new(Box::new(ToolThenText {
-            calls: AtomicUsize::new(0),
-        }) as Box<dyn Provider>));
-
-        let mut agent = AgentLoop::new(
-            provider,
-            session,
-            Arc::new(crate::mcp::McpToolSource::new(mcp)),
-            session_id,
-            10.0,
-            Arc::new(PersonaResponder::new(registry)),
-            memory.clone(),
-            Some(Arc::new(GoalEngine::new(&path, ScoringConfig::default()))),
-            vec![],
-            &path,
-            Arc::new(crate::eval::failure_sink::EvalFailureSink),
-            crate::agent::default_context_providers(&memory),
-            Arc::new(crate::provider::registry::RegistryProviderResolver),
-            Some(Arc::new(crate::agent::dream::DreamFlush::new(
-                memory.clone(),
-            ))),
-            Some(Arc::new(crate::agent::skills::SkillReloadObserver)),
-        );
-
-        // CloudOk persona + cloud provider: the multi-round tool loop must complete,
-        // proving the per-round egress gate resolves Some(CloudOk) and lets it through.
+        // Regression: a normal turn still completes end-to-end (the LLM mock
+        // response, not a hardcoded approval string).
+        let mut agent = agent;
         let resp = agent
-            .run_turn("do a thing")
+            .run_turn_for("hello there", "alice")
             .await
-            .expect("CloudOk persona tool loop must not be egress-blocked");
-        assert_eq!(
-            resp, "done",
-            "tool loop must run a second round and return final text"
-        );
-    }
-
-    // --- Plan 11-07 (SEC-04): dispatch_tool_loop spotlighting-aware framing ----
-
-    /// Configurable-locality stub capability — proves `dispatch_tool_loop`'s
-    /// LLM-facing tool-result content differs structurally between a trusted
-    /// (`is_local()==true`, default `is_trusted()==true`) and untrusted
-    /// (`is_local()==false`, default `is_trusted()==false`) capability.
-    struct SpotlightStubCap {
-        name: String,
-        schema: serde_json::Value,
-        local: bool,
-    }
-
-    #[async_trait]
-    impl crate::capability::Capability for SpotlightStubCap {
-        fn name(&self) -> &str {
-            &self.name
-        }
-        fn description(&self) -> &str {
-            "spotlight stub"
-        }
-        fn input_schema(&self) -> &serde_json::Value {
-            &self.schema
-        }
-        fn is_local(&self) -> bool {
-            self.local
-        }
-        async fn invoke(
-            &self,
-            _args: serde_json::Value,
-            _ctx: &crate::capability::InvokeCtx,
-        ) -> anyhow::Result<serde_json::Value> {
-            Ok(serde_json::json!({"payload": "hello"}))
-        }
-    }
-
-    /// Round 0 forces a single named-tool call; round 1 returns final text to
-    /// terminate the loop. Mirrors `cloud_ok_persona_tool_loop_passes_egress_gate`'s
-    /// `ToolThenText`, parameterized by tool name so both tests below can target
-    /// their own registered `SpotlightStubCap`.
-    ///
-    /// `run_turn_for` ALSO uses this same provider for `persona::router::route`'s
-    /// classification call (a `response_format`-bearing call, distinct from the
-    /// actual per-persona completion) — that call is answered deterministically
-    /// with a single-persona `RouterDecision` and does NOT consume/advance
-    /// `calls`, so the round-0/round-1 tool-loop logic below is never desynced
-    /// by the router's own provider call.
-    struct ToolThenTextNamed {
-        calls: std::sync::atomic::AtomicUsize,
-        tool_name: String,
-        persona_name: String,
-    }
-
-    #[async_trait]
-    impl Provider for ToolThenTextNamed {
-        async fn complete(
-            &self,
-            _: &[Message],
-            config: &CallConfig,
-        ) -> anyhow::Result<LlmResponse> {
-            if config.response_format.is_some() {
-                // The router's own classification call — answer deterministically,
-                // never touching `calls`.
-                return Ok(LlmResponse {
-                    text: serde_json::json!({
-                        "personas": [self.persona_name],
-                        "mode": "single",
-                        "convene_reason": null,
-                    })
-                    .to_string(),
-                    tool_calls: None,
-                    usage: TokenUsage::default(),
-                });
-            }
-            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if n == 0 {
-                Ok(LlmResponse {
-                    text: String::new(),
-                    tool_calls: Some(vec![crate::types::ToolCall {
-                        id: "t1".to_owned(),
-                        name: self.tool_name.clone(),
-                        arguments: serde_json::json!({}),
-                        extra: None,
-                    }]),
-                    usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        cache_read: 0,
-                        cache_write: 0,
-                        ..Default::default()
-                    },
-                })
-            } else {
-                Ok(LlmResponse {
-                    text: "done".to_owned(),
-                    tool_calls: None,
-                    usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        cache_read: 0,
-                        cache_write: 0,
-                        ..Default::default()
-                    },
-                })
-            }
-        }
-        async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
-            Ok("s".to_owned())
-        }
-        fn context_limit(&self) -> usize {
-            8192
-        }
-        fn model_name(&self) -> &str {
-            "mock"
-        }
-        fn name(&self) -> &'static str {
-            "mock"
-        }
-    }
-
-    /// Extracts the FIRST `ContentPart::ToolResult.content` string found in the
-    /// session's persisted history (most recent turn's tool round).
-    fn find_tool_result_content(history: &[Message]) -> String {
-        history
-            .iter()
-            .find_map(|m| match &m.content {
-                MessageContent::Parts(parts) => parts.iter().find_map(|p| match p {
-                    ContentPart::ToolResult { content, .. } => Some(content.clone()),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .expect("history must contain a ToolResult message")
-    }
-
-    /// Behavior Test 1: a TRUSTED tool result (`is_local()==true`, default
-    /// `is_trusted()==true`) produces `ContentPart::ToolResult.content`
-    /// byte-identical to today's behavior (`tagged.data.to_string()`) — zero
-    /// observable change for the overwhelming majority of existing tool calls.
-    #[tokio::test]
-    async fn dispatch_tool_loop_trusted_result_content_is_unchanged() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        agent.provider = Arc::new(RwLock::new(Box::new(ToolThenTextNamed {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            tool_name: "trusted_cap".to_owned(),
-            persona_name: "TestPersona".to_owned(),
-        }) as Box<dyn Provider>));
-        agent
-            .capability_registry
-            .register(Arc::new(SpotlightStubCap {
-                name: "trusted_cap".to_owned(),
-                schema: serde_json::json!({}),
-                local: true,
-            }))
-            .expect("register trusted_cap");
-
-        let session_id = agent.session_id.clone();
-        let resp = agent
-            .run_turn("do something")
-            .await
-            .expect("run_turn must complete");
-        assert_eq!(resp, "done");
-
-        let history = agent
-            .session
-            .load_recent(&session_id)
-            .await
-            .expect("load_recent");
-        let content = find_tool_result_content(&history);
-        assert_eq!(
-            content,
-            serde_json::json!({"payload": "hello"}).to_string(),
-            "trusted result must render byte-identical to today's behavior (no envelope)"
-        );
-    }
-
-    /// Behavior Test 2: an UNTRUSTED tool result (`is_local()==false`, default
-    /// `is_trusted()==false`) produces a `content` string that is a STRUCTURED
-    /// JSON envelope — not a bare ad-hoc text prefix glued onto the raw data.
-    #[tokio::test]
-    async fn dispatch_tool_loop_untrusted_result_content_is_structured_envelope() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        agent.provider = Arc::new(RwLock::new(Box::new(ToolThenTextNamed {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            tool_name: "untrusted_cap".to_owned(),
-            persona_name: "TestPersona".to_owned(),
-        }) as Box<dyn Provider>));
-        agent
-            .capability_registry
-            .register(Arc::new(SpotlightStubCap {
-                name: "untrusted_cap".to_owned(),
-                schema: serde_json::json!({}),
-                local: false,
-            }))
-            .expect("register untrusted_cap");
-
-        let session_id = agent.session_id.clone();
-        let resp = agent
-            .run_turn("do something external")
-            .await
-            .expect("run_turn must complete");
-        assert_eq!(resp, "done");
-
-        let history = agent
-            .session
-            .load_recent(&session_id)
-            .await
-            .expect("load_recent");
-        let content = find_tool_result_content(&history);
-        let envelope: serde_json::Value =
-            serde_json::from_str(&content).expect("untrusted content must be structured JSON");
-        assert_eq!(envelope["trusted"], serde_json::json!(false));
-        assert_eq!(envelope["source"], serde_json::json!("untrusted_cap"));
-        assert_eq!(envelope["data"], serde_json::json!({"payload": "hello"}));
-        assert!(
-            envelope["note"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("data, not instructions"),
-            "envelope must carry an explicit non-instruction marker, got: {envelope}"
-        );
-    }
-
-    // --- Plan 11-08 (SEC-05): run_turn_for_with_trust + quarantine wiring -----
-
-    /// Router-aware mock (same `response_format.is_some()` trick as
-    /// `ToolThenTextNamed`) that additionally RECORDS every `config.tools`
-    /// seen by the real (non-router) `complete()` call, so tests can assert
-    /// on exactly what the LLM-facing dispatch saw.
-    struct ToolsRecordingProvider {
-        persona_name: String,
-        seen_tools: Arc<std::sync::Mutex<Vec<Vec<serde_json::Value>>>>,
-    }
-
-    #[async_trait]
-    impl Provider for ToolsRecordingProvider {
-        async fn complete(
-            &self,
-            _: &[Message],
-            config: &CallConfig,
-        ) -> anyhow::Result<LlmResponse> {
-            if config.response_format.is_some() {
-                return Ok(LlmResponse {
-                    text: serde_json::json!({
-                        "personas": [self.persona_name],
-                        "mode": "single",
-                        "convene_reason": null,
-                    })
-                    .to_string(),
-                    tool_calls: None,
-                    usage: TokenUsage::default(),
-                });
-            }
-            self.seen_tools.lock().unwrap().push(config.tools.clone());
-            Ok(LlmResponse {
-                text: "done".to_owned(),
-                tool_calls: None,
-                usage: TokenUsage::default(),
-            })
-        }
-        async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
-            Ok("s".to_owned())
-        }
-        fn context_limit(&self) -> usize {
-            8192
-        }
-        fn model_name(&self) -> &str {
-            "mock"
-        }
-        fn name(&self) -> &'static str {
-            "mock"
-        }
-    }
-
-    /// Test 4: `run_turn_for_with_trust(input, owner, true)` — the LLM-facing
-    /// call for this turn sees ZERO tools, genuinely hidden (not merely "no
-    /// new tools added"), even though a real capability is registered.
-    #[tokio::test]
-    async fn run_turn_for_with_trust_true_hides_all_tools_from_llm_facing_dispatch() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        let seen_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
-        agent.provider = Arc::new(RwLock::new(Box::new(ToolsRecordingProvider {
-            persona_name: "TestPersona".to_owned(),
-            seen_tools: seen_tools.clone(),
-        }) as Box<dyn Provider>));
-        agent
-            .capability_registry
-            .register(Arc::new(SpotlightStubCap {
-                name: "cap1".to_owned(),
-                schema: serde_json::json!({}),
-                local: true,
-            }))
-            .expect("register cap1");
-
-        let resp = agent
-            .run_turn_for_with_trust("email body content", "alice", true)
-            .await
-            .expect("run_turn_for_with_trust must complete");
-        assert_eq!(resp, "done");
-
-        {
-            let recorded = seen_tools.lock().unwrap();
-            assert_eq!(
-                recorded.last().unwrap().len(),
-                0,
-                "untrusted==true must hide every capability from the LLM-facing tools list"
-            );
-        }
-
-        assert_eq!(
-            agent.capability_registry.list_tool_defs().len(),
-            1,
-            "capabilities must be fully restored after the turn completes"
-        );
-    }
-
-    /// Counterpart: `untrusted == false` shows the registered capability
-    /// unchanged — zero regression for the overwhelming majority of turns.
-    #[tokio::test]
-    async fn run_turn_for_with_trust_false_shows_tools_unchanged() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        let seen_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
-        agent.provider = Arc::new(RwLock::new(Box::new(ToolsRecordingProvider {
-            persona_name: "TestPersona".to_owned(),
-            seen_tools: seen_tools.clone(),
-        }) as Box<dyn Provider>));
-        agent
-            .capability_registry
-            .register(Arc::new(SpotlightStubCap {
-                name: "cap1".to_owned(),
-                schema: serde_json::json!({}),
-                local: true,
-            }))
-            .expect("register cap1");
-
-        let resp = agent
-            .run_turn_for_with_trust("normal message", "alice", false)
-            .await
-            .expect("run_turn_for_with_trust must complete");
-        assert_eq!(resp, "done");
-
-        let recorded = seen_tools.lock().unwrap();
-        assert_eq!(
-            recorded.last().unwrap().len(),
-            1,
-            "untrusted==false must show the registered capability unchanged"
-        );
-    }
-
-    /// Test 3: `run_turn_for` (existing method) is byte-identical to today —
-    /// internally a thin wrapper over `run_turn_for_with_trust(..., false)`.
-    #[tokio::test]
-    async fn run_turn_for_is_a_thin_wrapper_over_with_trust_false() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        let seen_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
-        agent.provider = Arc::new(RwLock::new(Box::new(ToolsRecordingProvider {
-            persona_name: "TestPersona".to_owned(),
-            seen_tools: seen_tools.clone(),
-        }) as Box<dyn Provider>));
-        agent
-            .capability_registry
-            .register(Arc::new(SpotlightStubCap {
-                name: "cap1".to_owned(),
-                schema: serde_json::json!({}),
-                local: true,
-            }))
-            .expect("register cap1");
-
-        let resp = agent
-            .run_turn_for("normal message", "alice")
-            .await
-            .expect("run_turn_for must complete");
-        assert_eq!(resp, "done");
-
-        let recorded = seen_tools.lock().unwrap();
-        assert_eq!(
-            recorded.last().unwrap().len(),
-            1,
-            "run_turn_for must behave exactly like run_turn_for_with_trust(..., false)"
-        );
-    }
-
-    /// Round-aware mock provider (mirrors `ToolThenTextNamed`'s
-    /// response_format branch) that emits a tool call for the SAME name on
-    /// rounds 0 and 1, then a final "done" on round 2 — lets a test drive
-    /// TWO consecutive untrusted tool rounds.
-    struct RoundAwareProvider {
-        calls: std::sync::atomic::AtomicUsize,
-        tool_name: String,
-        persona_name: String,
-    }
-
-    #[async_trait]
-    impl Provider for RoundAwareProvider {
-        async fn complete(
-            &self,
-            _: &[Message],
-            config: &CallConfig,
-        ) -> anyhow::Result<LlmResponse> {
-            if config.response_format.is_some() {
-                return Ok(LlmResponse {
-                    text: serde_json::json!({
-                        "personas": [self.persona_name],
-                        "mode": "single",
-                        "convene_reason": null,
-                    })
-                    .to_string(),
-                    tool_calls: None,
-                    usage: TokenUsage::default(),
-                });
-            }
-            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if n < 2 {
-                Ok(LlmResponse {
-                    text: String::new(),
-                    tool_calls: Some(vec![crate::types::ToolCall {
-                        id: format!("t{n}"),
-                        name: self.tool_name.clone(),
-                        arguments: serde_json::json!({}),
-                        extra: None,
-                    }]),
-                    usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        cache_read: 0,
-                        cache_write: 0,
-                        ..Default::default()
-                    },
-                })
-            } else {
-                Ok(LlmResponse {
-                    text: "done".to_owned(),
-                    tool_calls: None,
-                    usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        cache_read: 0,
-                        cache_write: 0,
-                        ..Default::default()
-                    },
-                })
-            }
-        }
-        async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
-            Ok("s".to_owned())
-        }
-        fn context_limit(&self) -> usize {
-            8192
-        }
-        fn model_name(&self) -> &str {
-            "mock"
-        }
-        fn name(&self) -> &'static str {
-            "mock"
-        }
-    }
-
-    /// Stub capability with `is_local()==false` (untrusted by default) that
-    /// counts invocations — proves the SAME capability remains dispatchable
-    /// in the round FOLLOWING an untrusted result (the round-level
-    /// quarantine wraps ONLY the immediately-following LLM completion call,
-    /// tightly scoped and already dropped/restored by the time the next
-    /// round's tool dispatch runs).
-    struct CountingUntrustedCap {
-        name: String,
-        schema: serde_json::Value,
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl crate::capability::Capability for CountingUntrustedCap {
-        fn name(&self) -> &str {
-            &self.name
-        }
-        fn description(&self) -> &str {
-            "counting untrusted stub"
-        }
-        fn input_schema(&self) -> &serde_json::Value {
-            &self.schema
-        }
-        fn is_local(&self) -> bool {
-            false
-        }
-        async fn invoke(
-            &self,
-            _args: serde_json::Value,
-            _ctx: &crate::capability::InvokeCtx,
-        ) -> anyhow::Result<serde_json::Value> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(serde_json::json!({"x": 1}))
-        }
-    }
-
-    /// Test 5: when the CURRENT round's tool results include at least one
-    /// `TaggedValue.trusted == false`, the LLM call for the NEXT round runs
-    /// with quarantine active (tightly scoped to that one call). Proven here
-    /// by driving TWO untrusted rounds back-to-back: the loop must complete
-    /// normally, the capability must be invoked exactly twice (once per
-    /// round — the round-level quarantine has already dropped/restored by
-    /// the time each round's OWN tool dispatch runs, so it never permanently
-    /// blocks legitimate re-dispatch in a later round), and the capability
-    /// must remain registered/usable after the whole turn ends.
-    #[tokio::test]
-    async fn dispatch_tool_loop_untrusted_round_result_does_not_break_subsequent_rounds() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        agent.provider = Arc::new(RwLock::new(Box::new(RoundAwareProvider {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            tool_name: "untrusted_round_cap".to_owned(),
-            persona_name: "TestPersona".to_owned(),
-        }) as Box<dyn Provider>));
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        agent
-            .capability_registry
-            .register(Arc::new(CountingUntrustedCap {
-                name: "untrusted_round_cap".to_owned(),
-                schema: serde_json::json!({}),
-                calls: calls.clone(),
-            }))
-            .expect("register untrusted_round_cap");
-
-        let resp = agent
-            .run_turn("trigger two untrusted rounds")
-            .await
-            .expect("run_turn must complete despite mid-loop quarantine wrapping");
-        assert_eq!(resp, "done");
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "the capability must still be dispatchable in the round FOLLOWING an untrusted \
-             result — round-level quarantine is scoped tightly to the intervening LLM call only"
-        );
-        assert_eq!(
-            agent.capability_registry.list_tool_defs().len(),
-            1,
-            "the capability must remain registered/usable after the whole turn completes"
-        );
-    }
-
-    /// Provider that records `config.tools.len()` on every non-router
-    /// `complete()` call, in call order — used to prove the round-level SEC-05
-    /// quarantine actually hides tools from the LLM-facing request, not just
-    /// from `invoke()` (milestone-close code review, 2026-07-13 regression).
-    struct ToolVisibilityRecordingProvider {
-        calls: std::sync::atomic::AtomicUsize,
-        tool_name: String,
-        seen_tool_counts: Arc<std::sync::Mutex<Vec<usize>>>,
-    }
-
-    #[async_trait]
-    impl Provider for ToolVisibilityRecordingProvider {
-        async fn complete(
-            &self,
-            _: &[Message],
-            config: &CallConfig,
-        ) -> anyhow::Result<LlmResponse> {
-            if config.response_format.is_some() {
-                return Ok(LlmResponse {
-                    text: serde_json::json!({
-                        "personas": ["TestPersona"],
-                        "mode": "single",
-                        "convene_reason": null,
-                    })
-                    .to_string(),
-                    tool_calls: None,
-                    usage: TokenUsage::default(),
-                });
-            }
-            self.seen_tool_counts
-                .lock()
-                .expect("mutex not poisoned")
-                .push(config.tools.len());
-            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if n == 0 {
-                Ok(LlmResponse {
-                    text: String::new(),
-                    tool_calls: Some(vec![crate::types::ToolCall {
-                        id: "t0".to_owned(),
-                        name: self.tool_name.clone(),
-                        arguments: serde_json::json!({}),
-                        extra: None,
-                    }]),
-                    usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        ..Default::default()
-                    },
-                })
-            } else {
-                Ok(LlmResponse {
-                    text: "done".to_owned(),
-                    tool_calls: None,
-                    usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        ..Default::default()
-                    },
-                })
-            }
-        }
-        async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {
-            Ok("s".to_owned())
-        }
-        fn context_limit(&self) -> usize {
-            8192
-        }
-        fn model_name(&self) -> &str {
-            "mock"
-        }
-        fn name(&self) -> &'static str {
-            "mock"
-        }
-    }
-
-    /// Regression (milestone-close code review, 2026-07-13): the round-level
-    /// SEC-05 quarantine must rebuild `CallConfig.tools` from the drained
-    /// registry for the quarantined round's LLM request — not just block
-    /// `invoke()` — so the model genuinely sees zero tools, matching the
-    /// turn-level `untrusted` path's already-correct behavior.
-    #[tokio::test]
-    async fn dispatch_tool_loop_untrusted_round_hides_tools_from_the_llm_request() {
-        let f = NamedTempFile::new().unwrap();
-        let path = f.path().to_str().unwrap().to_owned();
-        let mut agent = make_loop(&path).await;
-        let seen_tool_counts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        agent.provider = Arc::new(RwLock::new(Box::new(ToolVisibilityRecordingProvider {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            tool_name: "untrusted_visibility_cap".to_owned(),
-            seen_tool_counts: seen_tool_counts.clone(),
-        }) as Box<dyn Provider>));
-        agent
-            .capability_registry
-            .register(Arc::new(CountingUntrustedCap {
-                name: "untrusted_visibility_cap".to_owned(),
-                schema: serde_json::json!({}),
-                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            }))
-            .expect("register untrusted_visibility_cap");
-
-        let resp = agent
-            .run_turn("trigger one untrusted round")
-            .await
-            .expect("run_turn must complete");
-        assert_eq!(resp, "done");
-
-        let counts = seen_tool_counts.lock().expect("mutex not poisoned");
-        assert_eq!(
-            *counts,
-            vec![1, 0],
-            "round 0 (initial) must see the 1 registered tool; round 1 (quarantined \
-             by round 0's untrusted result) must see ZERO tools in the LLM-facing \
-             request, not just have invoke() blocked"
-        );
+            .expect("run_turn_for must succeed");
+        assert!(resp.contains("response from"), "got: {resp:?}");
     }
 
     // --- Plan 08-08 (SO-03): complete_with_fallback_ladder --------------------------

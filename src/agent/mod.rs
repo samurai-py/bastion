@@ -1,14 +1,14 @@
 pub mod command;
-pub mod compactor;
-pub mod context;
 pub mod dream;
-pub mod handle;
 pub mod identity;
-pub mod loop_;
 pub mod memory_rag;
-pub mod ports;
 pub mod procedural;
 pub mod skills;
+
+// M2 step 3b: the kernel agent modules moved to `bastion_runtime::agent`.
+// Re-exported under the old paths so every existing `crate::agent::...` path
+// keeps compiling unchanged.
+pub use bastion_runtime::agent::{compactor, context, handle, loop_, ports};
 
 use crate::memory::SharedMemory;
 
