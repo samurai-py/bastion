@@ -1,4 +1,4 @@
-use crate::mcp::registry::ToolRegistry;
+use crate::registry::ToolRegistry;
 use crate::types::BastionError;
 use rmcp::model::CallToolRequestParams;
 use rmcp::{
@@ -18,7 +18,7 @@ pub struct McpClient {
     /// `refresh_if_expired` (T-11-06-03: never a cascading retry storm). `None`
     /// (the default) is zero behavior change — every call site that doesn't opt in
     /// via [`Self::with_composio_oauth`] behaves exactly as before this plan.
-    composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
+    composio_oauth: Option<std::sync::Arc<crate::oauth::ComposioOAuth>>,
 }
 
 pub fn load_mcp_config(path: &str) -> anyhow::Result<Value> {
@@ -63,7 +63,7 @@ impl McpClient {
     /// `.bastion/mcp-servers.json` file is no longer required (and isn't mounted in the
     /// FROM-scratch container, which is why MCP tools were silently absent before).
     pub async fn connect_from_config(
-        servers: &std::collections::HashMap<String, crate::config::McpServerEntry>,
+        servers: &std::collections::HashMap<String, crate::types::McpServerEntry>,
     ) -> anyhow::Result<Self> {
         let mut obj = serde_json::Map::new();
         for (key, entry) in servers {
@@ -238,7 +238,7 @@ impl McpClient {
     /// codebase's `with_owner_map`/`with_default_persona` builder idiom.
     pub fn with_composio_oauth(
         mut self,
-        oauth: std::sync::Arc<crate::mcp::oauth::ComposioOAuth>,
+        oauth: std::sync::Arc<crate::oauth::ComposioOAuth>,
     ) -> Self {
         self.composio_oauth = Some(oauth);
         self
@@ -472,15 +472,15 @@ mod tests {
     }
 
     async fn make_composio_oauth_with_no_stored_connection(
-    ) -> (tempfile::NamedTempFile, crate::mcp::oauth::ComposioOAuth) {
+    ) -> (tempfile::NamedTempFile, crate::oauth::ComposioOAuth) {
         let f = tempfile::NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap().to_owned();
-        let session = crate::session::SessionManager::new(&path);
+        let session = bastion_runtime::session::SessionManager::new(&path);
         session.init_schema().await.expect("init_schema");
         // No connection stored for (owner, toolkit) — refresh_if_expired() is a fast
         // no-op (Ok(())) per its own contract, so this test doesn't need a live
         // Composio mock server to exercise the retry-counting behavior.
-        let oauth = crate::mcp::oauth::ComposioOAuth::new_for_test(&path, "http://unused.invalid");
+        let oauth = crate::oauth::ComposioOAuth::new_for_test(&path, "http://unused.invalid");
         (f, oauth)
     }
 

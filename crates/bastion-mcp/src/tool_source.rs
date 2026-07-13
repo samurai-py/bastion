@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use crate::agent::ports::ToolSource;
-use crate::mcp::client::McpClient;
+use crate::client::McpClient;
+use bastion_runtime::agent::ports::ToolSource;
 
 /// The production [`ToolSource`]: sources tool defs and dispatches
 /// registry-bypass tool calls straight from the connected MCP servers.

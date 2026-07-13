@@ -321,6 +321,40 @@ pub struct CabinetVerdict {
     pub dissents: Vec<Dissent>,
 }
 
+/// A single `[mcp.servers.*]` entry from `bastion.toml`. Moved here from
+/// `src/config.rs` (M2 step 5) — pure `Deserialize` data referenced by
+/// `bastion-mcp`'s `McpClient::connect_from_config`, which must not depend
+/// on the product-level config module (`src/config.rs` stays in the app
+/// crate; it re-exports this type under its old path).
+#[derive(Debug, Deserialize, Clone)]
+pub struct McpServerEntry {
+    pub url: String,
+    pub label: String,
+    /// Operator-controlled, typed locality flag (Plan 10-08 / T-10-08-01,02,03).
+    ///
+    /// Defaults to `false` (`#[serde(default)]`) so every EXISTING `[mcp.servers.*]`
+    /// entry (memupalace, skill-writer, self-improving, content) is unaffected without
+    /// any bastion.toml edit — only a server that EXPLICITLY opts in (e.g. the voice
+    /// sidecar, Plan 10-03/10-09) gets its tools classified as local capabilities.
+    /// This is a TRUST-BOUNDARY setting: only set `true` on a server that genuinely
+    /// never sends data off-host — see 10-08-PLAN.md's threat register (T-10-08-01).
+    #[serde(default)]
+    pub is_local: bool,
+    /// Operator-controlled trust flag (Plan 11-04 / SEC-01), mirroring `is_local`'s
+    /// exact shape and default.
+    ///
+    /// Defaults to `false` (`#[serde(default)]`) so every EXISTING `[mcp.servers.*]`
+    /// entry is unaffected without any bastion.toml edit — only a server the operator
+    /// EXPLICITLY vouches for gets this set `true`. This is a TRUST-BOUNDARY setting:
+    /// it is threaded through the same registration pipeline as `is_local` (config ->
+    /// `ToolRegistry::is_trusted()` -> `McpToolAdapter.trusted_override`) but is not
+    /// yet consumed by any policy decision in this plan — Plans 11-07 (spotlighting)
+    /// and 11-08 (quarantine) are the intended consumers of an operator-marked-trusted
+    /// server as their escape hatch (D-09).
+    #[serde(default)]
+    pub trusted: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BastionError {

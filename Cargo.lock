@@ -464,6 +464,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bastion-mcp",
  "bastion-memory",
  "bastion-providers",
  "bastion-runtime",
@@ -518,6 +519,25 @@ dependencies = [
  "tracing-test",
  "unicode-width",
  "url",
+]
+
+[[package]]
+name = "bastion-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bastion-runtime",
+ "bastion-types",
+ "rand 0.8.6",
+ "reqwest 0.13.3",
+ "rmcp",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -82,13 +82,19 @@ impl ComposioOAuth {
     }
 
     /// Test-only constructor bypassing the `COMPOSIO_API_KEY` env lookup entirely —
-    /// lets OTHER modules' tests (e.g. `agent::command`'s `/connect-app-composio`
-    /// tests) build a working `ComposioOAuth` against a local scripted server without
-    /// mutating a process-global env var (which would race against this module's own
+    /// lets OTHER crates' tests (e.g. the app crate's `agent::command`'s
+    /// `/connect-app-composio` tests, `channel::webhook`'s callback tests) build a
+    /// working `ComposioOAuth` against a local scripted server without mutating a
+    /// process-global env var (which would race against this module's own
     /// `new_panics_when_composio_api_key_missing_or_empty` test under parallel
     /// `cargo test`). Fields stay private; this is the sanctioned test-only seam.
-    #[cfg(test)]
-    pub(crate) fn new_for_test(db_path: impl Into<String>, base: impl Into<String>) -> Self {
+    ///
+    /// Not `#[cfg(test)]`-gated (M2 step 5): items behind `#[cfg(test)]` don't exist
+    /// in a crate's compiled rlib when it's linked as an ordinary path dependency, so
+    /// downstream crates' own test code can never reach a `#[cfg(test)]` item across
+    /// the boundary — only a plain `pub` fn does. `pub(crate)` was likewise no longer
+    /// reachable once this module left the app crate.
+    pub fn new_for_test(db_path: impl Into<String>, base: impl Into<String>) -> Self {
         Self {
             http: reqwest::Client::new(),
             api_key: "test-key".into(),
@@ -264,12 +270,12 @@ impl ComposioOAuth {
     }
 
     /// Test-only seam: insert a known state directly, bypassing `initiate()`'s
-    /// Composio HTTP round-trip. Lets other modules' tests (e.g.
-    /// `channel::webhook`'s callback tests) exercise the consume/expire/replay paths
+    /// Composio HTTP round-trip. Lets other crates' tests (e.g. the app crate's
+    /// `channel::webhook` callback tests) exercise the consume/expire/replay paths
     /// against a deterministic token without a scripted Composio server. Mirrors
-    /// [`Self::new_for_test`]'s "sanctioned test-only seam" precedent.
-    #[cfg(test)]
-    pub(crate) async fn insert_state_for_test(
+    /// [`Self::new_for_test`]'s "sanctioned test-only seam" precedent — not
+    /// `#[cfg(test)]`-gated, for the same cross-crate-visibility reason.
+    pub async fn insert_state_for_test(
         &self,
         state: &str,
         owner_id: &str,
@@ -438,7 +444,7 @@ mod tests {
     async fn make_db() -> (NamedTempFile, String) {
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap().to_owned();
-        let session = crate::session::SessionManager::new(&path);
+        let session = bastion_runtime::session::SessionManager::new(&path);
         session.init_schema().await.expect("init_schema");
         (f, path)
     }

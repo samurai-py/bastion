@@ -8,10 +8,10 @@
 
 use std::sync::Arc;
 
-use crate::capability::registry::CapabilityRegistry;
-use crate::mcp::client::McpClient;
+use crate::client::McpClient;
+use bastion_runtime::capability::registry::CapabilityRegistry;
 
-/// Populate `registry` with one [`crate::capability::McpToolAdapter`] per
+/// Populate `registry` with one [`crate::adapters::McpToolAdapter`] per
 /// connected MCP tool.
 ///
 /// BIG-1 (Gap 2): without this the registry stays empty, `list_tool_defs()`
@@ -65,7 +65,7 @@ pub fn register_mcp_tools(registry: &mut CapabilityRegistry, mcp: &Arc<McpClient
     for (tool_name, server_label, schema, description, is_local, needs_approval, trusted) in
         mcp_tools
     {
-        let adapter = crate::capability::McpToolAdapter {
+        let adapter = crate::adapters::McpToolAdapter {
             tool_name: tool_name.clone(),
             server_label,
             description,

@@ -1,5 +1,5 @@
-use crate::capability::registry::{Capability, InvokeCtx};
 use async_trait::async_trait;
+use bastion_runtime::capability::registry::{Capability, InvokeCtx};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ pub struct McpToolAdapter {
     pub description: String,
     pub schema: Value,
     /// Shared McpClient reference — injected at registry build time.
-    pub mcp: Arc<crate::mcp::McpClient>,
+    pub mcp: Arc<crate::client::McpClient>,
     /// Plan 10-08: typed locality flag, sourced from the owning MCP server's
     /// `[mcp.servers.*].is_local` config (via `ToolRegistry::is_local`) — NEVER
     /// derived from `tool_name`. Mirrors `NlCommandAdapter`'s `is_local()` override
@@ -167,9 +167,9 @@ impl Capability for NlCommandAdapter {
 #[cfg(test)]
 mod mcp_tool_adapter_tests {
     use super::*;
-    use crate::capability::registry::CapabilityRegistry;
-    use crate::mcp::McpClient;
-    use crate::memory::PrivacyTier;
+    use crate::client::McpClient;
+    use bastion_runtime::capability::registry::CapabilityRegistry;
+    use bastion_types::PrivacyTier;
 
     /// No real servers configured — constructs instantly, no network I/O.
     async fn empty_mcp_client() -> Arc<McpClient> {
@@ -294,7 +294,7 @@ mod mcp_tool_adapter_tests {
             .register(Arc::new(cap))
             .expect("local capability must register");
 
-        let ctx = crate::capability::registry::InvokeCtx {
+        let ctx = InvokeCtx {
             owner: "test-owner".to_string(),
             privacy_tier: Some(PrivacyTier::LocalOnly),
         };
@@ -325,7 +325,7 @@ mod mcp_tool_adapter_tests {
             .register(Arc::new(cap))
             .expect("non-local capability must register");
 
-        let ctx = crate::capability::registry::InvokeCtx {
+        let ctx = InvokeCtx {
             owner: "test-owner".to_string(),
             privacy_tier: Some(PrivacyTier::LocalOnly),
         };
