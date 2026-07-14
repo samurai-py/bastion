@@ -19,6 +19,7 @@ pub async fn export_full(
 
     Ok(AgentFile {
         version: AF_VERSION,
+        producer: PRODUCER_ID.to_string(),
         mode: "full".into(),
         exported_at: chrono::Utc::now().to_rfc3339(),
         identity: identity.map(|id| IdentityBlock {
@@ -44,6 +45,7 @@ pub async fn export_template(
 ) -> anyhow::Result<AgentFile> {
     Ok(AgentFile {
         version: AF_VERSION,
+        producer: PRODUCER_ID.to_string(),
         mode: "template".into(),
         exported_at: chrono::Utc::now().to_rfc3339(),
         identity: None,

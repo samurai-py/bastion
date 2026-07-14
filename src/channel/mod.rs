@@ -10,6 +10,7 @@ use std::collections::HashMap;
 pub mod discord;
 #[cfg(feature = "channels-extra")]
 pub mod email;
+pub mod operational;
 #[cfg(feature = "channels-extra")]
 pub mod slack;
 pub mod telegram;

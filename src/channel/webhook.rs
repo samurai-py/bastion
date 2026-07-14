@@ -153,6 +153,28 @@ struct AppState {
     /// 501 rather than panicking — Composio integration is opt-in per instance
     /// (requires COMPOSIO_API_KEY).
     composio_oauth: Option<std::sync::Arc<bastion_mcp::oauth::ComposioOAuth>>,
+    /// Loop 3-D (`docs/revamp/C3-cloud-ready-design.md`): boot-sequence
+    /// readiness gate backing `/readyz` — extracted via `FromRef` below so
+    /// `operational::readiness_handler` (`State<Arc<ReadinessState>>`)
+    /// mounts directly onto this SAME `Router<AppState>`.
+    readiness: std::sync::Arc<crate::channel::operational::ReadinessState>,
+    /// Loop 3-D: daemon-access-gated stop/reload control, extracted via
+    /// `FromRef` for `operational::lifecycle_*_handler`.
+    lifecycle: crate::channel::operational::LifecycleControl,
+}
+
+impl axum::extract::FromRef<AppState>
+    for std::sync::Arc<crate::channel::operational::ReadinessState>
+{
+    fn from_ref(state: &AppState) -> Self {
+        state.readiness.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for crate::channel::operational::LifecycleControl {
+    fn from_ref(state: &AppState) -> Self {
+        state.lifecycle.clone()
+    }
 }
 
 /// Categorize an anyhow error for safe HTTP status mapping.
@@ -1058,6 +1080,18 @@ pub async fn serve(
     mesh_peer_map: Arc<RwLock<MeshPeerMap>>,
     jwt_secret: String,
 ) -> anyhow::Result<()> {
+    // Self-contained entry point (no daemon_loop boot sequence around it) —
+    // reports itself ready immediately, and lifecycle stays disabled
+    // (fail-closed, no token configured) unless a caller uses
+    // `serve_with_mesh` directly with its own `LifecycleControl`.
+    let readiness = crate::channel::operational::ReadinessState::new();
+    readiness.mark_session_ready();
+    readiness.mark_memory_ready();
+    readiness.mark_provider_ready();
+    readiness.mark_channels_ready();
+    let lifecycle = crate::channel::operational::LifecycleControl::new(
+        crate::channel::operational::DaemonAccessAuth::new(None),
+    );
     serve_with_mesh(
         agent,
         addr,
@@ -1073,6 +1107,8 @@ pub async fn serve(
         None,
         None,
         None,
+        readiness,
+        lifecycle,
     )
     .await
 }
@@ -1108,6 +1144,13 @@ pub async fn serve_with_mesh(
     // Composio OAuth client (SEC-03). None = /auth/composio/callback rejects with
     // 501 rather than panicking — opt-in, requires COMPOSIO_API_KEY.
     composio_oauth: Option<std::sync::Arc<bastion_mcp::oauth::ComposioOAuth>>,
+    // Loop 3-D (`docs/revamp/C3-cloud-ready-design.md`): boot-sequence
+    // readiness gate backing `/readyz` — built and threaded by the caller
+    // (`daemon_loop`/`serve`) so ITS OWN startup sequence decides when each
+    // component is actually ready, never this function.
+    readiness: std::sync::Arc<crate::channel::operational::ReadinessState>,
+    // Daemon-access-gated stop/reload control backing `/lifecycle/*`.
+    lifecycle: crate::channel::operational::LifecycleControl,
 ) -> anyhow::Result<()> {
     let state = AppState {
         agent,
@@ -1122,6 +1165,8 @@ pub async fn serve_with_mesh(
         agent_name,
         whatsapp,
         composio_oauth,
+        readiness,
+        lifecycle,
     };
     let mut app = Router::new()
         .route("/webhook", post(handle))
@@ -1135,6 +1180,26 @@ pub async fn serve_with_mesh(
             get(whatsapp_verify_handler).post(whatsapp_receive_handler),
         )
         .route("/auth/composio/callback", post(composio_callback_handler))
+        // Loop 3-D operational contract — liveness/readiness/lifecycle. Same
+        // axum server, no new port; `FromRef<AppState>` above lets these
+        // handlers (defined against their own narrower state types in
+        // `operational.rs`) mount directly onto this `Router<AppState>`.
+        .route(
+            "/healthz",
+            axum::routing::get(crate::channel::operational::liveness_handler),
+        )
+        .route(
+            "/readyz",
+            axum::routing::get(crate::channel::operational::readiness_handler),
+        )
+        .route(
+            "/lifecycle/stop",
+            post(crate::channel::operational::lifecycle_stop_handler),
+        )
+        .route(
+            "/lifecycle/reload",
+            post(crate::channel::operational::lifecycle_reload_handler),
+        )
         .with_state(state);
     if let Some(mcp) = mcp_routes {
         app = app.merge(mcp);
@@ -1164,6 +1229,24 @@ mod tests {
         });
     }
 
+    /// Fresh, fully-ready `(readiness, lifecycle)` pair for tests unrelated
+    /// to the Loop 3-D operational contract itself — `operational.rs` has
+    /// its own dedicated unit tests for the not-ready/unauthorized cases.
+    fn test_operational_state() -> (
+        Arc<crate::channel::operational::ReadinessState>,
+        crate::channel::operational::LifecycleControl,
+    ) {
+        let readiness = crate::channel::operational::ReadinessState::new();
+        readiness.mark_session_ready();
+        readiness.mark_memory_ready();
+        readiness.mark_provider_ready();
+        readiness.mark_channels_ready();
+        let lifecycle = crate::channel::operational::LifecycleControl::new(
+            crate::channel::operational::DaemonAccessAuth::new(None),
+        );
+        (readiness, lifecycle)
+    }
+
     /// Builds a full test Router + an atomic counter incremented once per turn the
     /// stub agent consumer actually processes — used by the WhatsApp bad-signature
     /// test to assert `handle_whatsapp_message`/`AgentHandle::ask` was never reached.
@@ -1183,6 +1266,7 @@ mod tests {
         let (events_tx, _) = broadcast::channel::<String>(128);
         let mesh_peer_map = Arc::new(RwLock::new(MeshPeerMap::new()));
         let otc_store = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let (readiness, lifecycle) = test_operational_state();
         let state = AppState {
             agent: h,
             owner_map: Arc::new(map),
@@ -1196,6 +1280,8 @@ mod tests {
             agent_name: "test".to_string(),
             whatsapp,
             composio_oauth: None,
+            readiness,
+            lifecycle,
         };
         let router = Router::new()
             .route("/webhook", post(handle))
@@ -1219,6 +1305,129 @@ mod tests {
 
     fn build_router() -> Router {
         build_router_with_map(OwnerMap::from_pairs(&[("token-mario", "mario")]))
+    }
+
+    /// Loop 3-D: builds a router with the SAME operational routes
+    /// `serve_with_mesh` mounts in production (`/healthz`, `/readyz`,
+    /// `/lifecycle/stop`, `/lifecycle/reload`), over caller-supplied
+    /// readiness/lifecycle state — proves the `FromRef<AppState>` wiring
+    /// actually works end to end, not just the handlers in isolation
+    /// (`operational.rs`'s own unit tests already cover those).
+    fn build_operational_router(
+        readiness: Arc<crate::channel::operational::ReadinessState>,
+        lifecycle: crate::channel::operational::LifecycleControl,
+    ) -> Router {
+        let (h, rx) = handle::channel();
+        stub_consumer(rx);
+        let (events_tx, _) = broadcast::channel::<String>(128);
+        let mesh_peer_map = Arc::new(RwLock::new(MeshPeerMap::new()));
+        let state = AppState {
+            agent: h,
+            owner_map: Arc::new(OwnerMap::default()),
+            events_tx,
+            mesh_peer_map,
+            otc_store: new_otc_store(),
+            jwt_secret: "test-secret".to_string(),
+            mesh_transport: None,
+            mesh_slice_store: None,
+            agent_identity: None,
+            agent_name: "test".to_string(),
+            whatsapp: None,
+            composio_oauth: None,
+            readiness,
+            lifecycle,
+        };
+        Router::new()
+            .route(
+                "/healthz",
+                axum::routing::get(crate::channel::operational::liveness_handler),
+            )
+            .route(
+                "/readyz",
+                axum::routing::get(crate::channel::operational::readiness_handler),
+            )
+            .route(
+                "/lifecycle/stop",
+                post(crate::channel::operational::lifecycle_stop_handler),
+            )
+            .route(
+                "/lifecycle/reload",
+                post(crate::channel::operational::lifecycle_reload_handler),
+            )
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn mounted_healthz_always_200() {
+        let (readiness, lifecycle) = test_operational_state();
+        let app = build_operational_router(readiness, lifecycle);
+        let req = Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mounted_readyz_503_before_ready_200_after() {
+        let readiness = crate::channel::operational::ReadinessState::new();
+        let lifecycle = crate::channel::operational::LifecycleControl::new(
+            crate::channel::operational::DaemonAccessAuth::new(None),
+        );
+        let app = build_operational_router(readiness.clone(), lifecycle);
+
+        let req = Request::builder()
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        readiness.mark_session_ready();
+        readiness.mark_memory_ready();
+        readiness.mark_provider_ready();
+        readiness.mark_channels_ready();
+
+        let req = Request::builder()
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mounted_lifecycle_stop_requires_daemon_access_token() {
+        let readiness = crate::channel::operational::ReadinessState::new();
+        let lifecycle = crate::channel::operational::LifecycleControl::new(
+            crate::channel::operational::DaemonAccessAuth::new(Some("op-token".to_string())),
+        );
+        let shutdown = lifecycle.shutdown.clone();
+        let app = build_operational_router(readiness, lifecycle);
+
+        // No token at all — refused.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/lifecycle/stop")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct token — accepted, and the SAME Notify daemon_loop's
+        // select! arm awaits actually fires.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/lifecycle/stop")
+            .header("authorization", "Bearer op-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown.notified())
+            .await
+            .expect("shutdown notify must fire through the mounted route");
     }
 
     /// Test helper: a WhatsAppConfig with a known test app_secret/verify_token so
@@ -1468,6 +1677,7 @@ mod tests {
             otc.to_string(),
             (device_name.to_string(), std::time::Instant::now()),
         );
+        let (readiness, lifecycle) = test_operational_state();
         let state = AppState {
             agent: h,
             owner_map: Arc::new(OwnerMap::default()),
@@ -1481,6 +1691,8 @@ mod tests {
             agent_name: "test".to_string(),
             whatsapp: None,
             composio_oauth: None,
+            readiness,
+            lifecycle,
         };
         Router::new()
             .route("/webhook", post(handle))
@@ -1507,6 +1719,7 @@ mod tests {
         stub_consumer(rx);
         let (events_tx, _) = broadcast::channel::<String>(128);
         let mesh_peer_map = Arc::new(RwLock::new(MeshPeerMap::new()));
+        let (readiness, lifecycle) = test_operational_state();
         let state = AppState {
             agent: h,
             owner_map: Arc::new(OwnerMap::default()),
@@ -1520,6 +1733,8 @@ mod tests {
             agent_name: "test".to_string(),
             whatsapp: None,
             composio_oauth,
+            readiness,
+            lifecycle,
         };
         Router::new()
             .route("/auth/composio/callback", post(composio_callback_handler))

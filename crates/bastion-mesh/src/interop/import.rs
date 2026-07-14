@@ -101,6 +101,7 @@ mod tests {
     async fn test_import_rejects_unknown_version() {
         let af = AgentFile {
             version: 99,
+            producer: "test".into(),
             mode: "full".into(),
             exported_at: "".into(),
             identity: None,
@@ -130,6 +131,7 @@ mod tests {
     async fn test_import_without_identity_returns_none() {
         let af = AgentFile {
             version: AF_VERSION,
+            producer: "test".into(),
             mode: "template".into(),
             exported_at: "".into(),
             identity: None,
@@ -157,6 +159,7 @@ mod tests {
         let age_secret = identity.age_secret_bech32().to_owned();
         let af = AgentFile {
             version: AF_VERSION,
+            producer: "test".into(),
             mode: "full".into(),
             exported_at: "".into(),
             identity: Some(IdentityBlock {
@@ -188,6 +191,7 @@ mod tests {
     async fn test_import_writes_memories() {
         let af = AgentFile {
             version: AF_VERSION,
+            producer: "test".into(),
             mode: "full".into(),
             exported_at: "".into(),
             identity: None,

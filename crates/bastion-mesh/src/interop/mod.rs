@@ -5,9 +5,31 @@ use serde::{Deserialize, Serialize};
 
 pub const AF_VERSION: u32 = 1;
 
+/// Loop 3-D (`docs/revamp/C3-cloud-ready-design.md`): "`.af` versionado
+/// (INTEROP-01 já existe) + `schema_version` + id do produtor". `version`
+/// below has served as the schema version since INTEROP-01 shipped (checked
+/// by `check_version`) — kept as-is rather than renamed (a rename would
+/// break every `.af` file already exported by a pre-Loop-3-D binary, a
+/// legacy-export-format break this loop deliberately does not make). This
+/// constant is the NEW addition: which product produced the file, so a
+/// FUTURE second producer of the same `.af` format is distinguishable from
+/// this one — `#[serde(default)]` on `AgentFile::producer` below keeps every
+/// pre-Loop-3-D exported file importable unchanged (missing field ⇒ this
+/// default, never a hard parse failure).
+pub const PRODUCER_ID: &str = "bastion";
+
+fn default_producer() -> String {
+    PRODUCER_ID.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentFile {
     pub version: u32,
+    /// Which product produced this file (Loop 3-D). Absent on any `.af`
+    /// exported before this loop — `#[serde(default)]` reads those as
+    /// [`PRODUCER_ID`] rather than failing to parse.
+    #[serde(default = "default_producer")]
+    pub producer: String,
     pub mode: String,
     pub exported_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -252,5 +274,121 @@ mod tests {
         let goals = dst_goals.list_goals("owner1").await.unwrap();
         assert_eq!(goals.len(), 1);
         assert_eq!(goals[0].description, "be healthy");
+    }
+
+    // ─── Loop 3-D (docs/revamp/C3-cloud-ready-design.md), security point 1 ──
+
+    /// Local to this module's tests — `export.rs`/`import.rs` each have
+    /// their own identically-shaped private `make_db` for their own tests;
+    /// Rust privacy does not let this module reach either.
+    async fn make_db() -> (NamedTempFile, SharedMemory, GoalEngine) {
+        let f = NamedTempFile::new().expect("tempfile");
+        let path = f.path().to_str().unwrap().to_owned();
+        let session_mgr = crate::session::sqlite::SessionManager::new(&path);
+        session_mgr.init_schema().await.expect("init_schema");
+        let mem: SharedMemory = Arc::new(RwLock::new(
+            Box::new(SqliteMemory::new(&path)) as Box<dyn Memory>
+        ));
+        let goals = GoalEngine::new(&path, ScoringConfig::default());
+        (f, mem, goals)
+    }
+
+    /// A `.af` exported before this loop has no `producer` field at all —
+    /// `#[serde(default)]` must read it back as [`PRODUCER_ID`], never fail
+    /// to parse.
+    #[test]
+    fn test_producer_defaults_when_missing_from_legacy_json() {
+        let legacy_json = serde_json::json!({
+            "version": AF_VERSION,
+            "mode": "template",
+            "exported_at": "2026-01-01T00:00:00Z",
+            "config": {"agent": {"default_model": "x", "daily_budget_usd": 1.0}},
+            "personas": [],
+        });
+        let af: AgentFile = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(af.producer, PRODUCER_ID);
+    }
+
+    #[tokio::test]
+    async fn test_export_full_sets_producer_id() {
+        let config = crate::types::AgentConfig {
+            default_model: "test".into(),
+            daily_budget_usd: 0.01,
+            fallback_models: vec![],
+        };
+        let registry = PersonaRegistry::new_from_map(HashMap::new());
+        // Cheapest path to an AgentFile here is export_template — producer
+        // is set identically by both constructors (same literal, see
+        // export.rs), and this test only cares about that one field.
+        let af = export::export_template(&registry, &config)
+            .await
+            .expect("export_template");
+        assert_eq!(af.producer, PRODUCER_ID);
+    }
+
+    /// The "grep de secret = vazio" test from the design doc §Ponto 1,
+    /// applied to the ORDINARY export path (no `--with-identity`): the
+    /// serialized `.af` must contain no secret-shaped material at all. This
+    /// is the path essentially every export takes.
+    #[tokio::test]
+    async fn test_export_full_without_identity_leaks_no_secret_material() {
+        let (_f, memory, goals) = make_db().await;
+        let config = crate::types::AgentConfig {
+            default_model: "test".into(),
+            daily_budget_usd: 0.01,
+            fallback_models: vec![],
+        };
+        let registry = PersonaRegistry::new_from_map(HashMap::new());
+
+        let af = export::export_full(&memory, &registry, &goals, &config, None, "owner1")
+            .await
+            .unwrap();
+        let json = serde_json::to_string(&af).unwrap();
+
+        assert!(af.identity.is_none());
+        // No age/ed25519 identity markers, no provider-API-key-shaped
+        // strings — this export path never touches `SecretRef`/
+        // `SecretValue` at all (config.rs's `AgentConfigExport` only ever
+        // carries `default_model`/`daily_budget_usd`).
+        assert!(!json.contains("age_secret"));
+        assert!(!json.contains("ed25519_secret"));
+        assert!(!json.contains("AGE-SECRET-KEY"));
+    }
+
+    /// DOCUMENTED, DELIBERATE EXCEPTION (reported per the Loop 3-D operator
+    /// instructions rather than silently changed): `--with-identity` embeds
+    /// the raw age/Ed25519 PRIVATE KEY bytes in plaintext by design — that
+    /// keypair IS the portable mesh identity `--with-identity` exists to
+    /// carry to another machine; there is no "reference" to a private key
+    /// that would resolve to the SAME key elsewhere, unlike a provider API
+    /// key or a bearer token. This is not a `SecretRef`-eligible secret, and
+    /// this loop does not change `IdentityBlock`'s shape (main.rs already
+    /// hardens the ONLY producer of this file: opt-in flag, chmod 0600
+    /// immediately after write, WR-04). This test pins the exception
+    /// explicitly so it can never be mistaken for an accidental leak.
+    #[tokio::test]
+    async fn test_export_full_with_identity_deliberately_embeds_the_keypair() {
+        let (_f, memory, goals) = make_db().await;
+        let identity = AgeIdentity::generate();
+        let config = crate::types::AgentConfig {
+            default_model: "test".into(),
+            daily_budget_usd: 0.01,
+            fallback_models: vec![],
+        };
+        let registry = PersonaRegistry::new_from_map(HashMap::new());
+
+        let af = export::export_full(
+            &memory,
+            &registry,
+            &goals,
+            &config,
+            Some(&identity),
+            "owner1",
+        )
+        .await
+        .unwrap();
+        let json = serde_json::to_string(&af).unwrap();
+
+        assert!(json.contains(identity.age_secret_bech32()));
     }
 }

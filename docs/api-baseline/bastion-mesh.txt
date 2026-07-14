@@ -20,6 +20,7 @@ struct interop/mod.rs:ConfigBlock
 struct interop/mod.rs:GoalEntry
 struct interop/mod.rs:IdentityBlock
 struct interop/mod.rs:MemoryEntry
+const interop/mod.rs:PRODUCER_ID
 struct interop/mod.rs:PersonaEntry
 struct interop/mod.rs:SkillEntry
 mod interop/mod.rs:export

@@ -52,6 +52,33 @@ fn config_layering_mcp_servers_folded_in() {
     );
 }
 
+/// Loop 3-D (`docs/revamp/C3-cloud-ready-design.md`): "volume persistente —
+/// paths de estado injetados pelo host, nunca hardcoded". `bastion.toml`
+/// ships a Docker-shaped default (`/bastion-data/...`), but that default is
+/// only ever a STARTING POINT — the SAME env-override mechanism
+/// `config_layering_env_overrides_toml` proves for `default_model` applies
+/// identically to `session.db_path`/`logging.log_path` (same `config-rs`
+/// `BASTION__` prefix, no path-specific code path). This is the mechanism a
+/// hosted operator (or a local run overriding the shipped Docker default)
+/// relies on to inject its own volume paths without recompiling.
+#[test]
+fn config_layering_state_paths_are_env_overridable() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(
+        "BASTION__SESSION__DB_PATH",
+        "/tmp/bastion-3d-test-sessions.db",
+    );
+    std::env::set_var("BASTION__LOGGING__LOG_PATH", "/tmp/bastion-3d-test.log");
+    let cfg =
+        bastion::config::load_config("bastion.toml").expect("bastion.toml must exist at repo root");
+    let db_path = cfg.session.db_path.clone();
+    let log_path = cfg.logging.log_path.clone();
+    std::env::remove_var("BASTION__SESSION__DB_PATH");
+    std::env::remove_var("BASTION__LOGGING__LOG_PATH");
+    assert_eq!(db_path, "/tmp/bastion-3d-test-sessions.db");
+    assert_eq!(log_path, "/tmp/bastion-3d-test.log");
+}
+
 #[test]
 fn config_layering_secrets_not_in_toml() {
     let content =

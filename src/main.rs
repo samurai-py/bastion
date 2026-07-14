@@ -514,6 +514,25 @@ async fn daemon_loop(
         .take()
         .expect("pending_rx must be available at daemon start");
 
+    // Loop 3-D (`docs/revamp/C3-cloud-ready-design.md`): session/memory/
+    // provider are guaranteed initialized by the time `daemon_loop` is ever
+    // called — `main()` already propagated any of their own init failures
+    // before dispatching to `Command::Daemon` — so they're marked ready
+    // right here, at the top. `channels` is marked ready only once every
+    // configured channel below has finished its spawn attempt, right before
+    // the `select!` loop starts (see near the bottom of this function).
+    let readiness = bastion::channel::operational::ReadinessState::new();
+    readiness.mark_session_ready();
+    readiness.mark_memory_ready();
+    readiness.mark_provider_ready();
+    let lifecycle_auth = bastion::channel::operational::DaemonAccessAuth::new(
+        secret_resolver
+            .resolve("BASTION_DAEMON_TOKEN")
+            .ok()
+            .map(|v| v.expose_secret().to_string()),
+    );
+    let lifecycle = bastion::channel::operational::LifecycleControl::new(lifecycle_auth);
+
     // M2 (P5 despejo): `otc_store`/`composio_oauth` are no longer `AgentLoop`
     // fields — this replaces `agent.set_otc_store`/`agent.set_composio_oauth`.
     // Declared here (before the webhook-gated block below, which is the only
@@ -746,6 +765,12 @@ async fn daemon_loop(
             None
         };
 
+        // Cloned BEFORE the `async move` block below — `readiness`/`lifecycle`
+        // are used again later in `daemon_loop` (readiness.mark_channels_ready()
+        // right before the select! loop; the shutdown/reload arms inside it),
+        // so the ORIGINAL bindings must survive this spawn, not be moved into it.
+        let readiness_for_webhook = readiness.clone();
+        let lifecycle_for_webhook = lifecycle.clone();
         tokio::spawn(async move {
             if let Err(e) = bastion::channel::webhook::serve_with_mesh(
                 h,
@@ -762,6 +787,8 @@ async fn daemon_loop(
                 mcp_routes,
                 whatsapp_config,
                 composio_oauth.clone(),
+                readiness_for_webhook,
+                lifecycle_for_webhook,
             )
             .await
             {
@@ -1059,6 +1086,10 @@ async fn daemon_loop(
     let mut stdin_open = true;
     let mut sigterm = signal(SignalKind::terminate())?;
 
+    // Loop 3-D: every configured channel above has finished its spawn
+    // attempt (success or logged failure) — `/readyz` can now report ready.
+    readiness.mark_channels_ready();
+
     println!("Bastion daemon started. Type a message or /help for commands.");
 
     loop {
@@ -1200,6 +1231,39 @@ async fn daemon_loop(
                 tracing::info!(event = "ctrl_c_received");
                 println!("\nShutting down (Ctrl-C).");
                 break;
+            }
+            // Loop 3-D (`docs/revamp/C3-cloud-ready-design.md`): the SAME
+            // graceful-shutdown path as SIGTERM/Ctrl-C, triggered instead by
+            // an authenticated `POST /lifecycle/stop`.
+            _ = lifecycle.shutdown.notified() => {
+                tracing::info!(event = "http_lifecycle_stop_received");
+                println!("Shutting down (HTTP /lifecycle/stop).");
+                break;
+            }
+            // `POST /lifecycle/reload` reloads the persona registry from
+            // disk into `command_resources` (the copy `/as`/`/cabinet`
+            // slash-command validation reads). Deliberately honest about
+            // scope: this does NOT hot-swap the turn-dispatch
+            // `PersonaResponder`'s own registry — that would need a
+            // Responder-level hot-reload port, out of scope for this loop
+            // (`PersonaResponder` holds its `PersonaRegistry` by value, not
+            // behind a swappable handle; changing that shape is a kernel
+            // contract change this cycle does not make).
+            _ = lifecycle.reload.notified() => {
+                match bastion_personas::persona::PersonaRegistry::load_dir(".").await {
+                    Ok(fresh) => {
+                        command_resources.registry = fresh;
+                        tracing::info!(
+                            event = "http_lifecycle_reload_applied",
+                            scope = "command_resources.registry",
+                            "persona registry reloaded from disk for /as and /cabinet validation \
+                             — the turn-dispatch responder's own registry is NOT hot-swapped by this call",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(event = "http_lifecycle_reload_failed", error = %e);
+                    }
+                }
             }
         }
     }
