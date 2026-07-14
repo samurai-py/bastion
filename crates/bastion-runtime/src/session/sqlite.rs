@@ -159,6 +159,37 @@ impl SessionManager {
                     external_ref TEXT    NOT NULL,
                     updated_at   INTEGER NOT NULL
                 );
+
+                -- Loop 3-A / 6a (docs/revamp/C3-runtime-followups-design.md
+                -- section 6a): owner-scoped, persisted cross-turn queue for a
+                -- harness's PermissionRequest events. `id` is Bastion's own
+                -- identity (the correlation key a later turn resolves by);
+                -- `req_id` is the harness's OWN PermissionRequestId, stored
+                -- only so a resolved row can answer
+                -- RuntimeSession::respond_permission on the real session --
+                -- it is only unique WITHIN one harness session, never used
+                -- as this table's key. `status` is 'pending' | 'resolved';
+                -- a resolved row's `decision_json` records the FINAL
+                -- PermissionDecision (an explicit later-turn answer, or a
+                -- fail-closed timeout Deny{Turn}) -- never rewritten again
+                -- once set.
+                CREATE TABLE IF NOT EXISTS permission_queue (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    req_id                INTEGER NOT NULL,
+                    owner_id              TEXT    NOT NULL,
+                    session_runtime_id    TEXT    NOT NULL,
+                    session_owner         TEXT    NOT NULL,
+                    session_external_ref  TEXT    NOT NULL,
+                    action_json           TEXT    NOT NULL,
+                    detail                TEXT    NOT NULL,
+                    status                TEXT    NOT NULL DEFAULT 'pending',
+                    decision_json         TEXT,
+                    raised_at             INTEGER NOT NULL,
+                    expires_at            INTEGER NOT NULL,
+                    resolved_at           INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_permission_queue_owner_status
+                    ON permission_queue(owner_id, status);
             ",
             )?;
             // Additive migration for pre-existing single-user DBs (idempotent —
@@ -628,6 +659,41 @@ mod tests {
             assert!(
                 cols.iter().any(|c| c == expected),
                 "approval_queue missing column {expected}, has {cols:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_permission_queue_table_columns() {
+        let (_f, sm) = make_db().await;
+        let path = sm.db_path.clone();
+        let conn = open_conn(&path).expect("open_conn");
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(permission_queue)")
+            .expect("prepare");
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query_map")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        for expected in [
+            "id",
+            "req_id",
+            "owner_id",
+            "session_runtime_id",
+            "session_owner",
+            "session_external_ref",
+            "action_json",
+            "detail",
+            "status",
+            "decision_json",
+            "raised_at",
+            "expires_at",
+            "resolved_at",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == expected),
+                "permission_queue missing column {expected}, has {cols:?}"
             );
         }
     }

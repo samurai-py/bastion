@@ -301,7 +301,17 @@ async fn main() -> anyhow::Result<()> {
     }
     agent = agent
         .with_backend_profile(backend_profile)
-        .with_runtime_registry(runtime_registry);
+        .with_runtime_registry(runtime_registry)
+        // Loop 3-A (6a, docs/revamp/C3-runtime-followups-design.md §6a):
+        // owner-scoped, persisted cross-turn permission queue — the same
+        // db_path SqliteApprovalGate above already opens. Without this call
+        // AgentLoop keeps NullPermissionGate (fail-closed immediate deny,
+        // pre-6a behavior); wiring the real gate here is what lets a
+        // delegated task's paused PermissionRequest survive to be resolved
+        // by a LATER turn instead of denying instantly.
+        .with_permission_gate(std::sync::Arc::new(
+            bastion_runtime::capability::SqlitePermissionGate::new(&db_path),
+        ));
 
     match cli.command {
         Command::Agent { message } => {

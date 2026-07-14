@@ -2,8 +2,9 @@ use crate::agent::backend::{BackendProfile, ConversationBackend, RuntimeRegistry
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::ports::{
-    ApprovalGate, CommandHandler, CommandResult, FailureSink, GoalPort, PreCompactionFlush,
-    ProviderResolver, Responder, ToolResultObserver, ToolSource, TurnContext, TurnKernel,
+    ApprovalGate, CommandHandler, CommandResult, FailureSink, GoalPort, PermissionGate,
+    PreCompactionFlush, ProviderResolver, Responder, ToolResultObserver, ToolSource, TurnContext,
+    TurnKernel,
 };
 use crate::hooks::egress::EgressHook;
 use crate::hooks::guardrails::InputGuardrail;
@@ -154,6 +155,37 @@ pub struct AgentLoop {
     /// schedules or sequences across entries.
     pub delegated_tasks:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, mpsc::Sender<()>>>>,
+    /// Loop 3-A (6a, `docs/revamp/C3-runtime-followups-design.md` §6a):
+    /// owner-scoped, persisted cross-turn queue for a harness's
+    /// `PermissionRequest` events. Defaults to `NullPermissionGate`
+    /// (`capability::permission_queue`) — fail-closed, byte-identical to
+    /// pre-6a behavior — until a real gate is injected via
+    /// [`AgentLoop::with_permission_gate`] (`main.rs` wires
+    /// `SqlitePermissionGate`).
+    pub permission_gate: Arc<dyn PermissionGate>,
+    /// Loop 3-A (6a): in-memory wake-up channel for a delegated task's
+    /// consumer that is genuinely PAUSED waiting on a permission decision
+    /// (keyed by `PendingPermission::row_id`, never the harness's own id —
+    /// see that field's rustdoc). `AgentLoop::respond_permission` looks a
+    /// row up here after persisting the decision; if the consumer already
+    /// timed out/ended, there's simply nothing left to wake (the persisted
+    /// resolution is still the audit of record). Bookkeeping only, same
+    /// discipline as `delegated_tasks` — not a scheduler.
+    pub pending_permission_waiters: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<
+                i64,
+                tokio::sync::oneshot::Sender<bastion_agent_runtime::PermissionDecision>,
+            >,
+        >,
+    >,
+    /// Loop 3-A (6a): how long a delegated task's consumer waits for a
+    /// permission request to be resolved by a later turn before falling
+    /// back to a fail-closed `Deny { scope: Turn }`. Defaults to 10 minutes
+    /// in [`AgentLoop::new`]; tests inject a short duration via
+    /// [`AgentLoop::with_permission_timeout`] so the timeout path doesn't
+    /// need a slow real-time wait to exercise.
+    pub permission_timeout: std::time::Duration,
 }
 
 impl AgentLoop {
@@ -228,6 +260,16 @@ impl AgentLoop {
             backend_profile: BackendProfile::default(),
             runtime_registry: RuntimeRegistry::default(),
             delegated_tasks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            // 6a: fail-closed `NullPermissionGate` — same "no Option, explicit
+            // default" discipline as `approval_gate` above, but set post-
+            // construction (like `backend_profile`/`runtime_registry`) so this
+            // constructor's signature stays untouched. `main.rs` opts in via
+            // `with_permission_gate(SqlitePermissionGate::new(db_path))`.
+            permission_gate: Arc::new(crate::capability::NullPermissionGate),
+            pending_permission_waiters: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            permission_timeout: std::time::Duration::from_secs(600),
         }
     }
 
@@ -246,6 +288,25 @@ impl AgentLoop {
     /// rationale as [`AgentLoop::with_backend_profile`].
     pub fn with_runtime_registry(mut self, registry: RuntimeRegistry) -> Self {
         self.runtime_registry = registry;
+        self
+    }
+
+    /// Loop 3-A (6a): opt into a real, persisted [`PermissionGate`] — e.g.
+    /// `main.rs` injecting `SqlitePermissionGate::new(db_path)`. Without
+    /// this call, `AgentLoop` keeps the fail-closed `NullPermissionGate`
+    /// default: every permission request resolves as an immediate
+    /// `Deny { scope: Turn }`, byte-identical to pre-6a behavior.
+    pub fn with_permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
+        self.permission_gate = gate;
+        self
+    }
+
+    /// Loop 3-A (6a): override how long a delegated task's consumer waits
+    /// for a permission decision before falling back to a fail-closed
+    /// `Deny { scope: Turn }`. Defaults to 10 minutes (`AgentLoop::new`);
+    /// tests use this to shrink the wait to milliseconds.
+    pub fn with_permission_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.permission_timeout = timeout;
         self
     }
 
@@ -372,19 +433,21 @@ impl AgentLoop {
     /// trace-context handoff is attempted this cycle, since neither shipped
     /// adapter's protocol has a slot for one).
     ///
-    /// Permission requests from the harness bridge into the SAME
-    /// `ApprovalGate` the Model path's tool-loop uses (Ciclo 2.1) for audit —
-    /// but this function runs synchronously inside ONE turn (the daemon
-    /// serializes through a single `&mut agent`, AGENTS.md architecture law),
-    /// so it cannot block waiting for a LATER turn's plain-language
-    /// "sim"/"não" to resolve a freshly-raised request. A request that isn't
-    /// already resolved gets `PermissionDecision::Deny { scope:
-    /// DenyScope::Turn }` — fail-closed, the same Turn-scoped-denial
-    /// semantics the Model path's own `dispatch_tool_loop` already applies.
-    /// The enqueue still happens (audited), so a differently-scoped
-    /// `PermissionProfile` — or a richer cross-turn approval UX, explicitly
-    /// M4-pleno scope per the design doc §6 — is how an owner avoids hitting
-    /// this on a task that genuinely needs a tool call answered.
+    /// Permission requests from the harness are audited into the SAME
+    /// `PermissionGate`/`permission_queue` mode 3's consumer uses (Loop 3-A,
+    /// 6a) — but this function runs synchronously inside ONE turn (the
+    /// daemon serializes through a single `&mut agent`, AGENTS.md
+    /// architecture law), so it cannot block waiting for a LATER turn's
+    /// plain-language "sim"/"não" to resolve a freshly-raised request without
+    /// freezing every other owner's turn for the wait's duration — the exact
+    /// thing 6a's design forbids. A request here always gets
+    /// `PermissionDecision::Deny { scope: DenyScope::Turn }` immediately —
+    /// fail-closed, the same Turn-scoped-denial semantics the Model path's
+    /// own `dispatch_tool_loop` already applies. Genuine cross-turn PAUSE
+    /// (enqueue, wait, resolve by a LATER turn via
+    /// `AgentLoop::respond_permission`) is mode 3's consumer only
+    /// (`spawn_delegated_task_consumer`, an independently-spawned tokio task
+    /// that never holds `&mut agent`) — see its rustdoc.
     async fn run_runtime_backed_turn(
         &mut self,
         runtime_id: &str,
@@ -484,29 +547,43 @@ impl AgentLoop {
                     action,
                     detail,
                 } if t == task => {
-                    let capability_name = format!("agent_runtime:{runtime_id}:{action:?}");
-                    let args = serde_json::json!({ "detail": detail, "runtime_id": runtime_id });
-                    // Audited regardless of what happens next — enqueue_or_reuse
-                    // never auto-approves. See this function's rustdoc for why a
-                    // freshly-raised request can't be approved synchronously
-                    // within one turn.
-                    if let Err(e) = self
-                        .capability_registry
-                        .approval_gate()
-                        .enqueue_or_reuse(owner, &capability_name, &args)
+                    // 6a (docs/revamp/C3-runtime-followups-design.md §6a):
+                    // audited through the SAME `PermissionGate`/`permission_queue`
+                    // mode 3 uses (single source of truth for "what did a
+                    // harness ask permission for"), but resolved IMMEDIATELY —
+                    // never a genuine pause. This function runs synchronously
+                    // inside ONE turn; the daemon serializes through a single
+                    // `&mut agent` (AGENTS.md architecture law), so pausing
+                    // here would freeze every other owner's turn for as long
+                    // as the wait lasted — exactly what 6a's design forbids
+                    // ("nenhuma espera síncrona segura o `&mut agent`").
+                    // Genuine cross-turn pause is mode 3's consumer only (an
+                    // independently-spawned tokio task, never holding
+                    // `&mut agent`) — see `spawn_delegated_task_consumer`.
+                    let now = now_nanos();
+                    let deny = bastion_agent_runtime::PermissionDecision::Deny {
+                        scope: bastion_agent_runtime::DenyScope::Turn,
+                    };
+                    match self
+                        .permission_gate
+                        .enqueue(owner, &handle, id, &action, &detail, now, now)
                         .await
                     {
-                        tracing::warn!(event = "agent_runtime_permission_audit_failed", error = %e);
+                        Ok(row_id) => {
+                            // Immediate resolve (no wait) — records the SAME
+                            // fail-closed decision the harness is about to
+                            // receive, keeping the audit trail consistent
+                            // with mode 3's timeout path.
+                            if let Err(e) = self.permission_gate.resolve(owner, row_id, deny).await
+                            {
+                                tracing::warn!(event = "agent_runtime_permission_resolve_failed", error = %e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(event = "agent_runtime_permission_audit_failed", error = %e);
+                        }
                     }
-                    if let Err(e) = session
-                        .respond_permission(
-                            id,
-                            bastion_agent_runtime::PermissionDecision::Deny {
-                                scope: bastion_agent_runtime::DenyScope::Turn,
-                            },
-                        )
-                        .await
-                    {
+                    if let Err(e) = session.respond_permission(id, deny).await {
                         tracing::warn!(event = "agent_runtime_respond_permission_failed", error = %e);
                     }
                 }
@@ -618,7 +695,9 @@ impl AgentLoop {
             session,
             task_id,
             self.session.clone(),
-            self.capability_registry.approval_gate().clone(),
+            self.permission_gate.clone(),
+            self.pending_permission_waiters.clone(),
+            self.permission_timeout,
             self.pending_tx.clone(),
             self.delegated_tasks.clone(),
             cancel_rx,
@@ -719,12 +798,51 @@ impl AgentLoop {
             session,
             task_id,
             self.session.clone(),
-            self.capability_registry.approval_gate().clone(),
+            self.permission_gate.clone(),
+            self.pending_permission_waiters.clone(),
+            self.permission_timeout,
             self.pending_tx.clone(),
             self.delegated_tasks.clone(),
             cancel_rx,
         );
 
+        Ok(())
+    }
+
+    /// Loop 3-A (6a, `docs/revamp/C3-runtime-followups-design.md` §6a):
+    /// resolve a paused harness permission request from a LATER turn — the
+    /// "sim"/"não" (or a dedicated cockpit surface) that answers what a
+    /// delegated task's consumer is genuinely waiting on, never mid-turn
+    /// (the request itself was raised inside an independently-spawned
+    /// consumer, off the `&mut agent` critical path — this method is a
+    /// plain `&self` call any later turn/command can make without holding
+    /// the daemon).
+    ///
+    /// Owner-scoped (IDOR guard, mirrors `ApprovalGate::approve`/`reject`):
+    /// errors if `row_id` doesn't belong to `owner` or was already resolved
+    /// (an earlier explicit decision, a timeout, or the task ending/being
+    /// cancelled while paused). On success, wakes the in-memory waiter
+    /// (best-effort: if the consumer already ended, there's nothing left to
+    /// wake — the persisted resolution above is still recorded as the audit
+    /// of record).
+    pub async fn respond_permission(
+        &self,
+        owner: &str,
+        row_id: i64,
+        decision: bastion_agent_runtime::PermissionDecision,
+    ) -> anyhow::Result<()> {
+        let resolved = self
+            .permission_gate
+            .resolve(owner, row_id, decision)
+            .await?;
+        if let Some(tx) = self
+            .pending_permission_waiters
+            .lock()
+            .await
+            .remove(&resolved.row_id)
+        {
+            let _ = tx.send(decision);
+        }
         Ok(())
     }
 
@@ -2009,6 +2127,130 @@ fn unique_task_suffix() -> String {
     format!("{nanos:x}-{n}")
 }
 
+/// Current time in nanoseconds since `UNIX_EPOCH` — same idiom as
+/// `capability/approval.rs`'s private `now_nanos()`, duplicated here (not
+/// shared) since that one is private to its module.
+fn now_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
+}
+
+/// Outcome of [`wait_for_permission_resolution`]: whether the delegated
+/// task was ALSO cancelled while paused, which the caller must additionally
+/// signal to the harness (`RuntimeSession::cancel`) — the cancel request
+/// was consumed by this helper's own `cancel_rx` branch, so the caller
+/// won't see it again on its own next `cancel_rx.recv()`.
+enum PermissionWaitOutcome {
+    /// Resolved by an explicit later-turn decision or by timing out —
+    /// the task keeps running (or ends on its own via a subsequent event).
+    Decided(bastion_agent_runtime::PermissionDecision),
+    /// The task was cancelled (`cancel_delegated_task`) while paused here.
+    /// The decision is always `Deny { scope: Turn }` (the task is ending
+    /// anyway) — the caller must still answer the harness AND propagate the
+    /// cancel to `session.cancel(...)`.
+    CancelledWhilePending(bastion_agent_runtime::PermissionDecision),
+}
+
+/// Loop 3-A (6a, `docs/revamp/C3-runtime-followups-design.md` §6a): the
+/// GENUINE cross-turn pause. Persists `PendingPermission` (owner-scoped,
+/// `PermissionGate::enqueue`), registers an in-memory wake-up channel keyed
+/// by the assigned `row_id`, then waits — WITHOUT holding `&mut agent` (this
+/// runs inside `spawn_delegated_task_consumer`'s own spawned tokio task,
+/// never inside a `&mut AgentLoop` call) — for whichever comes first:
+///
+/// 1. A LATER turn resolves it via `AgentLoop::respond_permission`, which
+///    sends the decision through the very channel registered here.
+/// 2. `expires_at` elapses: fail-closed `Deny { scope: Turn }`, and the
+///    persisted row is resolved to match (so it stops showing up as
+///    "pending" — no dangling audit row).
+/// 3. The delegated task itself is cancelled while paused: also resolved
+///    fail-closed (`Deny { scope: Turn }`) since the task is ending anyway,
+///    but reported back via [`PermissionWaitOutcome::CancelledWhilePending`]
+///    so the caller ALSO signals `session.cancel(...)` (this function
+///    consumed the cancel signal from `cancel_rx`, so the caller's own
+///    `cancel_rx.recv()` branch won't see it a second time).
+///
+/// If `permission_gate.enqueue` itself fails (the default `NullPermissionGate`
+/// always does — nothing is wired), this returns `Decided(Deny{Turn})`
+/// IMMEDIATELY, no wait at all — byte-identical to pre-6a behavior for any
+/// deployment that hasn't opted into `AgentLoop::with_permission_gate`.
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_permission_resolution(
+    permission_gate: &Arc<dyn PermissionGate>,
+    permission_waiters: &Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<
+                i64,
+                tokio::sync::oneshot::Sender<bastion_agent_runtime::PermissionDecision>,
+            >,
+        >,
+    >,
+    owner: &str,
+    session_handle: &bastion_agent_runtime::SessionHandle,
+    id: bastion_agent_runtime::PermissionRequestId,
+    action: bastion_agent_runtime::PermissionAction,
+    detail: String,
+    timeout: std::time::Duration,
+    cancel_rx: &mut mpsc::Receiver<()>,
+) -> PermissionWaitOutcome {
+    let deny = bastion_agent_runtime::PermissionDecision::Deny {
+        scope: bastion_agent_runtime::DenyScope::Turn,
+    };
+
+    let raised_at = now_nanos();
+    let expires_at = raised_at + timeout.as_nanos() as i64;
+
+    let row_id = match permission_gate
+        .enqueue(
+            owner,
+            session_handle,
+            id,
+            &action,
+            &detail,
+            raised_at,
+            expires_at,
+        )
+        .await
+    {
+        Ok(row_id) => row_id,
+        Err(e) => {
+            // No real gate wired (or persistence itself failed) — fail
+            // closed immediately, exactly today's pre-6a posture.
+            tracing::warn!(event = "permission_enqueue_failed", error = %e);
+            return PermissionWaitOutcome::Decided(deny);
+        }
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    permission_waiters.lock().await.insert(row_id, tx);
+
+    tokio::select! {
+        recv = rx => {
+            permission_waiters.lock().await.remove(&row_id);
+            PermissionWaitOutcome::Decided(recv.unwrap_or(deny))
+        }
+        _ = tokio::time::sleep(timeout) => {
+            permission_waiters.lock().await.remove(&row_id);
+            if let Err(e) = permission_gate.resolve(owner, row_id, deny).await {
+                // Lost the race against an explicit resolve that landed at
+                // almost the same instant — harmless, that resolve already
+                // recorded a decision; log for visibility only.
+                tracing::debug!(event = "permission_timeout_resolve_race_lost", error = %e);
+            }
+            PermissionWaitOutcome::Decided(deny)
+        }
+        _ = cancel_rx.recv() => {
+            permission_waiters.lock().await.remove(&row_id);
+            if let Err(e) = permission_gate.resolve(owner, row_id, deny).await {
+                tracing::debug!(event = "permission_cancel_resolve_race_lost", error = %e);
+            }
+            PermissionWaitOutcome::CancelledWhilePending(deny)
+        }
+    }
+}
+
 /// Ciclo 2.4 (design doc §3, mode 3): the background consumer for one
 /// delegated task — submitted already; this drives it to completion (or
 /// cancellation) and reports the outcome. Shared by `delegate_task` (fresh
@@ -2029,7 +2271,16 @@ fn spawn_delegated_task_consumer(
     mut session: Box<dyn bastion_agent_runtime::RuntimeSession>,
     task_id: bastion_agent_runtime::TaskId,
     session_manager: SessionManager,
-    approval_gate: Arc<dyn ApprovalGate>,
+    permission_gate: Arc<dyn PermissionGate>,
+    permission_waiters: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<
+                i64,
+                tokio::sync::oneshot::Sender<bastion_agent_runtime::PermissionDecision>,
+            >,
+        >,
+    >,
+    permission_timeout: std::time::Duration,
     pending_tx: mpsc::Sender<PendingItem>,
     delegated_tasks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, mpsc::Sender<()>>>>,
     mut cancel_rx: mpsc::Receiver<()>,
@@ -2089,28 +2340,51 @@ fn spawn_delegated_task_consumer(
                                 ?action,
                                 detail = %detail,
                             );
-                            // Same fail-closed audited-deny posture as mode 2
-                            // (`run_runtime_backed_turn`) and for the same
-                            // reason: nothing here can wait for a LATER
-                            // conversational turn's plain-language decision.
-                            let capability_name = format!("agent_runtime:{runtime_id}:{action:?}");
-                            let args = serde_json::json!({ "detail": detail, "runtime_id": runtime_id });
-                            if let Err(e) = approval_gate
-                                .enqueue_or_reuse(&owner, &capability_name, &args)
-                                .await
+                            // 6a (docs/revamp/C3-runtime-followups-design.md
+                            // §6a): genuine cross-turn pause. This consumer
+                            // runs in its OWN spawned tokio task — never
+                            // holding `&mut agent` — so it CAN wait for a
+                            // LATER turn's decision without freezing the
+                            // daemon (unlike mode 2's `run_runtime_backed_turn`,
+                            // which stays immediate-deny-only; see that
+                            // function's rustdoc for why). See
+                            // `wait_for_permission_resolution`'s rustdoc for
+                            // the full resolution race (explicit decision vs
+                            // timeout vs cancellation-while-paused).
+                            let handle = session.handle();
+                            match wait_for_permission_resolution(
+                                &permission_gate,
+                                &permission_waiters,
+                                &owner,
+                                &handle,
+                                id,
+                                action,
+                                detail,
+                                permission_timeout,
+                                &mut cancel_rx,
+                            )
+                            .await
                             {
-                                tracing::warn!(event = "agent_runtime_permission_audit_failed", error = %e);
-                            }
-                            if let Err(e) = session
-                                .respond_permission(
-                                    id,
-                                    bastion_agent_runtime::PermissionDecision::Deny {
-                                        scope: bastion_agent_runtime::DenyScope::Turn,
-                                    },
-                                )
-                                .await
-                            {
-                                tracing::warn!(event = "agent_runtime_respond_permission_failed", error = %e);
+                                PermissionWaitOutcome::Decided(decision) => {
+                                    if let Err(e) = session.respond_permission(id, decision).await {
+                                        tracing::warn!(event = "agent_runtime_respond_permission_failed", error = %e);
+                                    }
+                                }
+                                PermissionWaitOutcome::CancelledWhilePending(decision) => {
+                                    tracing::info!(
+                                        event = "agent_runtime_delegated_cancel_requested_while_paused",
+                                        key = %key,
+                                        runtime_id = %runtime_id,
+                                    );
+                                    if let Err(e) = session.respond_permission(id, decision).await {
+                                        tracing::warn!(event = "agent_runtime_respond_permission_failed", error = %e);
+                                    }
+                                    let _ = session
+                                        .cancel(bastion_agent_runtime::CancelMode::Graceful {
+                                            grace: std::time::Duration::from_secs(5),
+                                        })
+                                        .await;
+                                }
                             }
                         }
                         bastion_agent_runtime::RuntimeEvent::Artifact { task: t, artifact }

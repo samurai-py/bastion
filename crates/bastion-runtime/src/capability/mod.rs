@@ -14,10 +14,12 @@
 //! through this registry's public API.
 
 pub mod approval;
+pub mod permission_queue;
 pub mod registry;
 pub mod structured_output;
 
 pub use approval::{
     ApprovalOutcome, ApprovalRow, ApprovalStatus, NullApprovalGate, SqliteApprovalGate,
 };
+pub use permission_queue::{NullPermissionGate, SqlitePermissionGate};
 pub use registry::{Capability, CapabilityRegistry, InvokeCtx, TaggedValue, TurnCapabilityScope};

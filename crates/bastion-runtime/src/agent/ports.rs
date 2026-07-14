@@ -129,6 +129,93 @@ pub trait ApprovalGate: Send + Sync {
     async fn record_executed(&self, id: i64, result: &serde_json::Value) -> anyhow::Result<()>;
 }
 
+/// Loop 3-A (6a, `docs/revamp/C3-runtime-followups-design.md` §6a): one
+/// harness [`bastion_agent_runtime::RuntimeEvent::PermissionRequest`] parked
+/// pending a decision — either an explicit later-turn answer or a
+/// fail-closed timeout.
+///
+/// `row_id` (Bastion's own autoincrement identity, assigned by
+/// [`PermissionGate::enqueue`]) is the correlation key a LATER TURN resolves
+/// by — never the harness's own `id`. The harness's [`bastion_agent_runtime::PermissionRequestId`]
+/// is only unique WITHIN one session (a fresh harness session restarts its
+/// own counter), so two concurrently-paused delegated tasks for the SAME
+/// owner could easily raise colliding `id`s; `row_id` cannot collide, and is
+/// what [`PermissionGate::resolve`] takes.
+///
+/// Deliberately a DIFFERENT vocabulary/port from [`ApprovalGate`] above (that
+/// one gates a `CapabilityRegistry` tool-call invocation keyed by
+/// `(owner, capability_name, args)`; this one gates a harness's own in-flight
+/// permission prompt) — kept separate so neither trait's contract grows
+/// concerns the other doesn't own.
+#[derive(Debug, Clone)]
+pub struct PendingPermission {
+    /// Bastion's own row identity — the correlation key `resolve` takes.
+    pub row_id: i64,
+    /// The harness's own id for this request — needed to answer
+    /// `RuntimeSession::respond_permission(id, decision)` on the REAL
+    /// session; never used as a cross-request correlation key (see above).
+    pub id: bastion_agent_runtime::PermissionRequestId,
+    pub owner: String,
+    /// Session the request was raised on — the task/session waiting for it.
+    pub session: bastion_agent_runtime::SessionHandle,
+    pub action: bastion_agent_runtime::PermissionAction,
+    pub detail: String,
+    /// Nanoseconds since `UNIX_EPOCH` (matches the `now_nanos()` idiom used
+    /// throughout `capability/approval.rs`).
+    pub raised_at: i64,
+    /// Nanoseconds since `UNIX_EPOCH` — once passed, the request MUST be
+    /// resolved as a fail-closed `Deny { scope: Turn }` (whoever notices
+    /// first: the paused consumer's own timer, or a later sweep).
+    pub expires_at: i64,
+}
+
+/// Loop 3-A (6a) — owner-scoped, persisted cross-turn queue for harness
+/// permission requests (see [`PendingPermission`]'s rustdoc for why this is
+/// a separate port from [`ApprovalGate`]).
+///
+/// `AgentLoop` defaults to `NullPermissionGate` (`capability::permission_queue`)
+/// unless a real gate is injected via `AgentLoop::with_permission_gate` — the
+/// SAME "no `Option`, explicit fail-closed default" discipline `ApprovalGate`
+/// established (SEC-01). With the default gate, `enqueue` always errors, so
+/// every permission request resolves as an IMMEDIATE `Deny { scope: Turn }`
+/// — byte-identical to pre-6a behavior for any deployment that doesn't
+/// explicitly opt in.
+#[async_trait::async_trait]
+pub trait PermissionGate: Send + Sync {
+    /// Persist a freshly-raised permission request, owner-scoped. Returns
+    /// the assigned `row_id` (see [`PendingPermission::row_id`]).
+    #[allow(clippy::too_many_arguments)]
+    async fn enqueue(
+        &self,
+        owner_id: &str,
+        session: &bastion_agent_runtime::SessionHandle,
+        id: bastion_agent_runtime::PermissionRequestId,
+        action: &bastion_agent_runtime::PermissionAction,
+        detail: &str,
+        raised_at: i64,
+        expires_at: i64,
+    ) -> anyhow::Result<i64>;
+
+    /// All not-yet-resolved requests for this owner. Empty vec when none
+    /// exist — never an error for the "no rows" case (mirrors
+    /// `ApprovalGate::pending_for_owner`).
+    async fn pending_for_owner(&self, owner_id: &str) -> anyhow::Result<Vec<PendingPermission>>;
+
+    /// Resolve a pending request by `row_id`, owner-scoped (IDOR guard,
+    /// mirrors `ApprovalGate::approve`/`reject`). Errors if `row_id` doesn't
+    /// belong to `owner_id` or is no longer pending (already resolved — by
+    /// an earlier explicit decision or a timeout race the caller lost).
+    /// Returns the now-resolved row so the caller can read back `id`/
+    /// `session` (needed to answer the harness / key the in-memory wake-up)
+    /// without a second round trip.
+    async fn resolve(
+        &self,
+        owner_id: &str,
+        row_id: i64,
+        decision: bastion_agent_runtime::PermissionDecision,
+    ) -> anyhow::Result<PendingPermission>;
+}
+
 /// P4 — optional goal-engine port.
 ///
 /// `GoalEngine` becomes a trait object injected as `Option<Arc<dyn GoalPort>>`
