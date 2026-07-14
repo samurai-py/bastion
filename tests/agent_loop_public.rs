@@ -1416,3 +1416,243 @@ async fn dispatch_tool_loop_untrusted_round_hides_tools_from_the_llm_request() {
          request, not just have invoke() blocked"
     );
 }
+
+// --- M4-07: /backends and /backend use cockpit commands -------------------
+
+/// Minimal in-process fake [`bastion_agent_runtime::AgentRuntime`] — never
+/// actually opens a session in these tests (they only exercise the
+/// listing/selection UX, not a real turn through it). Mirrors the shape of
+/// `bastion_runtime::agent::backend`'s own private test fixture (that one
+/// isn't reusable across this separate test binary).
+struct FakeBackendAdapter {
+    id: &'static str,
+    ready: bool,
+}
+
+#[async_trait::async_trait]
+impl bastion_agent_runtime::AgentRuntime for FakeBackendAdapter {
+    fn descriptor(&self) -> bastion_agent_runtime::RuntimeDescriptor {
+        bastion_agent_runtime::RuntimeDescriptor {
+            id: self.id,
+            adapter_version: "0.0.0".to_string(),
+            target_version: "test".to_string(),
+            transport: bastion_agent_runtime::Transport::Embedded,
+            supports: bastion_agent_runtime::RuntimeSupports::default(),
+            policy_coverage: bastion_agent_runtime::PolicyCoverage {
+                tool_visibility: bastion_agent_runtime::ToolVisibility::DeclaredOnly,
+                approvals: bastion_agent_runtime::ApprovalCoverage::HarnessOwned,
+                egress: bastion_agent_runtime::EgressCoverage::HarnessOwned,
+                budget: bastion_agent_runtime::BudgetCoverage::Reported,
+                sandbox: bastion_agent_runtime::SandboxCoverage::None,
+            },
+        }
+    }
+
+    async fn health(
+        &self,
+    ) -> Result<bastion_agent_runtime::RuntimeHealth, bastion_agent_runtime::RuntimeError> {
+        Ok(bastion_agent_runtime::RuntimeHealth {
+            detected_version: "0.0.0".to_string(),
+            ready: self.ready,
+            detail: if self.ready {
+                None
+            } else {
+                Some("fake unhealthy for this test".to_string())
+            },
+        })
+    }
+
+    async fn start(
+        &self,
+        _spec: bastion_agent_runtime::SessionSpec,
+    ) -> Result<Box<dyn bastion_agent_runtime::RuntimeSession>, bastion_agent_runtime::RuntimeError>
+    {
+        Err(bastion_agent_runtime::RuntimeError::Unavailable(
+            "fake: start unimplemented (this test only exercises selection UX)".to_string(),
+        ))
+    }
+
+    async fn resume(
+        &self,
+        _handle: &bastion_agent_runtime::SessionHandle,
+        _spec: bastion_agent_runtime::ResumeSpec,
+    ) -> Result<Box<dyn bastion_agent_runtime::RuntimeSession>, bastion_agent_runtime::RuntimeError>
+    {
+        Err(bastion_agent_runtime::RuntimeError::NotResumable(
+            "fake: resume unimplemented".to_string(),
+        ))
+    }
+}
+
+/// `/backends` must list `model` (always available) plus every registered
+/// runtime with its live health and policy-coverage summary.
+#[tokio::test]
+async fn cockpit_backends_lists_model_and_registered_runtimes() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_str().unwrap().to_owned();
+    let mut agent = make_loop(&path).await;
+
+    let mut registry = bastion_runtime::agent::backend::RuntimeRegistry::new();
+    registry.register(Arc::new(FakeBackendAdapter {
+        id: "fake_healthy",
+        ready: true,
+    }));
+    registry.register(Arc::new(FakeBackendAdapter {
+        id: "fake_unhealthy",
+        ready: false,
+    }));
+    agent = agent.with_runtime_registry(registry);
+
+    let resp = agent
+        .run_turn_for("/backends", DEFAULT_OWNER)
+        .await
+        .expect("/backends must not error");
+
+    assert!(resp.contains("model"), "must list model: {resp:?}");
+    assert!(
+        resp.contains("fake_healthy") && resp.contains("saudável agora"),
+        "must list the healthy fake runtime as available: {resp:?}"
+    );
+    assert!(
+        resp.contains("fake_unhealthy") && resp.contains("INDISPONÍVEL"),
+        "must list the unhealthy fake runtime as unavailable, with a reason: {resp:?}"
+    );
+}
+
+/// `/backend use <id>` switches the conversation backend live (no restart)
+/// when the id resolves — and populates `coverage_note` from the adapter's
+/// own descriptor, never inventing one.
+#[tokio::test]
+async fn cockpit_backend_use_switches_conversation_to_registered_runtime() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_str().unwrap().to_owned();
+    let mut agent = make_loop(&path).await;
+
+    let mut registry = bastion_runtime::agent::backend::RuntimeRegistry::new();
+    registry.register(Arc::new(FakeBackendAdapter {
+        id: "fake_healthy",
+        ready: true,
+    }));
+    agent = agent.with_runtime_registry(registry);
+
+    assert_eq!(
+        agent.backend_profile.conversation,
+        bastion_runtime::agent::backend::ConversationBackend::Model,
+        "sanity: starts on Model"
+    );
+
+    let resp = agent
+        .run_turn_for("/backend use fake_healthy", DEFAULT_OWNER)
+        .await
+        .expect("switching to a healthy, registered runtime must succeed");
+    assert!(resp.contains("fake_healthy"), "confirmation: {resp:?}");
+    assert_eq!(
+        agent.backend_profile.conversation,
+        bastion_runtime::agent::backend::ConversationBackend::Runtime("fake_healthy".to_string())
+    );
+    assert!(
+        agent.backend_profile.coverage_note.is_some(),
+        "coverage_note must be populated from the adapter's own descriptor"
+    );
+
+    // Switch back to model — the other direction of the same UX.
+    let resp = agent
+        .run_turn_for("/backend use model", DEFAULT_OWNER)
+        .await
+        .expect("switching back to model must succeed");
+    assert!(resp.contains("model"), "confirmation: {resp:?}");
+    assert_eq!(
+        agent.backend_profile.conversation,
+        bastion_runtime::agent::backend::ConversationBackend::Model
+    );
+    assert!(
+        agent.backend_profile.coverage_note.is_none(),
+        "coverage_note must be cleared when switching back to Model"
+    );
+}
+
+/// `/backend use <id>` for an unregistered or unhealthy id fails closed —
+/// typed error, and `backend_profile` is left COMPLETELY untouched (never a
+/// half-applied switch).
+#[tokio::test]
+async fn cockpit_backend_use_unknown_id_fails_closed_and_leaves_profile_untouched() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_str().unwrap().to_owned();
+    let mut agent = make_loop(&path).await;
+
+    let mut registry = bastion_runtime::agent::backend::RuntimeRegistry::new();
+    registry.register(Arc::new(FakeBackendAdapter {
+        id: "fake_unhealthy",
+        ready: false,
+    }));
+    agent = agent.with_runtime_registry(registry);
+
+    // Case 1: id never registered at all.
+    let err = agent
+        .run_turn_for("/backend use does_not_exist", DEFAULT_OWNER)
+        .await
+        .expect_err("an unregistered id must fail the switch");
+    assert!(err.to_string().contains("does_not_exist"));
+    assert_eq!(
+        agent.backend_profile.conversation,
+        bastion_runtime::agent::backend::ConversationBackend::Model,
+        "profile must stay untouched after a failed switch"
+    );
+
+    // Case 2: id registered but unhealthy.
+    let err = agent
+        .run_turn_for("/backend use fake_unhealthy", DEFAULT_OWNER)
+        .await
+        .expect_err("an unhealthy id must fail the switch");
+    assert!(err.to_string().contains("fake_unhealthy"));
+    assert_eq!(
+        agent.backend_profile.conversation,
+        bastion_runtime::agent::backend::ConversationBackend::Model,
+        "profile must stay untouched after a second failed switch"
+    );
+}
+
+/// `/backend use task:<id>` / `task:none` — independent of the conversation
+/// backend, same fail-closed discipline.
+#[tokio::test]
+async fn cockpit_backend_use_task_prefix_sets_and_clears_task_runtime() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_str().unwrap().to_owned();
+    let mut agent = make_loop(&path).await;
+
+    let mut registry = bastion_runtime::agent::backend::RuntimeRegistry::new();
+    registry.register(Arc::new(FakeBackendAdapter {
+        id: "fake_healthy",
+        ready: true,
+    }));
+    agent = agent.with_runtime_registry(registry);
+
+    assert!(agent.backend_profile.task_runtime.is_none());
+
+    agent
+        .run_turn_for("/backend use task:fake_healthy", DEFAULT_OWNER)
+        .await
+        .expect("setting a healthy task_runtime must succeed");
+    assert_eq!(
+        agent.backend_profile.task_runtime.as_deref(),
+        Some("fake_healthy")
+    );
+
+    // Unknown id: fails closed, task_runtime stays whatever it was.
+    let err = agent
+        .run_turn_for("/backend use task:nope", DEFAULT_OWNER)
+        .await
+        .expect_err("unknown task_runtime id must fail");
+    assert!(err.to_string().contains("nope"));
+    assert_eq!(
+        agent.backend_profile.task_runtime.as_deref(),
+        Some("fake_healthy"),
+        "a failed task_runtime switch must not clear the previous valid value"
+    );
+
+    agent
+        .run_turn_for("/backend use task:none", DEFAULT_OWNER)
+        .await
+        .expect("clearing task_runtime must succeed");
+    assert!(agent.backend_profile.task_runtime.is_none());
+}

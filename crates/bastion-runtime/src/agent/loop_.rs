@@ -909,7 +909,17 @@ impl AgentLoop {
     /// Flow: input_guard (HOOK-02) → router → runner/cabinet → output_validator (HOOK-03) → text
     /// Cockpit commands (used by the mobile cockpit via /webhook): return real
     /// data from memory + the goal engine. Returns `None` for normal turns.
-    async fn cockpit_command(&self, input: &str, owner: &str) -> Option<anyhow::Result<String>> {
+    ///
+    /// `&mut self` (M4-07, widened from `&self`): `/backend use ...` mutates
+    /// `self.backend_profile` live — the ONE internal call site
+    /// (`run_turn_for_with_trust`) already holds `&mut self`, so this is a
+    /// receiver-only change, transparent to every external caller (this
+    /// method is private).
+    async fn cockpit_command(
+        &mut self,
+        input: &str,
+        owner: &str,
+    ) -> Option<anyhow::Result<String>> {
         let t = input.trim();
         if t == "/memories" {
             let mem = self.memory.read().await;
@@ -935,6 +945,20 @@ impl AgentLoop {
                     .await
                     .map(|_| format!("Memória {} contestada e revogada.", id)),
             );
+        }
+        // M4-07 (`docs/revamp/BACKLOG.md`, `docs/SUPPORT-MATRIX.md`): backend
+        // selection UX — list available backends (health + auth resolved),
+        // choose conversation/task_runtime, diagnose why one is unavailable.
+        // A single global switch on THIS `AgentLoop` (the daemon serializes
+        // every owner's turn through one `&mut agent`, AGENTS.md law) — not
+        // per-owner; `/backend use` changes what EVERY subsequent turn on
+        // this process uses until changed again or the daemon restarts back
+        // to the `[backend]` TOML default.
+        if t == "/backends" || t == "/backend" {
+            return Some(Ok(self.describe_backends().await));
+        }
+        if let Some(spec) = t.strip_prefix("/backend use ") {
+            return Some(self.set_backend(spec.trim()).await);
         }
         if t == "/goals" {
             // P4 `GoalPort`: `None` (no goal engine configured) degrades to the
@@ -983,6 +1007,145 @@ impl AgentLoop {
             });
         }
         None
+    }
+
+    /// M4-07: `/backends` cockpit command body — lists every registered
+    /// [`bastion_agent_runtime::AgentRuntime`] with a live health re-probe
+    /// (same `RuntimeRegistry::resolve` re-probe the start of a turn uses,
+    /// so this reports the SAME "available right now" state a real turn
+    /// would see, not a stale registration-time snapshot), the currently
+    /// selected `conversation`/`task_runtime`, and whether the configured
+    /// `auth` (if any) currently resolves. `Model` is always listed as
+    /// available (it has no adapter/health to probe — Bastion's own loop).
+    async fn describe_backends(&self) -> String {
+        let mut lines = Vec::new();
+
+        let conversation_desc = match &self.backend_profile.conversation {
+            ConversationBackend::Model => "model (Bastion tool loop)".to_string(),
+            ConversationBackend::Runtime(id) => format!("runtime:{id}"),
+        };
+        lines.push(format!("Conversa: {conversation_desc}"));
+        lines.push(format!(
+            "Tarefa delegada (task_runtime): {}",
+            self.backend_profile
+                .task_runtime
+                .as_deref()
+                .unwrap_or("nenhum")
+        ));
+
+        if let Some(auth) = &self.backend_profile.auth {
+            let status = match self.auth_resolver.resolve(auth).await {
+                Ok(()) => "resolvido".to_string(),
+                Err(e) => format!("FALHOU — {e}"),
+            };
+            lines.push(format!("Auth configurado ('{}'): {status}", auth.0));
+        } else {
+            lines.push("Auth configurado: nenhum".to_string());
+        }
+
+        lines.push(String::new());
+        lines.push("Backends disponíveis:".to_string());
+        lines.push("- model — sempre disponível (Bastion possui o tool loop)".to_string());
+
+        let mut descriptors = self.runtime_registry.descriptors();
+        descriptors.sort_by(|a, b| a.id.cmp(b.id));
+        if descriptors.is_empty() {
+            lines.push(
+                "(nenhum AgentRuntime registrado — instale/autentique acpx/codex/opencode e \
+                 reinicie o daemon para vê-los aqui)"
+                    .to_string(),
+            );
+        }
+        for descriptor in &descriptors {
+            let status = match self.runtime_registry.resolve(descriptor.id).await {
+                Ok(_) => "saudável agora".to_string(),
+                Err(e) => format!("INDISPONÍVEL — {e}"),
+            };
+            let selected = if matches!(&self.backend_profile.conversation, ConversationBackend::Runtime(id) if id == descriptor.id)
+            {
+                " [conversa atual]"
+            } else if self.backend_profile.task_runtime.as_deref() == Some(descriptor.id) {
+                " [task_runtime atual]"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "- {} [{:?}] approvals={:?} sandbox={:?} egress={:?} budget={:?} — {}{}",
+                descriptor.id,
+                descriptor.transport,
+                descriptor.policy_coverage.approvals,
+                descriptor.policy_coverage.sandbox,
+                descriptor.policy_coverage.egress,
+                descriptor.policy_coverage.budget,
+                status,
+                selected,
+            ));
+        }
+
+        lines.push(String::new());
+        lines.push(
+            "Uso: /backend use model | /backend use <id> | /backend use task:<id> | \
+             /backend use task:none"
+                .to_string(),
+        );
+
+        lines.join("\n")
+    }
+
+    /// M4-07: `/backend use <spec>` cockpit command body. Mutates
+    /// `self.backend_profile` for THIS `AgentLoop` (see `cockpit_command`'s
+    /// rustdoc — a global switch, not per-owner). Never accepts an id the
+    /// registry doesn't currently resolve — same fail-closed discipline as
+    /// turn-start resolution (`RuntimeRegistry::resolve`); an invalid switch
+    /// leaves `backend_profile` completely untouched and returns a
+    /// diagnostic `Err`, never a half-applied state.
+    ///
+    /// Accepted forms: `model` (switch conversation back to Bastion's own
+    /// loop), `<id>`/`runtime:<id>` (switch conversation to that runtime),
+    /// `task:<id>` (set the delegated-task runtime), `task:none` (disable
+    /// delegation).
+    async fn set_backend(&mut self, spec: &str) -> anyhow::Result<String> {
+        if let Some(task_spec) = spec.strip_prefix("task:") {
+            let task_spec = task_spec.trim();
+            if task_spec == "none" {
+                self.backend_profile.task_runtime = None;
+                return Ok("task_runtime desabilitado (delegação desligada).".to_string());
+            }
+            self.runtime_registry
+                .resolve(task_spec)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "não é possível selecionar '{task_spec}' como task_runtime: {e} \
+                     (veja /backends para os ids disponíveis agora)"
+                    )
+                })?;
+            self.backend_profile.task_runtime = Some(task_spec.to_string());
+            return Ok(format!("task_runtime definido para: {task_spec}"));
+        }
+
+        if spec == "model" || spec.is_empty() {
+            self.backend_profile.conversation = ConversationBackend::Model;
+            self.backend_profile.coverage_note = None;
+            return Ok("Backend de conversa definido para: model (Bastion tool loop).".to_string());
+        }
+
+        let id = spec.strip_prefix("runtime:").unwrap_or(spec);
+        let runtime = self.runtime_registry.resolve(id).await.map_err(|e| {
+            anyhow::anyhow!(
+                "não é possível selecionar '{id}' como backend de conversa: {e} \
+                 (veja /backends para os ids disponíveis agora)"
+            )
+        })?;
+        self.backend_profile.conversation = ConversationBackend::Runtime(id.to_string());
+        // Pass-through of the adapter's own honest declaration (same rule
+        // main.rs's startup wiring follows) — never invented here.
+        self.backend_profile.coverage_note = Some(runtime.descriptor().policy_coverage);
+        Ok(format!(
+            "Backend de conversa definido para: runtime:{id} (harness tool loop; \
+             policy coverage: {:?}).",
+            self.backend_profile.coverage_note
+        ))
     }
 
     /// Plan 11-04 / SEC-01: pre-LLM approval-resolution intercept — the owner's

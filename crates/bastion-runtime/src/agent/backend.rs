@@ -107,6 +107,15 @@ impl RuntimeRegistry {
         self.runtimes.get(id).cloned()
     }
 
+    /// M4-07: every registered runtime's own `descriptor()` — the
+    /// enumeration a listing/selection UX needs (`AgentLoop`'s `/backends`
+    /// cockpit command, the support-matrix generator). Registration order is
+    /// not meaningful (backed by a `HashMap`); callers that need a stable
+    /// order sort by `id` themselves.
+    pub fn descriptors(&self) -> Vec<bastion_agent_runtime::RuntimeDescriptor> {
+        self.runtimes.values().map(|rt| rt.descriptor()).collect()
+    }
+
     /// Fail-closed resolution used at the START of a turn (design doc §5.6):
     /// re-probes `health()` so an adapter that died since registration is
     /// caught here rather than surfacing as an opaque failure mid-turn.

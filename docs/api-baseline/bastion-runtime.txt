@@ -2,6 +2,7 @@ struct agent/backend.rs:BackendProfile
 enum agent/backend.rs:BackendResolutionError
 enum agent/backend.rs:ConversationBackend
 struct agent/backend.rs:RuntimeRegistry
+fn agent/backend.rs:descriptors
 fn agent/backend.rs:get
 fn agent/backend.rs:is_empty
 fn agent/backend.rs:len
