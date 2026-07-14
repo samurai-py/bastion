@@ -24,3 +24,14 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
+
+  # M3-04: the examples must stay buildable against the substrate crates
+  # alone (they never depend on the root `bastion` package) — a cheap check
+  # that the public API remains sufficient for an external consumer.
+  examples:
+    needs: crate-deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check -p minimal-agent -p embedded-host
