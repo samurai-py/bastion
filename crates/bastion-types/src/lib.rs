@@ -6,6 +6,9 @@ use std::str::FromStr;
 pub mod secret;
 pub use secret::{NullSecretResolver, SecretRef, SecretResolver, SecretValue};
 
+pub mod context_artifact;
+pub use context_artifact::{ContextRevision, StalePolicy, VersionedContextArtifact};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,

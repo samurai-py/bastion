@@ -1,3 +1,12 @@
+struct context_artifact.rs:ContextRevision
+enum context_artifact.rs:StalePolicy
+struct context_artifact.rs:VersionedContextArtifact
+fn context_artifact.rs:effective_at
+fn context_artifact.rs:history
+fn context_artifact.rs:latest_published
+fn context_artifact.rs:new
+fn context_artifact.rs:publish
+fn context_artifact.rs:stale_policy
 struct lib.rs:AgentConfig
 enum lib.rs:ApprovalOutcome
 struct lib.rs:ApprovalRow
@@ -9,6 +18,7 @@ enum lib.rs:BeliefKind
 struct lib.rs:CabinetVerdict
 struct lib.rs:CallConfig
 enum lib.rs:ContentPart
+use lib.rs:ContextRevision
 enum lib.rs:ConveneReason
 enum lib.rs:DenyScope
 struct lib.rs:Dissent
@@ -30,9 +40,12 @@ struct lib.rs:RouterDecision
 use lib.rs:SecretRef
 use lib.rs:SecretResolver
 use lib.rs:SecretValue
+use lib.rs:StalePolicy
 struct lib.rs:TokenUsage
 struct lib.rs:ToolCall
 enum lib.rs:ToolChoice
+use lib.rs:VersionedContextArtifact
+mod lib.rs:context_artifact
 fn lib.rs:from_sql_str
 mod lib.rs:secret
 fn lib.rs:strip_think
