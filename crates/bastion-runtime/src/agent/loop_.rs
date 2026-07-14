@@ -1303,14 +1303,18 @@ impl AgentLoop {
         // SEAM #4: span raiz invoke_agent por turn.
         // DESIGN: nome genérico "invoke_agent" — span names são imutáveis após start().
         // gen_ai.agent.name é setado via set_attribute APÓS o routing (quando persona é conhecida).
+        //
+        // gen_ai.conversation.id NÃO é setado aqui (na construção do span) porque `self.session_id`
+        // nesse ponto é só a sessão de CONSTRUÇÃO do AgentLoop — para qualquer owner != DEFAULT_OWNER,
+        // a sessão real (CR-04, resolvida logo abaixo) é outra. Setá-lo aqui carimbava o MESMO id
+        // errado em todo turn de todo owner não-default (achado do Loop 3-E,
+        // `examples/embedded-host-slice/src/main.rs::demonstrate_otel_correlation`). Mesmo padrão
+        // de `gen_ai.agent.name`: atribuído via `set_attribute` só depois que o valor real é conhecido.
         let tracer = otel_global::tracer("bastion");
         let mut turn_span = tracer
             .span_builder("invoke_agent")
             .with_kind(SpanKind::Internal)
-            .with_attributes(vec![
-                KeyValue::new("gen_ai.operation.name", "invoke_agent"),
-                KeyValue::new("gen_ai.conversation.id", self.session_id.clone()),
-            ])
+            .with_attributes(vec![KeyValue::new("gen_ai.operation.name", "invoke_agent")])
             .start(&tracer);
 
         // CR-04: resolve or create a session PER OWNER so two owners never share history.
@@ -1324,6 +1328,7 @@ impl AgentLoop {
                 None => self.session.create_session_for(owner).await?,
             }
         };
+        turn_span.set_attribute(KeyValue::new("gen_ai.conversation.id", session_id.clone()));
 
         // 1. Persist user message.
         // WR-13: user message is appended here, before the egress gate in step 5.

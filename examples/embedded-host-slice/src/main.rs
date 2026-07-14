@@ -127,9 +127,6 @@ async fn main() -> anyhow::Result<()> {
         demonstrate_rule_bundle_propagation(rule_store.clone(), clock.clone()).await?;
 
     // --- Wiring: AgentLoop::new — every argument is public bastion-* API. ---
-    // Kept for the OTel-correlation finding below (component 6) — `AgentLoop::new`
-    // moves `session_id` by value.
-    let construction_session_id = session_id.clone();
     let mut agent = AgentLoop::new(
         Arc::new(RwLock::new(
             Box::new(MockProvider::new(PERSONA_NAME)) as Box<dyn Provider>
@@ -172,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
     demonstrate_trust_quarantine_preserved(&mut agent, &capability_name).await;
     demonstrate_owner_scoped_system_prompt(&agent).await;
     let (session_a, session_b) = demonstrate_two_owner_isolation(&mut agent).await?;
-    demonstrate_otel_correlation(&exporter, &session_a, &session_b, &construction_session_id);
+    demonstrate_otel_correlation(&exporter, &session_a, &session_b);
 
     println!(
         "\nAll 7 M5 components + M5.1 RuleBundle propagation passed — zero import of the \
@@ -374,39 +371,34 @@ async fn demonstrate_two_owner_isolation(
     Ok((session_a, session_b))
 }
 
-/// Component 6 — and a FINDING (`docs/revamp/LOOP-REPORT.md`).
+/// Component 6 — FIXED in Loop 3-F (was a FINDING in Loop 3-E,
+/// `docs/revamp/LOOP-REPORT.md`).
 ///
 /// The design intent: the kernel emits generic `gen_ai.*` spans with zero
 /// knowledge of the host's business object, and the host correlates a span
 /// back to its own object using public data alone (e.g. the owner-scoped
 /// session id from `SessionManager::load_most_recent_id_for`).
 ///
-/// What this slice actually found: `AgentLoop::run_turn_for_with_trust`
-/// (`crates/bastion-runtime/src/agent/loop_.rs`, ~lines 1306-1326) stamps
+/// What Loop 3-E found: `AgentLoop::run_turn_for_with_trust`
+/// (`crates/bastion-runtime/src/agent/loop_.rs`, ~lines 1306-1326) stamped
 /// the root `invoke_agent` span's `gen_ai.conversation.id` from
 /// `self.session_id` (the field fixed at `AgentLoop::new` construction time)
 /// AT SPAN-CREATION — several lines BEFORE the CR-04 per-owner session
-/// resolution runs. For any owner other than the one live at construction,
-/// this attribute is simply WRONG: both `owner_a`'s and `owner_b`'s turns
-/// below are stamped with the SAME id, never their own real (CR-04-resolved)
-/// session. No other attribute on this span identifies the owner either.
-/// Net effect: a host running MULTIPLE owners through one `AgentLoop` (this
-/// slice's own component 5 setup) cannot correlate a span to a specific
-/// owner via ANY span attribute today — the only thing left to fall back on
-/// is call ORDER, which only works for a single-threaded, sequential caller
-/// like this example, not a real concurrent multi-owner host.
+/// resolution ran. For any owner other than the one live at construction,
+/// the attribute was simply WRONG: both `owner_a`'s and `owner_b`'s turns
+/// were stamped with the SAME id, never their own real (CR-04-resolved)
+/// session.
 ///
-/// Suggested fix (not applied here — a behavior change to a stable-contract
-/// file, out of scope for this slice per the M5 gate): stamp
-/// `gen_ai.conversation.id` (and ideally an explicit `owner`/`enduser.id`
-/// attribute) from the CR-04-resolved `session_id` local, after it's
-/// computed, not from `self.session_id`.
-fn demonstrate_otel_correlation(
-    exporter: &CapturingExporter,
-    session_a: &str,
-    session_b: &str,
-    construction_session_id: &str,
-) {
+/// Fix applied in Loop 3-F (`fix(c3): correlate invoke_agent span
+/// conversation.id to resolved per-owner session`): `loop_.rs` no longer
+/// puts `gen_ai.conversation.id` in the span-builder's initial attribute
+/// list; it now calls `turn_span.set_attribute(...)` with the CR-04-resolved
+/// `session_id` local, right after that local is computed — the same
+/// pattern `gen_ai.agent.name` already used (set post-routing, once the real
+/// value is known). This slice below now asserts the POSITIVE outcome:
+/// two different owners produce two DIFFERENT `gen_ai.conversation.id`
+/// values, each matching that owner's real CR-04 session.
+fn demonstrate_otel_correlation(exporter: &CapturingExporter, session_a: &str, session_b: &str) {
     let spans = exporter.snapshot();
     let turn_spans: Vec<_> = spans
         .iter()
@@ -425,25 +417,29 @@ fn demonstrate_otel_correlation(
             .map(|kv| kv.value.as_str().into_owned())
     };
 
-    // The finding, pinned down precisely: BOTH spans carry the
-    // construction-time session id — NEITHER carries owner_a's or owner_b's
-    // real session id.
-    assert_eq!(
-        conversation_id(turn_spans[0]).as_deref(),
-        Some(construction_session_id),
-        "confirms the finding: span 1's gen_ai.conversation.id is the constructor-time id"
-    );
-    assert_eq!(
-        conversation_id(turn_spans[1]).as_deref(),
-        Some(construction_session_id),
-        "confirms the finding: span 2's gen_ai.conversation.id is ALSO the constructor-time id"
-    );
-    assert_ne!(construction_session_id, session_a);
-    assert_ne!(construction_session_id, session_b);
+    let span_1_conversation_id = conversation_id(turn_spans[0]);
+    let span_2_conversation_id = conversation_id(turn_spans[1]);
 
-    // Two distinct traces at least prove the kernel emits ONE span per turn
-    // (not sharing/reusing a trace across owners) — the smallest amount of
-    // correlation that survives this gap.
+    // The fix, pinned down precisely: each span now carries ITS OWN owner's
+    // real (CR-04-resolved) session id — never the constructor-time id, and
+    // never the other owner's.
+    assert_eq!(
+        span_1_conversation_id.as_deref(),
+        Some(session_a),
+        "span 1 (owner_a's turn) must carry owner_a's real CR-04 session id"
+    );
+    assert_eq!(
+        span_2_conversation_id.as_deref(),
+        Some(session_b),
+        "span 2 (owner_b's turn) must carry owner_b's real CR-04 session id"
+    );
+    assert_ne!(
+        span_1_conversation_id, span_2_conversation_id,
+        "two different owners must produce two DISTINCT gen_ai.conversation.id values"
+    );
+
+    // Two distinct traces, as before — now backed by a real per-owner
+    // attribute too, not the only correlation signal available.
     assert_ne!(
         turn_spans[0].span_context.trace_id(),
         turn_spans[1].span_context.trace_id(),
@@ -451,14 +447,10 @@ fn demonstrate_otel_correlation(
     );
 
     println!(
-        "[6][FINDING] gen_ai.conversation.id on the kernel's invoke_agent span is stamped from \
-         AgentLoop's CONSTRUCTOR-time session_id (loop_.rs ~1306-1326), BEFORE the CR-04 \
-         per-owner session is resolved a few lines later — both owner_a's and owner_b's spans \
-         carry the SAME (wrong) id '{construction_session_id}', never their real session \
-         ({session_a} / {session_b}). No other attribute on this span identifies the owner \
-         either. A multi-owner host can only correlate spans to owners by CALL ORDER today \
-         (trace {:?} = 1st call = owner_a/'{CASE_A}', trace {:?} = 2nd call = \
-         owner_b/'{CASE_B}'), not by any span attribute — see docs/revamp/LOOP-REPORT.md.",
+        "[6][FIXED] gen_ai.conversation.id on the kernel's invoke_agent span now carries each \
+         owner's own CR-04-resolved session id — owner_a='{session_a}' \
+         (trace {:?}), owner_b='{session_b}' (trace {:?}). A multi-owner host can correlate a \
+         span to its owner via this attribute alone, no call-order assumption needed anymore.",
         turn_spans[0].span_context.trace_id(),
         turn_spans[1].span_context.trace_id(),
     );
