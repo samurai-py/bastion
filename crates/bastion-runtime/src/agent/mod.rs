@@ -5,6 +5,7 @@
 //! stay in the app crate and reach the loop exclusively through the traits in
 //! [`ports`].
 
+pub mod backend;
 pub mod compactor;
 pub mod context;
 pub mod handle;

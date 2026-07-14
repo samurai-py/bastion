@@ -1,3 +1,12 @@
+struct agent/backend.rs:BackendProfile
+enum agent/backend.rs:BackendResolutionError
+enum agent/backend.rs:ConversationBackend
+struct agent/backend.rs:RuntimeRegistry
+fn agent/backend.rs:get
+fn agent/backend.rs:is_empty
+fn agent/backend.rs:len
+fn agent/backend.rs:new
+fn agent/backend.rs:register
 struct agent/compactor.rs:AutoCompact
 fn agent/compactor.rs:needs_compaction
 fn agent/compactor.rs:new
@@ -10,6 +19,9 @@ struct agent/loop_.rs:AgentLoop
 const agent/loop_.rs:DEFAULT_OWNER
 fn agent/loop_.rs:add_context_provider
 fn agent/loop_.rs:new
+fn agent/loop_.rs:with_backend_profile
+fn agent/loop_.rs:with_runtime_registry
+mod agent/mod.rs:backend
 mod agent/mod.rs:compactor
 mod agent/mod.rs:context
 mod agent/mod.rs:handle

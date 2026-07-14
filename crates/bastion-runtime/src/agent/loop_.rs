@@ -1,3 +1,4 @@
+use crate::agent::backend::{BackendProfile, RuntimeRegistry};
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::ports::{
@@ -93,6 +94,19 @@ pub struct AgentLoop {
     /// used to be called). `None` = no observer; production injects
     /// `agent::skills::SkillReloadObserver`.
     pub tool_result_observer: Option<Arc<dyn ToolResultObserver>>,
+    /// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §2): per-owner
+    /// backend selection — `Model` (default, this field's `Default` impl)
+    /// preserves every pre-Ciclo-2.4 behavior byte-for-byte. Set post-construction
+    /// via [`AgentLoop::with_backend_profile`], never a `new()` parameter —
+    /// keeps the constructor's stable signature untouched.
+    pub backend_profile: BackendProfile,
+    /// Ciclo 2.4: adapters available to resolve a `ConversationBackend::Runtime(id)`
+    /// or `BackendProfile.task_runtime` id against. Empty by default (this
+    /// field's `Default` impl) — an empty registry can only ever be asked to
+    /// resolve an id that isn't there, which fails closed
+    /// (`RuntimeRegistry::resolve`), never silently degrades to `Model`.
+    /// Populated post-construction via [`AgentLoop::with_runtime_registry`].
+    pub runtime_registry: RuntimeRegistry,
 }
 
 impl AgentLoop {
@@ -162,7 +176,29 @@ impl AgentLoop {
             provider_resolver,
             pre_compaction_flush,
             tool_result_observer,
+            // Ciclo 2.4: Model + empty registry — zero behavior change for
+            // every caller that doesn't opt in via the builders below.
+            backend_profile: BackendProfile::default(),
+            runtime_registry: RuntimeRegistry::default(),
         }
+    }
+
+    /// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §2): opt a
+    /// session/owner into a non-default `ConversationBackend`/`task_runtime`.
+    /// Post-construction builder (not a `new()` parameter) so every existing
+    /// call site keeps compiling unchanged — the composition root (`main.rs`)
+    /// calls this only when `[backend]` is actually configured.
+    pub fn with_backend_profile(mut self, profile: BackendProfile) -> Self {
+        self.backend_profile = profile;
+        self
+    }
+
+    /// Ciclo 2.4: wire the adapters a `ConversationBackend::Runtime(id)` or
+    /// `task_runtime` id may resolve against. Post-construction builder, same
+    /// rationale as [`AgentLoop::with_backend_profile`].
+    pub fn with_runtime_registry(mut self, registry: RuntimeRegistry) -> Self {
+        self.runtime_registry = registry;
+        self
     }
 
     /// P5 despejo (M2): generic SEAM #2 registration, used after `AgentLoop::new()`

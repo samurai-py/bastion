@@ -66,6 +66,66 @@ pub struct BastionConfig {
     /// source of truth for OwnerMap construction (see `owner_map_for_*` below).
     #[serde(default)]
     pub identity: IdentityConfig,
+    /// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md`): optional
+    /// `[backend]` section. Absent entirely = `#[serde(default)]` empty
+    /// `BackendConfig`, which `backend_profile_from_config` maps to
+    /// `ConversationBackend::Model` + no delegation — byte-identical to
+    /// pre-Ciclo-2.4 behavior for any deployment that doesn't add this section.
+    #[serde(default)]
+    pub backend: BackendConfig,
+}
+
+/// Ciclo 2.4 declarative config for the kernel's `BackendProfile` (M4 scope
+/// per the design doc §6: no rich UX/login flow here, just TOML). Lives in
+/// the app crate — the kernel (`bastion-runtime`) never parses TOML or knows
+/// this shape (M1 ADR: crates are mechanism, config format is app policy).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BackendConfig {
+    /// `"model"` (default, or the key omitted) | `"runtime:<id>"` — `<id>`
+    /// must match a `RuntimeDescriptor::id` the composition root (`main.rs`)
+    /// actually registered (Codex/acpx conditioned on `health()`/auth at
+    /// startup). An id that isn't registered, or is registered but
+    /// unhealthy, fails the turn with a typed error (§5.6) — it never
+    /// silently falls back to `model`.
+    #[serde(default)]
+    pub conversation: Option<String>,
+    /// Runtime id for delegated tasks (A-07) — independent of `conversation`
+    /// (a `model`-conversation owner can still delegate; a
+    /// `runtime`-conversation owner isn't forced to also delegate). `None` =
+    /// delegation disabled.
+    #[serde(default)]
+    pub task_runtime: Option<String>,
+    /// Opaque credential/entitlement reference threaded to the adapter,
+    /// orthogonal to backend choice (A-01 §1.1). Resolution happens outside
+    /// this config (host-authenticated CLI, subscription login, ...).
+    #[serde(default)]
+    pub auth: Option<String>,
+}
+
+/// Maps the app's `[backend]` TOML section onto the kernel's
+/// `BackendProfile` (Ciclo 2.4). `coverage_note` is intentionally left `None`
+/// here — the composition root fills it in from the resolved runtime's own
+/// `RuntimeDescriptor::policy_coverage` once it looks the id up in the
+/// `RuntimeRegistry` (main.rs), never invented here from the config string.
+pub fn backend_profile_from_config(
+    cfg: &BackendConfig,
+) -> bastion_runtime::agent::backend::BackendProfile {
+    use bastion_runtime::agent::backend::{BackendProfile, ConversationBackend};
+
+    let conversation = match cfg.conversation.as_deref() {
+        None | Some("model") | Some("") => ConversationBackend::Model,
+        Some(spec) => {
+            let id = spec.strip_prefix("runtime:").unwrap_or(spec);
+            ConversationBackend::Runtime(id.to_string())
+        }
+    };
+
+    BackendProfile {
+        conversation,
+        task_runtime: cfg.task_runtime.clone(),
+        auth: cfg.auth.clone().map(bastion_agent_runtime::AuthProfileRef),
+        coverage_note: None,
+    }
 }
 
 /// Single `[[identity]]` entry from bastion.toml — one row per human owner.
@@ -788,5 +848,113 @@ telegram_chat_id = "222"
         assert_eq!(owner_map_for_discord(&cfg).resolve("anything"), None);
         assert_eq!(owner_map_for_slack(&cfg).resolve("anything"), None);
         assert_eq!(owner_map_for_email(&cfg).resolve("anything"), None);
+    }
+
+    // ── Ciclo 2.4 — `[backend]` / BackendProfile mapping ─────────────────────
+
+    /// Acceptance criterion 1 (`docs/revamp/C2-backend-profile-design.md`):
+    /// bastion.toml's real `[backend]`-less config must still load and map to
+    /// `ConversationBackend::Model` + no delegation — the exact default the
+    /// whole test suite already runs against.
+    #[test]
+    fn test_bastion_toml_has_no_backend_section_and_defaults_to_model() {
+        let cfg = load_config("bastion.toml").expect("bastion.toml must exist at repo root");
+        use bastion_runtime::agent::backend::ConversationBackend;
+        let profile = backend_profile_from_config(&cfg.backend);
+        assert_eq!(profile.conversation, ConversationBackend::Model);
+        assert!(profile.task_runtime.is_none());
+        assert!(profile.auth.is_none());
+        assert!(profile.coverage_note.is_none());
+    }
+
+    #[test]
+    fn test_backend_config_absent_conversation_maps_to_model() {
+        use bastion_runtime::agent::backend::ConversationBackend;
+        let cfg = BackendConfig::default();
+        assert_eq!(
+            backend_profile_from_config(&cfg).conversation,
+            ConversationBackend::Model
+        );
+    }
+
+    #[test]
+    fn test_backend_config_explicit_model_string_maps_to_model() {
+        use bastion_runtime::agent::backend::ConversationBackend;
+        let cfg = BackendConfig {
+            conversation: Some("model".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            backend_profile_from_config(&cfg).conversation,
+            ConversationBackend::Model
+        );
+    }
+
+    #[test]
+    fn test_backend_config_runtime_prefix_maps_to_runtime_id() {
+        use bastion_runtime::agent::backend::ConversationBackend;
+        let cfg = BackendConfig {
+            conversation: Some("runtime:codex_app_server".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            backend_profile_from_config(&cfg).conversation,
+            ConversationBackend::Runtime("codex_app_server".to_string())
+        );
+    }
+
+    /// A bare id without the `runtime:` prefix is tolerated too (not a
+    /// footgun for a typo'd config) — anything that isn't literally `"model"`
+    /// or empty is treated as a runtime id.
+    #[test]
+    fn test_backend_config_bare_id_without_prefix_maps_to_runtime_id() {
+        use bastion_runtime::agent::backend::ConversationBackend;
+        let cfg = BackendConfig {
+            conversation: Some("acpx_claude".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            backend_profile_from_config(&cfg).conversation,
+            ConversationBackend::Runtime("acpx_claude".to_string())
+        );
+    }
+
+    #[test]
+    fn test_backend_config_task_runtime_and_auth_pass_through() {
+        let cfg = BackendConfig {
+            conversation: None,
+            task_runtime: Some("acpx_claude".to_string()),
+            auth: Some("host-claude-login".to_string()),
+        };
+        let profile = backend_profile_from_config(&cfg);
+        assert_eq!(profile.task_runtime.as_deref(), Some("acpx_claude"));
+        assert_eq!(
+            profile.auth.map(|a| a.0),
+            Some("host-claude-login".to_string())
+        );
+    }
+
+    /// `[backend]` parses from real TOML too, not just the Rust struct
+    /// literal above — exercises the actual `Deserialize` derive.
+    #[test]
+    fn test_backend_section_parses_from_toml() {
+        let toml = minimal_toml_with_identity(
+            r#"
+[backend]
+conversation = "runtime:codex_app_server"
+task_runtime = "acpx_claude"
+auth = "host-chatgpt-login"
+"#,
+        );
+        let path = write_temp_toml(&toml);
+        let path_str = path.to_str().unwrap().to_string();
+        let cfg = load_config(&path_str).expect("[backend] section must parse");
+        use bastion_runtime::agent::backend::ConversationBackend;
+        let profile = backend_profile_from_config(&cfg.backend);
+        assert_eq!(
+            profile.conversation,
+            ConversationBackend::Runtime("codex_app_server".to_string())
+        );
+        assert_eq!(profile.task_runtime.as_deref(), Some("acpx_claude"));
     }
 }

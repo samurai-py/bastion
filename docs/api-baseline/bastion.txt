@@ -57,6 +57,7 @@ struct channel/whatsapp.rs:WhatsAppSender
 fn channel/whatsapp.rs:from_env
 fn channel/whatsapp.rs:new
 use config.rs:AgentConfig
+struct config.rs:BackendConfig
 struct config.rs:BastionConfig
 struct config.rs:ChannelConfig
 struct config.rs:ChannelsConfig
@@ -72,6 +73,7 @@ struct config.rs:MeshPeerConfig
 use config.rs:ReflectorConfig
 struct config.rs:SessionConfig
 struct config.rs:VoiceChannelConfig
+fn config.rs:backend_profile_from_config
 fn config.rs:load_config
 fn config.rs:load_mesh_peers
 fn config.rs:owner_map_for_discord
@@ -81,6 +83,7 @@ fn config.rs:owner_map_for_telegram
 fn config.rs:owner_map_for_webhook
 fn config.rs:owner_map_for_whatsapp
 mod lib.rs:agent
+mod lib.rs:agent_runtime_registry
 mod lib.rs:api
 mod lib.rs:channel
 mod lib.rs:config

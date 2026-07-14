@@ -272,6 +272,37 @@ async fn main() -> anyhow::Result<()> {
     // registry instance the loop owns (moved verbatim out of `AgentLoop::new`).
     bastion_mcp::registry_setup::register_mcp_tools(&mut agent.capability_registry, &mcp_client);
 
+    // Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §2): build the
+    // RuntimeRegistry from whatever AgentRuntime adapters are actually
+    // healthy on this host RIGHT NOW — conditional registration, an
+    // unhealthy adapter never enters the map (an owner who then selects it
+    // gets the fail-closed typed error from `RuntimeRegistry::resolve` at
+    // turn start, never a silent fallback to Model). Cheap to build even
+    // when `[backend]` is entirely absent from bastion.toml: `health()` here
+    // is a handful of `--version` subprocess spawns, not a live session.
+    let runtime_registry = bastion::agent_runtime_registry::build_runtime_registry().await;
+
+    let mut backend_profile = bastion::config::backend_profile_from_config(&cfg.backend);
+    if let bastion_runtime::agent::backend::ConversationBackend::Runtime(id) =
+        &backend_profile.conversation
+    {
+        match runtime_registry.get(id) {
+            // coverage_note is a pass-through of the adapter's own honest
+            // declaration (RuntimeDescriptor::policy_coverage) — never
+            // invented from the config string.
+            Some(rt) => backend_profile.coverage_note = Some(rt.descriptor().policy_coverage),
+            None => tracing::warn!(
+                event = "backend_conversation_runtime_not_registered",
+                runtime_id = %id,
+                "configured conversation backend is not in the RuntimeRegistry (missing binary/auth/health) — \
+                 the turn will fail closed with a typed error at turn start, never silently fall back to Model",
+            ),
+        }
+    }
+    agent = agent
+        .with_backend_profile(backend_profile)
+        .with_runtime_registry(runtime_registry);
+
     match cli.command {
         Command::Agent { message } => {
             let response = agent.run_turn(&message).await?;

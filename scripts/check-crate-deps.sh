@@ -26,7 +26,12 @@ FAIL=0
 # --- Allowlist: production [dependencies] -----------------------------------
 declare -A ALLOWED_DEPS
 ALLOWED_DEPS[bastion-types]=""
-ALLOWED_DEPS[bastion-runtime]="bastion-types"
+# Ciclo 2.4 (docs/revamp/C2-backend-profile-design.md): the kernel's
+# BackendProfile/RuntimeRegistry hold Arc<dyn AgentRuntime> directly — a
+# deliberate new edge, not a core rewrite (the trait object is routing
+# policy; bastion-agent-runtime still never depends back on the kernel, so
+# no cycle is introduced — verified by the cycle detector below).
+ALLOWED_DEPS[bastion-runtime]="bastion-types bastion-agent-runtime"
 ALLOWED_DEPS[bastion-memory]="bastion-types bastion-runtime"
 ALLOWED_DEPS[bastion-providers]="bastion-types bastion-runtime"
 ALLOWED_DEPS[bastion-mcp]="bastion-types bastion-runtime"
