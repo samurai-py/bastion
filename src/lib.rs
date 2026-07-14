@@ -6,3 +6,4 @@ pub mod channel;
 pub mod config;
 pub mod extension;
 pub mod mcp;
+pub mod secret;

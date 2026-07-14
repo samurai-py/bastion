@@ -12,6 +12,11 @@
 //! - `args.read_memory_owner: "<owner>"` — asks the host to authorize a
 //!   memory read for `<owner>`, then echoes the host's answer back.
 //! - `args.bind_port: <port>` — asks the host to authorize a network bind.
+//! - `args.dump_env: true` — returns every env var this process actually
+//!   sees under `data.env` (sorted, name+value). Diagnostic only — used by
+//!   `tests/extension_subprocess.rs` to prove the host's `env_clear()` +
+//!   declared-`SecretRef`-allowlist actually holds (the child sees ONLY the
+//!   secrets its manifest declared, nothing ambient).
 //! - anything else — plain echo of `args` under `data.echo`.
 //!
 //! Reads exactly one `invoke` line from stdin, then loops on
@@ -83,9 +88,15 @@ fn main() {
         None
     };
 
-    let data = match host_response {
-        Some(resp) => json!({"echo": args, "host_response": resp}),
-        None => json!({"echo": args}),
+    let data = if args.get("dump_env").and_then(Value::as_bool) == Some(true) {
+        let mut env: Vec<(String, String)> = std::env::vars().collect();
+        env.sort();
+        json!({"env": env})
+    } else {
+        match host_response {
+            Some(resp) => json!({"echo": args, "host_response": resp}),
+            None => json!({"echo": args}),
+        }
     };
     send(
         &mut out,

@@ -329,6 +329,8 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", response);
         }
         Command::Daemon => {
+            let secret_resolver: Arc<dyn bastion_types::SecretResolver> =
+                Arc::new(bastion::secret::default_secret_resolver());
             daemon_loop(
                 &mut agent,
                 &cfg,
@@ -337,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
                 goals_for_product,
                 mcp_for_product,
                 registry_for_product,
+                secret_resolver,
             )
             .await?;
         }
@@ -465,6 +468,9 @@ async fn main() -> anyhow::Result<()> {
 /// REPL daemon loop: stdin line by line, slash commands, graceful shutdown (D-01).
 /// Five select arms: stdin, pending_rx (proactive), inbound_rx (channel), SIGTERM, Ctrl-C.
 /// All arms serialize through ONE `&mut agent` — single-turn invariant holds (CR-07).
+// Wires 8 independent startup dependencies from `main()`; a params struct would be a
+// single-call-site bag with no reusable shape (same rationale as `serve_with_mesh` below).
+#[allow(clippy::too_many_arguments)]
 async fn daemon_loop(
     agent: &mut AgentLoop,
     cfg: &bastion::config::BastionConfig,
@@ -488,6 +494,13 @@ async fn daemon_loop(
     // registry `PersonaResponder` wraps, cloned in `main()` before it moved
     // into the responder.
     registry_for_product: PersonaRegistry,
+    // Loop 3-D (`docs/revamp/C3-cloud-ready-design.md`, security point 1):
+    // the injectable resolver every daemon-level `SecretRef` (currently
+    // `APP_JWT_SECRET`, `BASTION_INFER_TOKEN`) is resolved through at boot —
+    // env var today, optionally a mounted-secrets directory
+    // (`BASTION_SECRETS_DIR`); a hosted operator's own secret manager is a
+    // drop-in replacement built in `main()`, never a daemon_loop change.
+    secret_resolver: Arc<dyn bastion_types::SecretResolver>,
 ) -> anyhow::Result<()> {
     use bastion::agent::command::{CommandResources, CommandResult};
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -552,15 +565,26 @@ async fn daemon_loop(
         // the fail-closed check. Fail here instead of silently signing/verifying JWTs
         // with a well-known default that anyone reading this public repo can use to
         // impersonate any owner.
-        let jwt_secret = std::env::var("APP_JWT_SECRET").map_err(|_| {
-            tracing::error!(
-                event = "webhook_no_jwt_secret",
-                "APP_JWT_SECRET is not set — refusing to start"
-            );
-            anyhow::anyhow!(
-                "APP_JWT_SECRET must be set; refusing to start with a hardcoded default"
-            )
-        })?;
+        //
+        // Loop 3-D: resolved BY REFERENCE through the injected
+        // `SecretResolver` (env var today; a mounted-file/hosted secret
+        // manager transparently for an operator that sets
+        // `BASTION_SECRETS_DIR` or injects their own resolver in `main()`)
+        // rather than reading `std::env::var` directly — same contract as
+        // `BASTION_INFER_TOKEN` below.
+        let jwt_secret = secret_resolver
+            .resolve("APP_JWT_SECRET")
+            .map_err(|_| {
+                tracing::error!(
+                    event = "webhook_no_jwt_secret",
+                    "APP_JWT_SECRET is not set — refusing to start"
+                );
+                anyhow::anyhow!(
+                    "APP_JWT_SECRET must be set; refusing to start with a hardcoded default"
+                )
+            })?
+            .expose_secret()
+            .to_string();
 
         // Phase 6 Wave 2: P2PTransport + MeshSliceProvider when MESH_IDENTITY_KEY is set.
         let (mesh_transport, mesh_slice_store) = if let Ok(identity_key) =
@@ -886,9 +910,15 @@ async fn daemon_loop(
     // In Docker, the token is injected and the port stays on a private, unpublished
     // network (see plan 03-06).
     {
-        let infer_token = std::env::var("BASTION_INFER_TOKEN")
+        // Loop 3-D: resolved BY REFERENCE through the same injected
+        // `SecretResolver` as `APP_JWT_SECRET` above — `resolve` already
+        // fails closed on an absent/empty value (`EnvSecretResolver`), so
+        // `Err` here means exactly what the old `.ok().filter(non_empty)`
+        // chain meant: "no usable token configured".
+        let infer_token = secret_resolver
+            .resolve("BASTION_INFER_TOKEN")
             .ok()
-            .filter(|t| !t.is_empty());
+            .map(|v| v.expose_secret().to_string());
         let infer_addr =
             std::env::var("BASTION_INFER_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
         let host = infer_addr

@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+pub mod secret;
+pub use secret::{NullSecretResolver, SecretRef, SecretResolver, SecretValue};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -592,6 +595,13 @@ pub enum BastionError {
     /// owner).
     #[error("Agent runtime backend unavailable: {0}")]
     BackendUnavailable(String),
+    /// Loop 3-D (`docs/revamp/C3-cloud-ready-design.md`, security point 1):
+    /// a [`crate::secret::SecretResolver`] could not find material for the
+    /// named reference. Carries ONLY the reference name — never a partial
+    /// or attempted value — so this error is always safe to log/trace/
+    /// surface verbatim.
+    #[error("Secret not found for reference '{name}'")]
+    SecretNotFound { name: String },
 }
 
 /// Strip `<think>...</think>` blocks from LLM output (CORE-09).

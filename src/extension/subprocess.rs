@@ -112,6 +112,12 @@ pub struct SubprocessCapability {
     manifest: Arc<ExtensionManifest>,
     command: String,
     args: Vec<String>,
+    /// C3-cloud-ready (`docs/revamp/C3-cloud-ready-design.md`, security
+    /// point 1): resolves each `manifest.secrets` entry BY NAME into the
+    /// child's env at spawn time — never the daemon's own ambient env
+    /// (`env_clear()` below still runs first). `None` preserves the
+    /// pre-Loop-3-D behavior exactly (no allowlist, child gets nothing).
+    secret_resolver: Option<Arc<dyn bastion_types::SecretResolver>>,
 }
 
 impl SubprocessCapability {
@@ -214,14 +220,56 @@ impl Capability for SubprocessCapability {
 }
 
 impl SubprocessCapability {
+    /// Resolve every `manifest.secrets` entry BY NAME via the injected
+    /// resolver and return them as `(env_var_name, value)` pairs — the ONLY
+    /// env vars ever added back after `env_clear()`. Fails closed: a
+    /// manifest that declares a secret the resolver cannot currently
+    /// resolve aborts the WHOLE call rather than silently spawning the
+    /// child without it (a subprocess extension that thinks it has a
+    /// credential and doesn't would fail in a much more confusing way
+    /// downstream, and a partially-populated secret set is never safer than
+    /// none).
+    fn resolve_declared_secrets(&self) -> anyhow::Result<Vec<(String, String)>> {
+        if self.manifest.secrets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let resolver = self.secret_resolver.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "extension '{}' declares {} secret(s) but no SecretResolver is configured",
+                self.manifest.id,
+                self.manifest.secrets.len()
+            )
+        })?;
+        let mut resolved = Vec::with_capacity(self.manifest.secrets.len());
+        for secret_ref in &self.manifest.secrets {
+            let value = resolver.resolve(&secret_ref.name).map_err(|_| {
+                // Never interpolate the resolver's own error into this
+                // message beyond the reference name it already carries —
+                // BastionError::SecretNotFound is name-only by construction,
+                // but this call site does not lean on that; it re-derives
+                // the same name-only shape independently.
+                anyhow::anyhow!(
+                    "extension '{}' declares secret '{}' which could not be resolved",
+                    self.manifest.id,
+                    secret_ref.name
+                )
+            })?;
+            resolved.push((secret_ref.name.clone(), value.expose_secret().to_string()));
+        }
+        Ok(resolved)
+    }
+
     async fn invoke_inner(&self, args: Value, ctx: &InvokeCtx) -> anyhow::Result<Value> {
+        // Design doc §2: subprocess never inherits daemon ambient env.
+        // Resolved BEFORE `env_clear()` runs (nothing about resolution
+        // itself touches the child's env) — only the declared, resolved
+        // secrets are added back, by name, after the clear.
+        let declared_secrets = self.resolve_declared_secrets()?;
+
         let mut cmd = Command::new(&self.command);
         cmd.args(&self.args)
-            // Design doc §2: subprocess never inherits daemon env/secrets.
-            // No allowlist this cycle (M4-08's SecretRef-by-name resolution
-            // into a per-extension env allowlist is a follow-up) — the child
-            // gets NOTHING beyond argv/stdio.
             .env_clear()
+            .envs(declared_secrets)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -325,11 +373,34 @@ pub type SubprocessEntry = (String, String, Value, String, Vec<String>);
 pub struct SubprocessExtension {
     manifest: ExtensionManifest,
     entries: Vec<SubprocessEntry>,
+    /// C3-cloud-ready: threaded into every `SubprocessCapability` this
+    /// extension activates. `None` (the default) preserves pre-Loop-3-D
+    /// behavior byte-for-byte — a manifest with an empty `secrets` list
+    /// never even looks at this field (`resolve_declared_secrets` short-
+    /// circuits on an empty list before ever consulting it).
+    secret_resolver: Option<Arc<dyn bastion_types::SecretResolver>>,
 }
 
 impl SubprocessExtension {
     pub fn new(manifest: ExtensionManifest, entries: Vec<SubprocessEntry>) -> Self {
-        Self { manifest, entries }
+        Self {
+            manifest,
+            entries,
+            secret_resolver: None,
+        }
+    }
+
+    /// Inject the [`bastion_types::SecretResolver`] this extension's
+    /// declared `manifest.secrets` are resolved through at each `invoke()`.
+    /// Builder-style, matching `AgentLoop::with_*` — additive, does not
+    /// change `new()`'s signature or any existing call site.
+    #[must_use]
+    pub fn with_secret_resolver(
+        mut self,
+        resolver: Arc<dyn bastion_types::SecretResolver>,
+    ) -> Self {
+        self.secret_resolver = Some(resolver);
+        self
     }
 }
 
@@ -349,6 +420,7 @@ impl ExtensionInstance for SubprocessExtension {
                 manifest: manifest_arc.clone(),
                 command: command.clone(),
                 args: args.clone(),
+                secret_resolver: self.secret_resolver.clone(),
             }))?;
         }
         Ok(())
