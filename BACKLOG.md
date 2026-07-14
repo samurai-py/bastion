@@ -66,12 +66,12 @@ Decisão: **sem validação ao vivo neste marco** — os débitos live herdados 
 
 ## M1. Boundaries antes de mover código
 
-- [ ] **M1-01** ADR "substrate, cognition and product split".
-- [ ] **M1-02** Inventário módulo→destino confirmado por análise de dependências (hipótese abaixo).
-- [ ] **M1-03** Grafo de dependências real + ciclos que impedem separação.
-- [ ] **M1-04** Lista de APIs públicas mínimas a estabilizar: `Runtime::run_turn(TurnRequest) -> TurnResult`; `Capability`/`CapabilityRegistry`/`InvokeContext`; `ContextProvider`/`ContextBlock`; `SessionStore`; `Provider`; `Observer`/event contract; ports opcionais de approval/budget/policy; `AgentDefinition` + bindings; `Memory`/`Belief`/proveniência; learning delta + interop; `ExtensionManifest`/`PackManifest` + lifecycle + permissões; `Loadout` resolvido + lockfile; delegação de subagente + ownership de agente coletivo; `AgentRuntime`; `AuthProfileRef`; `VersionedContextArtifact`/`ContextRevision`; `DeliberationStrategy` + Cabinet (contrato estável — decisão #6).
-- [ ] **M1-05** Matriz mechanism/policy: o que é mecanismo OSS compartilhado vs. política do Agent vs. política de host externo.
-- [ ] **M1-06** Política de estabilidade por crate (kernel semver estrito; cognição `0.x` exceto Cabinet; produto sem promessa de lib).
+- [x] **M1-01** ADR em `docs/revamp/M1-ADR-substrate-split.md` (`4bfaef6`).
+- [x] **M1-02** Inventário módulo→destino confirmado (ADR + execução M2 — desvios documentados: scheduler→mesh, terminal_agent→providers).
+- [x] **M1-03** Grafo real medido: 27 arestas proibidas em 4 padrões (V1-V4), todas quebradas no M2; acíclico confirmado pelo CI.
+- [x] **M1-04** Lista de APIs públicas mínimas a estabilizar (no ADR; estabilização efetiva = M3): `Runtime::run_turn(TurnRequest) -> TurnResult`; `Capability`/`CapabilityRegistry`/`InvokeContext`; `ContextProvider`/`ContextBlock`; `SessionStore`; `Provider`; `Observer`/event contract; ports opcionais de approval/budget/policy; `AgentDefinition` + bindings; `Memory`/`Belief`/proveniência; learning delta + interop; `ExtensionManifest`/`PackManifest` + lifecycle + permissões; `Loadout` resolvido + lockfile; delegação de subagente + ownership de agente coletivo; `AgentRuntime`; `AuthProfileRef`; `VersionedContextArtifact`/`ContextRevision`; `DeliberationStrategy` + Cabinet (contrato estável — decisão #6).
+- [x] **M1-05** Matriz mechanism/policy (regra única no ADR: crates = mecanismo configurável, opinião = política injetada; teste real no M5).
+- [x] **M1-06** Política de estabilidade por crate (tabela do ADR).
 - [x] **M1-07** Caracterização das invariantes (mapa em `docs/revamp/M1-07-characterization-map.md`; 5 testes novos em `tests/characterization_boundary.rs`; 1 gap estrutural documentado).
 
 Topologia alvo (decisão #1 — intermediária, 10 crates + app; confirmar destino fino em M1-02):
