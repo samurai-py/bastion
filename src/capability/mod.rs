@@ -16,5 +16,5 @@ pub use bastion_mcp::adapters::{DirectFnAdapter, McpToolAdapter, NlCommandAdapte
 pub use bastion_runtime::agent::ports::ApprovalGate;
 pub use bastion_runtime::capability::{
     ApprovalOutcome, ApprovalRow, ApprovalStatus, Capability, CapabilityRegistry, InvokeCtx,
-    NullApprovalGate, SqliteApprovalGate, TurnCapabilityScope,
+    NullApprovalGate, SqliteApprovalGate, TaggedValue, TurnCapabilityScope,
 };

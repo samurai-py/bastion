@@ -624,3 +624,81 @@ async fn mcp_tool_source_gates_egress_before_attempting_dispatch() {
          got: {dispatched}"
     );
 }
+
+// ===========================================================================
+// Ciclo 2.1 §4 (docs/revamp/C2-approval-port-design.md, LOOP-REPORT.md
+// finding #4) — trust-tagging parity on the two `ToolSource`-bypass call
+// sites (`dispatch_tool_loop`'s empty-registry fallback,
+// `run_provider_fallback`'s whole tool loop). Both now tag their raw
+// dispatch result via `bastion::capability::TaggedValue::untrusted` — the
+// SAME wrapping `CapabilityRegistry::invoke` applies to a non-local
+// capability — instead of handing the model untagged JSON.
+// ===========================================================================
+
+/// A non-local (default `is_trusted()==false`) capability that just echoes
+/// its args back — the registry-path half of the comparison below.
+struct EchoRemoteCap;
+
+#[async_trait]
+impl Capability for EchoRemoteCap {
+    fn name(&self) -> &str {
+        "shared_tool"
+    }
+    fn description(&self) -> &str {
+        "echoes its args"
+    }
+    fn input_schema(&self) -> &Value {
+        static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({}))
+    }
+    async fn invoke(&self, args: Value, _ctx: &InvokeCtx) -> anyhow::Result<Value> {
+        Ok(args)
+    }
+}
+
+/// Proves `TaggedValue::untrusted` — the constructor both bypass call sites
+/// use to tag a raw `ToolSource` result — produces EXACTLY the tag
+/// `CapabilityRegistry::invoke` produces for an equivalent non-local
+/// capability dispatching the SAME data under the SAME name: identical
+/// `data`, identical `source`, identical `trusted: false`. Never a
+/// parallel/divergent untrusted-marking convention between the registry path
+/// and the two bypass paths.
+#[tokio::test]
+async fn bypass_tag_matches_registry_tag_for_equivalent_non_local_result() {
+    let mut registry = CapabilityRegistry::new();
+    registry
+        .register(Arc::new(EchoRemoteCap))
+        .expect("register");
+
+    let data = serde_json::json!({"payload": 42});
+
+    let via_registry = registry
+        .invoke(
+            "shared_tool",
+            data.clone(),
+            &ctx("alice", Some(PrivacyTier::CloudOk)),
+        )
+        .await
+        .expect("non-local capability must dispatch under CloudOk");
+
+    let via_bypass = bastion::capability::TaggedValue::untrusted("shared_tool", data.clone());
+
+    assert_eq!(
+        via_registry.data, via_bypass.data,
+        "same raw data on both paths"
+    );
+    assert_eq!(
+        via_registry.source, via_bypass.source,
+        "same source/capability name on both paths"
+    );
+    assert_eq!(
+        via_registry.trusted, via_bypass.trusted,
+        "the bypass tag must carry the IDENTICAL untrusted marking the registry \
+         path applies — never a parallel/divergent convention"
+    );
+    assert!(
+        !via_bypass.trusted,
+        "a ToolSource-bypass result must default untrusted, exactly like a \
+         non-local capability's registry-path result"
+    );
+}

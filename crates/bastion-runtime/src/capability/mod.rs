@@ -20,4 +20,4 @@ pub mod structured_output;
 pub use approval::{
     ApprovalOutcome, ApprovalRow, ApprovalStatus, NullApprovalGate, SqliteApprovalGate,
 };
-pub use registry::{Capability, CapabilityRegistry, InvokeCtx, TurnCapabilityScope};
+pub use registry::{Capability, CapabilityRegistry, InvokeCtx, TaggedValue, TurnCapabilityScope};

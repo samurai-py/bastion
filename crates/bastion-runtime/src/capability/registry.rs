@@ -83,6 +83,25 @@ pub struct TaggedValue {
     pub trusted: bool,
 }
 
+impl TaggedValue {
+    /// The tag a NON-local capability's successful dispatch gets through
+    /// `invoke()` (`cap.is_trusted()` defaults to `cap.is_local()`, `false`
+    /// for anything non-local). Ciclo 2.1 (`docs/revamp/C2-approval-port-design.md`
+    /// §4, LOOP-REPORT.md finding #4): the two `ToolSource`-bypass call sites
+    /// in `agent/loop_.rs` (`dispatch_tool_loop`'s empty-registry fallback,
+    /// `run_provider_fallback`'s whole tool loop) have no `Capability` object
+    /// to call `.is_trusted()` on — this constructor is the SAME wrapping
+    /// registry `invoke()` applies, exposed so both bypass paths derive their
+    /// tag from it directly instead of a parallel/duplicated convention.
+    pub fn untrusted(source: impl Into<String>, data: Value) -> Self {
+        Self {
+            data,
+            source: source.into(),
+            trusted: false,
+        }
+    }
+}
+
 /// Unified capability registry.
 ///
 /// Single policy enforcement point — every frontend (direct fn, MCP tool, NL command)
