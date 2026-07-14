@@ -16,6 +16,29 @@
    - **(c) `scripts/dump-public-api.sh` tem um ponto cego pré-existente: `pub async fn`.** O regex do extrator (`^\s*pub (fn|struct|enum|trait|const|static|type|mod)\s+...`) não casa `pub async fn` — só `pub fn`. `AgentLoop::delegate_task`/`cancel_delegated_task`/`resume_delegated_task`/`run_turn`/`run_turn_for`/toda a superfície pública `async` do kernel é invisível ao baseline hoje (confirmado: nenhum desses métodos pré-existentes aparece em `docs/api-baseline/bastion-runtime.txt`). Não é uma regressão deste ciclo — é um gap pré-existente do M3-01 que este ciclo só tornou visível (a nova superfície pública async não moveu o baseline, então o gate `--check` passou "verde" sem realmente cobrir os métodos novos). Vale corrigir o regex (`pub\s+(async\s+)?fn`) num ciclo de M3 restante.
    - **(d) `pending_tx`/`pending_rx` (seam PROACT-05) não é owner-roteado.** Foi construído pro daemon CLI single-owner (nudges de goal-drift sempre viram um novo turn pra `DEFAULT_OWNER`). Reaproveitado no modo 3 pra notificação de task delegada — funciona no teste (single-owner), mas numa instalação multi-owner um resultado de task de um owner poderia ser entregue como turno proativo do owner errado. UX/roteamento correto é M4 pleno, documentado como limite conhecido em `docs/revamp/A-06-A-07-live.md`, não escondido.
 
+## Encerramento do Loop 2 — Ciclo 2 completo (2026-07-14 ~04:30)
+
+Ciclo 2 (2.1→2.4) fechado, origin/revamp em `e81c313`, **50 commits sobre a tag**, **589 testes / 42 suites** verdes.
+
+- **2.1** approval vira port (`ApprovalGate`), rejeição tipada (`ApprovalDenied`), `DenyScope::Turn` fail-closed contra route-around-deny, trust parity nos bypass paths. Bug latente de bônus: `SessionManager::append` rejeitava 2º tool_result de round multi-tool — corrigido.
+- **2.2** contrato `AgentRuntime` v2: WATCHDOG parametrizável, `SandboxCoverage` DETECTADO (bubblewrap probe — confirmou `None` na máquina do owner, não mais `Partial` otimista), `ResumeSpec`, `PermissionDecision::Deny{scope}`.
+- **2.3** 19 shims do M2 removidos, superfície pub −26, `VERSIONING.md` + `dump-public-api.sh` baseline no CI.
+- **2.4** `BackendProfile` + `RuntimeRegistry` integrados no daemon (default `Model` = comportamento idêntico); modo 2 (runtime-backed conversation) e modo 3 (delegated task) com **A-06 e A-07 provados LIVE** (Claude Code / Codex reais). Harness nunca implementa `Provider` (verificado).
+
+### Pendências do owner (bloqueiam o próximo ciclo autônomo)
+
+1. **M5 — scoping do segundo consumidor (host embedded):** o `embedded-host` de exemplo prova a API, mas o slice M5 real (contexto autoritativo injetado, action nomeada, policy fechada, 2 owners) precisa de decisão de escopo — o que ele representa sem violar o scrub público.
+2. **A-08** security/live E2E + matriz de policy coverage versionada; **A-09** remoção do terminal-agent legado (gate: A-08 verde + rollback testado).
+3. **opencode auth login** — destrava a célula que falta na matriz A-05.
+4. **3 itens `?` do inventário M0** (dir `bastion/` tracked, `.bastion/`, destino do `STRATEGY.md`).
+5. **M4 pleno:** aprovação cross-turn genuína (achado 6a), owner-routing do `pending_tx` (6d), continuidade de task cross-restart (6b — furo de protocolo do harness), regex `pub async fn` do baseline (6c). Login guiado/OAuth, seleção de backend por UX, matriz de assinatura.
+
+### Próximo ciclo sugerido (quando o owner destravar 1-4)
+
+M4 pleno (BackendProfile UX + login) → M5 (slice segundo consumidor) → M6 (split físico bastion-core/bastion-agent + limpeza geral GSD/.planning/mortos) → M7 (validação competitiva). Ordem do BACKLOG mantida.
+
+---
+
 ## Encerramento do loop (2026-07-14 ~00:15)
 
 Entregue nesta corrida: M0, M1 completo, M2 completo (9 crates + app + CI deps), M3 estático (F1 hardening, invariantes doc, exemplos, feature flags, build mínimo 15,6MB), Trilha A até A-05 (contrato, conformance, 2 adapters com validação LIVE, matriz). 537 testes / 40 suites verdes; origin/revamp atualizado a cada marco.
