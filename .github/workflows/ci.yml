@@ -35,3 +35,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check -p minimal-agent -p embedded-host
+
+  # Ciclo 2.3 / M3-01 (docs/revamp/M3-CLOSE.md §7): fail loudly when a
+  # crate's public surface (docs/api-baseline/<crate>.txt) drifts from the
+  # working tree without the baseline being regenerated and committed.
+  # See docs/VERSIONING.md for what a baseline diff means for versioning.
+  public-api-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/dump-public-api.sh --check
