@@ -1,17 +1,17 @@
 # Bastion — Rust agent runtime
 
-Bastion is the **OSS Rust runtime** that hosts AI agents: an async (tokio) daemon running the agent tool-loop, serving channels (Telegram / webhook / HTTP via axum), connecting MCP servers (rmcp), calling LLM providers, and persisting sessions in SQLite. It is a **self-hosted, open** agent runtime. It **replaced the old OpenClaw/Python v2**: there is no Python, Node, OpenClaw, ClawHub, gateway, or `skills/*/manifest.json` here. Ignore any doc that says otherwise — current intel lives in `.planning/codebase/` (re-mapped to Rust 2026-06-30).
+Bastion is the **OSS Rust runtime** that hosts AI agents: an async (tokio) daemon running the agent tool-loop, serving channels (Telegram / webhook / HTTP via axum), connecting MCP servers (rmcp), calling LLM providers, and persisting sessions in SQLite. It is a **self-hosted, open** agent runtime. It **replaced the old OpenClaw/Python v2**: there is no Python, Node, OpenClaw, ClawHub, gateway, or `skills/*/manifest.json` here. Ignore any doc that says otherwise — the current source is authoritative; the revamp state lives in `docs/revamp/` (`BACKLOG.md` + `LOOP-REPORT.md`).
 
 ## How to work here
 - **Standard = the `rust-standards` skill.** Errors: typed `BastionError` (thiserror, `#[non_exhaustive]`, `src/types.rs`) carried via `anyhow` and matched at boundaries with `downcast_ref::<BastionError>()`; `anyhow` only at the binary boundary (`main.rs` / handlers) — do **not** churn the user-implementable trait `Result`s into per-module enums. No `unwrap`/`expect` in non-test paths except proven-invariant / fail-fast. `tracing` structured fields, never `println!`. English rustdoc.
 - **Gates (live in CI — keep green):** `cargo fmt --check` · `cargo clippy --all-targets --all-features -- -D warnings` · `cargo test`. Crate is `#![forbid(unsafe_code)]`.
 - **Cycle = the `dev-cycle` skill:** TDD → Contracts → Code; trunk + PR; Conventional Commits; repo docs updated at feature end. Tests = `cargo test` (unit + the `tests/` integration suites, incl. the cargo-native eval harness).
-- **Before editing**, read `.planning/codebase/` intel and use the GitNexus impact tools (block below).
+- **Before editing**, use the GitNexus impact tools (block below) to assess blast radius.
 
 ## Architecture laws — do NOT weaken (the `review-standards` invariants)
 - **Core = mechanism, not orchestrator.** Bastion composes / runs / injects / observes; it is a **host, not a DAG/workflow engine**. Coordination = the daemon `select!` serializing through one `&mut agent`. New behavior enters as a **trait impl or an MCP server — never a core rewrite**.
 - **One tool surface:** everything goes through `CapabilityRegistry::invoke` (`src/capability/registry.rs`) — the single policy boundary. **Agents never get raw SQL.** Locality keys on the typed `Capability::is_local()`, not on a `cmd:` name string (forged `cmd:` names are rejected).
-- **Concurrency:** SQLite WAL + `busy_timeout=5000` (`src/session/sqlite.rs`) + per-owner `Arc<Mutex<()>>` (`src/main.rs`). (Entity-level OCC + Redlock are not here yet — see `.planning/todos/pending/house-standards-alignment.md`.)
+- **Concurrency:** SQLite WAL + `busy_timeout=5000` (`src/session/sqlite.rs`) + per-owner `Arc<Mutex<()>>` (`src/main.rs`). (Entity-level OCC + Redlock are not here yet.)
 - **`<active_object>` via the `TurnContextProvider` seam** (`src/agent/context.rs`): opaque blocks the core concatenates **without interpreting**; per-block egress checked at system-prompt build.
 - **Observability:** OpenTelemetry GenAI spans/events, pluggable sinks (stdout / OTLP), content-events opt-in. Any external dashboard is "just another sink".
 - **Stable contract surface:** `src/session/sqlite.rs` + `src/agent/loop_.rs` + `src/capability/registry.rs` — keep these stable; external integrations depend on them as a contract.
@@ -25,7 +25,7 @@ Bastion is the **OSS Rust runtime** that hosts AI agents: an async (tokio) daemo
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **bastion** (7033 symbols, 14597 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **bastion** (7422 symbols, 15848 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

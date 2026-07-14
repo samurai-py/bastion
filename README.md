@@ -85,6 +85,15 @@ personas  providers  hooks
 
 The stable integration surface is AgentLoop, CapabilityRegistry, TurnContextProvider, session storage and neutral OTel events.
 
+## Core vs Agent (upcoming repository split)
+
+This repository is being reorganized into two clearly separated layers, and an upcoming split will move them into two repositories (no date promised):
+
+- **Bastion Core** — the reusable substrate: the family of `crates/bastion-*` crates (runtime, types, memory, cognition, personas, mesh, MCP, providers, agent-runtime, extension protocol). Core is a *host and mechanism* — it never contains product-specific policy, a consuming application's business objects, or any closed-source/commercial concept. A second consumer (`examples/embedded-host-slice`) proves the boundary holds without importing the Agent.
+- **Bastion Agent** — the personal product built *on top of* Core: the daemon/app in `src/`, concrete channels, config, installer, Docker, mobile companion, skills and packs. The Agent depends on Core through Core's public API only; the dependency never points the other way.
+
+Until the physical split, both live in this one workspace and the crate-dependency CI gate (`scripts/check-crate-deps.sh`) enforces the one-way boundary. See `docs/revamp/M6-PREP.md` for the exact Core/Agent mapping and the split plan.
+
 ## Roadmap
 
 1. **Finish v1.1:** phase-12 live UAT, accumulated code/security review and release gates.
