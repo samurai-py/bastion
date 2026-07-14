@@ -90,6 +90,9 @@ print("check-scope-and-scrub: guard 2 — corporate-name scrub")
 # leaked proprietary name, never a generic English word (false positives on
 # common words would make this check impossible to keep green).
 BLOCKED_NAMES = ["katsui", "thewaifucorp", "waifucorp"]
+# This script itself must name the blocked strings to check for them — the
+# ONE deliberate, self-referential exception, not a leak.
+EXEMPT_FILES = {"scripts/check-scope-and-scrub.sh"}
 
 try:
     tracked = subprocess.run(
@@ -105,6 +108,8 @@ except (subprocess.CalledProcessError, FileNotFoundError):
 for name in BLOCKED_NAMES:
     hits = []
     for relpath in tracked:
+        if relpath in EXEMPT_FILES:
+            continue
         if not os.path.isfile(relpath):
             continue
         try:
