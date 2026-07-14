@@ -329,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
                         &memory,
                         &registry_for_product,
                         &goals_for_product,
-                        &cfg,
+                        &cfg.agent,
                         identity,
                         &owner_id,
                     )
@@ -339,7 +339,8 @@ async fn main() -> anyhow::Result<()> {
                     if with_identity {
                         anyhow::bail!("--with-identity is only valid with --mode full");
                     }
-                    bastion::interop::export::export_template(&registry_for_product, &cfg).await?
+                    bastion::interop::export::export_template(&registry_for_product, &cfg.agent)
+                        .await?
                 }
                 other => {
                     anyhow::bail!("Invalid export mode '{}'. Use 'full' or 'template'.", other)

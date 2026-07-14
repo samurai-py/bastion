@@ -1,8 +1,8 @@
-use crate::config::BastionConfig;
 use crate::goal::GoalEngine;
 use crate::identity::age_identity::AgeIdentity;
 use crate::memory::{Belief, PrivacyTier, SharedMemory};
 use crate::persona::{Persona, PersonaRegistry};
+use crate::types::AgentConfig;
 
 use super::*;
 
@@ -10,7 +10,7 @@ pub async fn export_full(
     memory: &SharedMemory,
     personas: &PersonaRegistry,
     goals: &GoalEngine,
-    config: &BastionConfig,
+    config: &AgentConfig,
     identity: Option<&AgeIdentity>,
     owner_id: &str,
 ) -> anyhow::Result<AgentFile> {
@@ -40,7 +40,7 @@ pub async fn export_full(
 
 pub async fn export_template(
     personas: &PersonaRegistry,
-    config: &BastionConfig,
+    config: &AgentConfig,
 ) -> anyhow::Result<AgentFile> {
     Ok(AgentFile {
         version: AF_VERSION,
@@ -67,11 +67,11 @@ fn personas_to_entries(registry: &PersonaRegistry) -> Vec<PersonaEntry> {
 // ---- Helper impls ----
 
 impl ConfigBlock {
-    fn from_config(cfg: &BastionConfig) -> Self {
+    fn from_config(cfg: &AgentConfig) -> Self {
         Self {
             agent: AgentConfigExport {
-                default_model: cfg.agent.default_model.clone(),
-                daily_budget_usd: cfg.agent.daily_budget_usd,
+                default_model: cfg.default_model.clone(),
+                daily_budget_usd: cfg.daily_budget_usd,
             },
         }
     }
@@ -150,39 +150,11 @@ async fn load_skills_list() -> Vec<SkillEntry> {
 }
 
 #[allow(dead_code)]
-fn make_test_config() -> BastionConfig {
-    use crate::config::*;
-    BastionConfig {
-        agent: AgentConfig {
-            default_model: "test".into(),
-            daily_budget_usd: 0.01,
-            fallback_models: vec![],
-        },
-        session: SessionConfig {
-            db_path: ":memory:".into(),
-            autocompact_threshold: 0.5,
-            keep_last_n: 10,
-        },
-        logging: LoggingConfig {
-            log_path: "/dev/null".into(),
-        },
-        mcp: McpConfig {
-            servers: std::collections::HashMap::new(),
-            tool_call_timeout_secs: 60,
-        },
-        channels: ChannelsConfig {
-            telegram: ChannelConfig { enabled: false },
-            webhook: ChannelConfig { enabled: false },
-            whatsapp: None,
-            discord: None,
-            slack: None,
-            email: None,
-            voice: VoiceChannelConfig::default(),
-        },
-        mesh: MeshConfig::default(),
-        mcp_server: McpServerConfig::default(),
-        reflector: ReflectorConfig::default(),
-        identity: IdentityConfig::default(),
+fn make_test_config() -> AgentConfig {
+    AgentConfig {
+        default_model: "test".into(),
+        daily_budget_usd: 0.01,
+        fallback_models: vec![],
     }
 }
 

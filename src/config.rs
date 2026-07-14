@@ -231,18 +231,17 @@ pub fn owner_map_for_email(cfg: &IdentityConfig) -> OwnerMap {
     )
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct AgentConfig {
-    pub default_model: String,
-    pub daily_budget_usd: f64,
-    /// D-11: ordered list of model-name strings, using the same naming convention
-    /// `resolve_provider()` (src/provider/registry.rs) already accepts (e.g.
-    /// `"groq/llama-3.1-8b-instant"`, `"gemini-2.0-flash"`). Tried in order when the
-    /// primary provider suffers a hard/persistent failure (SO-03/D-10 rung 3, wired
-    /// in Plan 08-08). Empty = no provider-switching (today's exact behavior).
-    #[serde(default)]
-    pub fallback_models: Vec<String>,
-}
+/// `AgentConfig` moved to `bastion_types` (M2 step 6, V2 fix —
+/// `docs/revamp/M1-ADR-substrate-split.md`): `interop::export::{export_full,
+/// export_template}` (moving to `bastion-mesh`) only ever read this
+/// sub-struct (`cfg.agent.{default_model,daily_budget_usd}`) through the
+/// whole `BastionConfig` — a leak of the app's config format into an
+/// extension crate. Narrowing their signature to `&AgentConfig` and moving
+/// the struct to `bastion-types` (pure `Deserialize` data, mirroring the
+/// `MeshPeerConfig`/`ReflectorConfig` precedents) lets `bastion-mesh` depend
+/// on the type without depending on `crate::config`. Re-exported here so
+/// `BastionConfig.agent` keeps compiling unchanged.
+pub use bastion_types::AgentConfig;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SessionConfig {

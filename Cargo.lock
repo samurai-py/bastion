@@ -468,6 +468,7 @@ dependencies = [
  "bastion-cognition",
  "bastion-mcp",
  "bastion-memory",
+ "bastion-mesh",
  "bastion-personas",
  "bastion-providers",
  "bastion-runtime",
@@ -587,6 +588,31 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "bastion-mesh"
+version = "0.1.0"
+dependencies = [
+ "age",
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bastion-cognition",
+ "bastion-memory",
+ "bastion-personas",
+ "bastion-runtime",
+ "bastion-types",
+ "chrono",
+ "ed25519-dalek",
+ "opentelemetry",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

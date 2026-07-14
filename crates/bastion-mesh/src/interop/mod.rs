@@ -89,7 +89,6 @@ pub fn check_version(v: u32) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::*;
     use crate::goal::{GoalEngine, ScoringConfig};
     use crate::identity::age_identity::AgeIdentity;
     use crate::memory::sqlite::SqliteMemory;
@@ -190,37 +189,10 @@ mod tests {
         );
         let registry = PersonaRegistry::new_from_map(p_map);
         let identity = AgeIdentity::generate();
-        let config = BastionConfig {
-            agent: AgentConfig {
-                default_model: "test".into(),
-                daily_budget_usd: 0.01,
-                fallback_models: vec![],
-            },
-            session: SessionConfig {
-                db_path: ":memory:".into(),
-                autocompact_threshold: 0.5,
-                keep_last_n: 10,
-            },
-            logging: LoggingConfig {
-                log_path: "/dev/null".into(),
-            },
-            mcp: crate::config::McpConfig {
-                servers: HashMap::new(),
-                tool_call_timeout_secs: 60,
-            },
-            channels: crate::config::ChannelsConfig {
-                telegram: ChannelConfig { enabled: false },
-                webhook: ChannelConfig { enabled: false },
-                whatsapp: None,
-                discord: None,
-                slack: None,
-                email: None,
-                voice: crate::config::VoiceChannelConfig::default(),
-            },
-            mesh: crate::config::MeshConfig::default(),
-            mcp_server: crate::config::McpServerConfig::default(),
-            reflector: crate::config::ReflectorConfig::default(),
-            identity: crate::config::IdentityConfig::default(),
+        let config = crate::types::AgentConfig {
+            default_model: "test".into(),
+            daily_budget_usd: 0.01,
+            fallback_models: vec![],
         };
 
         // --- Export ---

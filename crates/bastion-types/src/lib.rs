@@ -391,6 +391,25 @@ pub struct RouterDecision {
     pub convene_reason: Option<ConveneReason>,
 }
 
+/// Config section for the agent's model/budget settings. Moved here from
+/// `src/config.rs` (M2 step 6) — pure `Deserialize` data referenced by
+/// `bastion-mesh`'s `interop::export::{export_full, export_template}`
+/// (`ConfigBlock::from_config`), which must not depend on the product-level
+/// config module. `src/config.rs` re-exports this under its old path so
+/// `BastionConfig.agent` keeps compiling unchanged.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AgentConfig {
+    pub default_model: String,
+    pub daily_budget_usd: f64,
+    /// D-11: ordered list of model-name strings, using the same naming convention
+    /// `resolve_provider()` (src/provider/registry.rs) already accepts (e.g.
+    /// `"groq/llama-3.1-8b-instant"`, `"gemini-2.0-flash"`). Tried in order when the
+    /// primary provider suffers a hard/persistent failure (SO-03/D-10 rung 3, wired
+    /// in Plan 08-08). Empty = no provider-switching (today's exact behavior).
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
+}
+
 /// A single `[mcp.servers.*]` entry from `bastion.toml`. Moved here from
 /// `src/config.rs` (M2 step 5) — pure `Deserialize` data referenced by
 /// `bastion-mcp`'s `McpClient::connect_from_config`, which must not depend
