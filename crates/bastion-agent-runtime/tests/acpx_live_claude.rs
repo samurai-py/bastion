@@ -100,3 +100,49 @@ async fn acpx_claude_conformance_live() {
     let failed: Vec<_> = results.iter().filter(|(_, r)| r.is_fail()).collect();
     assert!(failed.is_empty(), "conformance failures:\n{report}");
 }
+
+/// Ciclo 2.2 re-validation smoke (A-01 v2 contract review): this adapter's
+/// own coverage didn't change (still honestly `NotResumable`/`HarnessOwned`
+/// — no ResumeSpec/DenyScope behavior to newly exercise here), so a minimal
+/// happy-path re-proof against the v2 contract shape is enough — NOT the
+/// full 14-check sweep (that stays covered by `acpx_claude_conformance_live`
+/// above).
+#[tokio::test]
+#[ignore = "spawns real acpx+claude subprocesses; run manually with --ignored"]
+async fn acpx_v2_happy_path_smoke() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let spec = make_spec(workspace.path().to_path_buf());
+    let runtime = AcpxAgentRuntime::new("claude").expect("acpx on PATH");
+
+    let health = runtime.health().await.expect("health probe");
+    eprintln!("health: {health:?}");
+    assert!(health.ready, "acpx not ready: {health:?}");
+
+    let tiny_scenarios = ConformanceScenarios {
+        happy_path: TaskInput {
+            prompt: "Reply with exactly: ok".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        },
+        never_terminates: TaskInput {
+            prompt: "noop".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        },
+        requests_permission: TaskInput {
+            prompt: "noop".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        },
+        produces_artifact: TaskInput {
+            prompt: "noop".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        },
+        watchdog: Duration::from_secs(30),
+    };
+
+    let result = conformance::check_happy_path(&runtime, &spec, &tiny_scenarios).await;
+    eprintln!("happy_path: {result:?}");
+    assert!(result.is_pass(), "happy_path: {result:?}");
+}

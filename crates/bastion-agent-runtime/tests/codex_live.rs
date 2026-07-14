@@ -198,3 +198,155 @@ async fn codex_conformance_live_approval_bridge() {
          model can route around a single denial via an alternate tool call)"
     );
 }
+
+/// Ciclo 2.2 re-validation smoke (A-01 v2 contract review): minimal,
+/// budget-conscious live proof of the two checks this cycle actually
+/// changed for `CodexAppServerRuntime` — NOT the full 14-check sweep (that
+/// stays covered by `codex_conformance_live_trusted` above).
+///
+/// 1. `happy_path`, re-run against the v2 contract shape.
+/// 2. Genuine `resume()` with a real [`ResumeSpec`] (A-05 §5.6): start a
+///    session, drop it (kills the app-server process via `kill_on_drop`),
+///    resume the same thread id on a brand-new process, submit one more
+///    tiny task on the reattached session, and assert the documented
+///    permission-profile-divergence `Warning` actually fires (Codex's
+///    `thread/resume` protocol has no field for it — see `codex.rs` module
+///    docs).
+#[tokio::test]
+#[ignore = "spawns real codex app-server subprocesses; run manually with --ignored"]
+async fn codex_v2_resume_smoke() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let spec = make_spec(
+        workspace.path().to_path_buf(),
+        vec!["*".to_string()],
+        SandboxProfile::Trusted,
+    );
+    let runtime = CodexAppServerRuntime::new().expect("codex on PATH");
+
+    let health = runtime.health().await.expect("health probe");
+    eprintln!(
+        "health: {health:?} — detected sandbox coverage: {:?}",
+        runtime.descriptor().policy_coverage.sandbox
+    );
+    assert!(health.ready, "codex not ready: {health:?}");
+
+    let tiny_scenarios = ConformanceScenarios {
+        happy_path: TaskInput {
+            prompt: "Reply with exactly: ok".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        },
+        never_terminates: TaskInput {
+            prompt: "noop".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        },
+        requests_permission: TaskInput {
+            prompt: "noop".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        },
+        produces_artifact: TaskInput {
+            prompt: "noop".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        },
+        watchdog: Duration::from_secs(30),
+    };
+
+    let happy = conformance::check_happy_path(&runtime, &spec, &tiny_scenarios).await;
+    eprintln!("happy_path: {happy:?}");
+    assert!(happy.is_pass(), "happy_path: {happy:?}");
+
+    let mut session = runtime
+        .start(spec.clone())
+        .await
+        .expect("start for resume smoke");
+    let handle = session.handle();
+    match tokio::time::timeout(Duration::from_secs(30), session.next_event()).await {
+        Ok(Some(RuntimeEvent::Started { .. })) => {}
+        other => panic!("expected Started first, got {other:?}"),
+    }
+    // Codex only persists a resumable rollout once a turn has actually run
+    // on the thread (verified live: resuming a thread that never submitted
+    // a task fails with "no rollout found for thread id ...") — so this
+    // smoke submits one tiny task and drains it to Ended before dropping.
+    let warm_up = session
+        .submit(TaskInput {
+            prompt: "Reply with exactly: ok".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        })
+        .await
+        .expect("warm-up submit before resume");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), session.next_event())
+            .await
+            .expect("event before watchdog")
+            .expect("event stream open")
+        {
+            RuntimeEvent::Ended { task: t, .. } if t == warm_up => break,
+            _ => {}
+        }
+    }
+    drop(session); // kill_on_drop tears down the app-server process.
+
+    let resume_spec = ResumeSpec {
+        timeout: TimeoutPolicy {
+            per_task: Duration::from_secs(45),
+            idle: Duration::from_secs(90),
+        },
+        permissions: PermissionProfile {
+            allow: vec!["*".to_string()],
+        },
+        env: EnvPolicy { allow: base_env() },
+    };
+    let mut resumed = runtime
+        .resume(&handle, resume_spec)
+        .await
+        .expect("resume with ResumeSpec");
+
+    match tokio::time::timeout(Duration::from_secs(30), resumed.next_event()).await {
+        Ok(Some(RuntimeEvent::Started { .. })) => {}
+        other => panic!("expected Started first on resumed session, got {other:?}"),
+    }
+
+    let task = resumed
+        .submit(TaskInput {
+            prompt: "Reply with exactly: ok".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::Conversation,
+        })
+        .await
+        .expect("submit on resumed session");
+
+    let mut saw_permission_warning = false;
+    let outcome = loop {
+        let evt = tokio::time::timeout(Duration::from_secs(30), resumed.next_event())
+            .await
+            .expect("event before watchdog")
+            .expect("event stream open");
+        match evt {
+            RuntimeEvent::Warning { task: t, code, .. } if t == task => {
+                assert_eq!(
+                    code,
+                    WarnCode::DegradedTransport,
+                    "expected the permission-profile-gap warning to use DegradedTransport"
+                );
+                saw_permission_warning = true;
+            }
+            RuntimeEvent::Ended { task: t, outcome } if t == task => break outcome,
+            _ => {}
+        }
+    };
+    assert_eq!(
+        outcome,
+        TaskOutcome::Success,
+        "the task submitted on the resumed session should complete"
+    );
+    assert!(
+        saw_permission_warning,
+        "resume() with a ResumeSpec must surface the permission-profile gap as a Warning \
+         (codex's thread/resume protocol has no field to carry PermissionProfile)"
+    );
+}

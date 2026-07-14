@@ -301,3 +301,76 @@ this reason.
 `cargo test --workspace` all green as of the A-03/A-04 commits (see
 `crates/bastion-agent-runtime/src/acpx.rs`, `.../codex.rs`, and their
 `#[cfg(test)]` modules — 25 unit tests total, subprocess-free, deterministic).
+
+## 7. v2 re-run (Ciclo 2.2 — contract review closing the 6 findings in §5)
+
+`docs/revamp/A-01-agentruntime-contract.md` was revised (v2) to close all 6
+findings below by actually changing the contract/adapters, not just
+documenting the gap. Re-validated in two passes: the full fake suite (all
+14 checks, must stay 14/14/0), and a **minimal live smoke per adapter**
+(happy path + the one check each adapter's v2 change actually affects) —
+not the full 14-check live sweep again, per parsimony (real tokens/quota).
+
+### 7.1 Fakes — full suite, contract v2
+
+```
+cargo test --test agent_runtime_conformance
+```
+
+**7 passed** (`agent_runtime_conformance_suite_all_pass` — 14/14 checks
+Pass, 0 skip, 0 fail, unchanged from v1 — plus `session_handle_serde_round_trip`,
+`runtime_error_auth_display_never_contains_secret_material`, and the two new
+Ciclo 2.2 acceptance tests: `deny_turn_scope_cancels_the_task` —
+`DenyScope::Turn` genuinely cancels the task (`Ended{Cancelled}` +
+`status()==Cancelled`) — and `deny_instance_scope_leaves_task_completing_normally`
+— `DenyScope::Instance` preserves the pre-v2 behavior).
+
+### 7.2 `CodexAppServerRuntime` — live smoke, contract v2
+
+```
+cargo test -p bastion-agent-runtime --test codex_live codex_v2_resume_smoke -- --ignored --nocapture
+```
+
+| Check | Result |
+|---|---|
+| `health()` sandbox-coverage detection | `SandboxCoverage::None` — probed live (`bwrap --unshare-user ...` fails on this host, no working bubblewrap, exactly the §5.2 finding), NOT the old hardcoded `Partial` |
+| `happy_path` | PASS |
+| `resume()` with real `ResumeSpec` | PASS — start → submit a warm-up task → drain to `Ended` (a rollout must exist before a thread is resumable — a live detail this smoke found: resuming a thread with zero turns fails `NotResumable("no rollout found for thread id ...")`) → drop (kills the process) → `resume(handle, ResumeSpec{timeout, permissions, env})` on a **brand-new** process → genuine reattach → submit one more task → `Ended{Success}` |
+| Permission-profile divergence `Warning` | PASS — the resumed session's first task surfaces `RuntimeEvent::Warning{code: DegradedTransport, ..}` documenting that `ResumeSpec.permissions` could not be threaded through `thread/resume` (protocol takes only a `threadId`) |
+
+**1 passed, 0 failed** (all 3 assertions above are in the one test function).
+
+### 7.3 `AcpxAgentRuntime` × `claude` — live smoke, contract v2
+
+```
+cargo test -p bastion-agent-runtime --test acpx_live_claude acpx_v2_happy_path_smoke -- --ignored --nocapture
+```
+
+This adapter's own coverage didn't change in v2 (still honestly
+`NotResumable`/`HarnessOwned` — no `ResumeSpec`/`DenyScope` behavior newly
+exercised here beyond a compiling signature change), so the smoke is a
+minimal happy-path re-proof against the v2 contract shape.
+
+| Check | Result |
+|---|---|
+| `happy_path` | PASS |
+
+**1 passed, 0 failed.**
+
+### 7.4 Findings closed
+
+| # | A-05 §5 finding | v2 fix | Verified |
+|---|---|---|---|
+| 1 | `WATCHDOG` (5s hardcoded) tight for live cloud adapters | `ConformanceScenarios::watchdog: Duration` (was a crate `const`); live tests now pass 30s | Both live smokes above ran clean with `watchdog: Duration::from_secs(30)` |
+| 2 | Sandbox coverage silently degrades, declared as a static `Partial` | `SandboxCoverage` now detected in `health()`/`start()` (`probe_sandbox_coverage`, real `bwrap --unshare-user` probe); no mechanism → `None`, never optimistic `Partial` | §7.2 — detected `None` live on this host (no working bubblewrap), matching the real host capability instead of a hardcoded guess |
+| 3 | `turn/steer` readiness race | Already mitigated (bounded retry in `CodexSession::steer`); now a stated contract requirement (`RuntimeSession::steer` rustdoc, A-01 §5.3) | Unchanged behavior, just formalized — no new live run needed for this alone |
+| 4 | `turn/interrupt` cancel-vs-timeout ambiguity | Already mitigated (`timed_out_turns` client-side tracking); now a stated contract requirement (`RuntimeEvent::Ended` rustdoc, A-01 §5.4) | Unchanged behavior, just formalized |
+| 5 | `respond_permission(Deny)` gates one tool-call instance, not the model's goal (T4-adjacent) | `PermissionDecision::Deny{scope: DenyScope}` — `DenyScope::Turn` (product default) makes the adapter cancel the task gracefully after denying, closing the alternate-tool-routing gap at the adapter boundary; design owned by `docs/revamp/C2-approval-port-design.md` §3 | Fake: `deny_turn_scope_cancels_the_task` (§7.1). Live: not re-exercised this cycle (the live `codex_conformance_live_approval_bridge` deny path from §3.1 already documents the underlying threat; re-proving `Turn`'s cancel-after-deny live is deferred — cheap on the fake, real tokens/quota live, not required to close this finding since the mechanism is adapter-side and fully covered by the fake) |
+| 6 | `resume()` had no `SessionSpec`, adapter used conservative defaults | `AgentRuntime::resume(&self, handle, spec: ResumeSpec)` — env/timeout genuinely re-applied; permissions surfaced as `Warning` when the protocol can't carry them | §7.2 — live, both the re-apply and the `Warning` |
+
+Gates: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+`cargo test --workspace` all green post-v2 (**570 passed, 5 ignored** — up
+from 568 passed/3 ignored immediately before this cycle's edits; the 5
+ignored are the live-only tests: `acpx_claude_conformance_live`,
+`acpx_v2_happy_path_smoke`, `codex_conformance_live_trusted`,
+`codex_conformance_live_approval_bridge`, `codex_v2_resume_smoke`).
