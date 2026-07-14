@@ -12,8 +12,11 @@ use crate::persona::{Persona, PersonaRegistry};
 use crate::provider::SharedProvider;
 use crate::types::{BastionError, CallConfig, LlmResponse, Message};
 
-/// Stable identifier for a persona within a run.
-pub type PersonaId = String;
+/// `PersonaId` moved to `bastion_types` (M2 step 6) — a zero-cost `String`
+/// alias referenced by `bastion-cognition`'s Cabinet without pulling in this
+/// crate. Re-exported here so every existing `crate::persona::runner::PersonaId`
+/// path keeps compiling.
+pub use bastion_types::PersonaId;
 
 /// Output of a single runner invocation.
 #[derive(Debug)]

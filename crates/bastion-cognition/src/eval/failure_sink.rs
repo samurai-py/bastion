@@ -6,7 +6,11 @@
 //! site's dependency on `crate::eval` is replaced by a dependency on the
 //! `FailureSink` trait (M2 P2).
 
-use crate::agent::ports::FailureSink;
+// M2 step 6: fully-qualified — `crate::agent` in `bastion-cognition` is this
+// crate's own dream/procedural/memory_rag/identity module; the kernel's
+// ports stay in `bastion_runtime::agent`.
+use bastion_runtime::agent::ports::FailureSink;
+
 use crate::eval::capture::{record_failure, FailureKind};
 use crate::memory::PrivacyTier;
 

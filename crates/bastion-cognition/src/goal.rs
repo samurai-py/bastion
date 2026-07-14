@@ -323,9 +323,12 @@ impl GoalEngine {
 }
 
 /// M2 (P4 `GoalPort` port): the loop only ever needs `list_goals` — this is a
-/// pure passthrough to the inherent method, no logic change.
+/// pure passthrough to the inherent method, no logic change. Fully-qualified
+/// (M2 step 6): once this file lives in `bastion-cognition`, `crate::agent`
+/// is this crate's own dream/procedural/memory_rag/identity module, not the
+/// kernel's ports (those stay in `bastion_runtime::agent`).
 #[async_trait::async_trait]
-impl crate::agent::ports::GoalPort for GoalEngine {
+impl bastion_runtime::agent::ports::GoalPort for GoalEngine {
     async fn list_goals(&self, owner_id: &str) -> anyhow::Result<Vec<Goal>> {
         GoalEngine::list_goals(self, owner_id).await
     }

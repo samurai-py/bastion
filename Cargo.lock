@@ -465,6 +465,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bastion-agent-runtime",
+ "bastion-cognition",
  "bastion-mcp",
  "bastion-memory",
  "bastion-providers",
@@ -533,6 +534,25 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "bastion-cognition"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bastion-mcp",
+ "bastion-memory",
+ "bastion-runtime",
+ "bastion-types",
+ "rusqlite",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

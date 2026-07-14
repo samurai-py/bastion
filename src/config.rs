@@ -36,51 +36,16 @@ fn default_sync_interval() -> u64 {
     15
 }
 
-/// Config section for the offline Reflector (LEARN-02/LEARN-05).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ReflectorConfig {
-    /// Hard cost cap per Reflector tick (ADR D-4 "budget duro"). Default: $0.10.
-    #[serde(default = "default_reflector_budget_usd")]
-    pub budget_usd: f64,
-    /// Hours between offline Reflector runs. 0 = disabled (no periodic run). Default: 24.
-    #[serde(default = "default_reflector_interval_hours")]
-    pub interval_hours: u64,
-    /// Cheap/local model id for reflection. None = fall back to `[agent].default_model`
-    /// (never silently default to a fixed paid tier — RESEARCH Assumption A5).
-    pub model: Option<String>,
-    /// Run semantic dedup every N accepted deltas. Default: 10.
-    #[serde(default = "default_dedup_every_n")]
-    pub dedup_every_n: u32,
-    /// Opt-in: allow the Reflector's LLM candidate generation to send the raw daemon
-    /// log tail to a NON-local (cloud) provider. Default: false (deny-on-ambiguity —
-    /// the log tail is treated as LocalOnly, so a cloud Reflector provider is refused
-    /// by the egress chokepoint). Set true ONLY after accepting that log content
-    /// (which may contain LocalOnly context) leaves the node to the configured cloud model.
-    #[serde(default)]
-    pub allow_cloud: bool,
-}
-
-impl Default for ReflectorConfig {
-    fn default() -> Self {
-        Self {
-            budget_usd: default_reflector_budget_usd(),
-            interval_hours: default_reflector_interval_hours(),
-            model: None,
-            dedup_every_n: default_dedup_every_n(),
-            allow_cloud: false,
-        }
-    }
-}
-
-fn default_reflector_budget_usd() -> f64 {
-    0.10
-}
-fn default_reflector_interval_hours() -> u64 {
-    24
-}
-fn default_dedup_every_n() -> u32 {
-    10
-}
+/// `ReflectorConfig` moved to `bastion_cognition::learn` (M2 step 6, V2 fix —
+/// `docs/revamp/M1-ADR-substrate-split.md`): the Reflector already took this
+/// struct as a constructor parameter (never read the global `Config`), so the
+/// only remaining leak was the struct DEFINITION living in this app-level
+/// module while `bastion-cognition::learn` (an extension crate) needed it.
+/// Extensions never read `crate::config` (app format is app-only); the app
+/// parses `bastion.toml`'s `[reflector]` table into `bastion-cognition`'s own
+/// type and re-exports it here under the old path so `BastionConfig.reflector`
+/// keeps compiling unchanged.
+pub use bastion_cognition::learn::ReflectorConfig;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct BastionConfig {

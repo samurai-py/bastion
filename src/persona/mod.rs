@@ -13,22 +13,10 @@ pub use soul::{parse_soul, BastionBlock, PersonaFront};
 use crate::memory::PrivacyTier;
 use std::collections::HashMap;
 
-/// A loaded persona ready for execution.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Persona {
-    /// Canonical persona identifier (matches the directory name / SOUL.md `name` field).
-    pub name: String,
-    /// Human-readable description from SOUL.md `description:`.
-    pub description: Option<String>,
-    /// The markdown body of the SOUL.md — used as the LLM system prompt.
-    pub system_prompt: String,
-    /// Privacy tier: controls which provider backend may process this persona's context.
-    pub tier: PrivacyTier,
-    /// Routing weight — higher-weight personas are preferred by the router for their domain.
-    pub weight: f32,
-    /// Declared skill tags (from SOUL.md `skills:`).
-    pub skills: Vec<String>,
-}
+/// `Persona` moved to `bastion_types` (M2 step 6) — pure data, referenced by
+/// `bastion-cognition`'s Cabinet without pulling in this crate. Re-exported
+/// here so every existing `crate::persona::Persona` path keeps compiling.
+pub use bastion_types::Persona;
 
 /// A registry of all loaded personas, keyed by `name`.
 /// Built at daemon start via `PersonaRegistry::load_dir`.

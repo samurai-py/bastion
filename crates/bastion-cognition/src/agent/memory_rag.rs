@@ -16,7 +16,11 @@
 //! decisão do híbrido: default-on duplicaria a exposição de memória em providers
 //! com function-calling (que já recebem as tools de memória) e cresce o prompt.
 
-use crate::agent::context::{ContextBlock, TurnContextProvider};
+// M2 step 6: fully-qualified — `crate::agent` in `bastion-cognition` is this
+// crate's own dream/procedural/memory_rag/identity module; the kernel's
+// context port stays in `bastion_runtime::agent`.
+use bastion_runtime::agent::context::{ContextBlock, TurnContextProvider};
+
 use crate::memory::{Belief, PrivacyTier, SharedMemory};
 
 /// Máximo de beliefs injetados por turn (após ranking).

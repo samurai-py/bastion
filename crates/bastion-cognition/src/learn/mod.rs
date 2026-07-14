@@ -4,13 +4,64 @@ pub mod dedup;
 pub mod delta;
 
 use crate::capability::registry::{CapabilityRegistry, InvokeCtx};
-use crate::config::ReflectorConfig;
 use crate::memory::{BeliefKind, PrivacyTier, SharedMemory};
 use crate::provider::SharedProvider;
 use crate::types::{CallConfig, Message, MessageContent, Role};
 use delta::DeltaOp;
 use std::sync::Arc;
 use tokio::time::{interval, Duration, MissedTickBehavior};
+
+/// Config section for the offline Reflector (LEARN-02/LEARN-05). Moved here
+/// from `src/config.rs` (M2 step 6, V2 fix — `docs/revamp/M1-ADR-substrate-split.md`):
+/// this crate (an extension) never reads the app's global `bastion.toml`
+/// format directly — the app parses `[reflector]` into this type and injects
+/// it via `Reflector::new`'s constructor param (unchanged). `src/config.rs`
+/// re-exports this under its old path so `BastionConfig.reflector` keeps
+/// compiling unchanged.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ReflectorConfig {
+    /// Hard cost cap per Reflector tick (ADR D-4 "budget duro"). Default: $0.10.
+    #[serde(default = "default_reflector_budget_usd")]
+    pub budget_usd: f64,
+    /// Hours between offline Reflector runs. 0 = disabled (no periodic run). Default: 24.
+    #[serde(default = "default_reflector_interval_hours")]
+    pub interval_hours: u64,
+    /// Cheap/local model id for reflection. None = fall back to `[agent].default_model`
+    /// (never silently default to a fixed paid tier — RESEARCH Assumption A5).
+    pub model: Option<String>,
+    /// Run semantic dedup every N accepted deltas. Default: 10.
+    #[serde(default = "default_dedup_every_n")]
+    pub dedup_every_n: u32,
+    /// Opt-in: allow the Reflector's LLM candidate generation to send the raw daemon
+    /// log tail to a NON-local (cloud) provider. Default: false (deny-on-ambiguity —
+    /// the log tail is treated as LocalOnly, so a cloud Reflector provider is refused
+    /// by the egress chokepoint). Set true ONLY after accepting that log content
+    /// (which may contain LocalOnly context) leaves the node to the configured cloud model.
+    #[serde(default)]
+    pub allow_cloud: bool,
+}
+
+impl Default for ReflectorConfig {
+    fn default() -> Self {
+        Self {
+            budget_usd: default_reflector_budget_usd(),
+            interval_hours: default_reflector_interval_hours(),
+            model: None,
+            dedup_every_n: default_dedup_every_n(),
+            allow_cloud: false,
+        }
+    }
+}
+
+fn default_reflector_budget_usd() -> f64 {
+    0.10
+}
+fn default_reflector_interval_hours() -> u64 {
+    24
+}
+fn default_dedup_every_n() -> u32 {
+    10
+}
 
 // --- Stigmergy (ACO) constants — the pheromone loop the Reflector drives each judged tick ---
 /// Trail decay per reflection cycle (ρ): every judged tick multiplies weights by 1-ρ.
@@ -1288,7 +1339,9 @@ mod tests {
 
     #[tokio::test]
     async fn dedup_never_sends_local_only_belief_content_to_the_embedder() {
-        use crate::capability::DirectFnAdapter;
+        // M2 step 6: see `learn::dedup`'s test-module comment — dev-only edge
+        // onto `bastion-mcp`'s adapter, not a production dependency.
+        use bastion_mcp::adapters::DirectFnAdapter;
         let (_f, mem) = make_memory().await;
         let db = NamedTempFile::new().expect("tempfile");
         let db_path = db.path().to_str().unwrap().to_owned();

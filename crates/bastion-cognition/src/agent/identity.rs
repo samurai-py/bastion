@@ -10,7 +10,11 @@
 //! O bloco de identidade NÃO está em bastion.toml — está na camada de memória.
 //! Editável por conversa: o agente chama memory_revoke(old_id) + memory_store(new_content).
 
-use crate::agent::context::{ContextBlock, TurnContextProvider};
+// M2 step 6: fully-qualified — `crate::agent` in `bastion-cognition` is this
+// crate's own dream/procedural/memory_rag/identity module; the kernel's
+// context port stays in `bastion_runtime::agent`.
+use bastion_runtime::agent::context::{ContextBlock, TurnContextProvider};
+
 use crate::memory::{PrivacyTier, SharedMemory};
 
 /// System prompt de onboarding para o primeiro uso (sem identidade na memória).

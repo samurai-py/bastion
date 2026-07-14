@@ -199,7 +199,15 @@ impl Responder for PersonaResponder {
         let route_text = match decision.mode {
             crate::persona::router::ResponseMode::Cabinet => {
                 // Cabinet path: build_table → deliberate → synthesize (D-07 unified voice + dissent)
-                let table = crate::cabinet::build_table(&self.registry, &decision, None)?;
+                // M2 step 6: `build_table` takes a lookup closure, not `&PersonaRegistry`
+                // directly (see its doc comment) — this crate owns the registry and
+                // resolves names itself, so `bastion-cognition`'s Cabinet never depends
+                // on `bastion-personas`.
+                let table = crate::cabinet::build_table(
+                    |name| self.registry.get(name).cloned(),
+                    &decision,
+                    None,
+                )?;
                 let transcript = crate::cabinet::orchestrator::deliberate(
                     &table,
                     provider.clone(),

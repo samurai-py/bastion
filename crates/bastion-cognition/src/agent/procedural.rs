@@ -12,7 +12,11 @@
 //! procedurais são um entregável de primeira classe da Fase 7 (LEARN-03), não uma
 //! perna experimental do RAG híbrido ainda pendente de decisão (BIG-1).
 
-use crate::agent::context::{ContextBlock, TurnContextProvider};
+// M2 step 6: fully-qualified — `crate::agent` in `bastion-cognition` is this
+// crate's own dream/procedural/memory_rag/identity module; the kernel's
+// context port stays in `bastion_runtime::agent`.
+use bastion_runtime::agent::context::{ContextBlock, TurnContextProvider};
+
 use crate::memory::{Belief, BeliefKind, PrivacyTier, SharedMemory};
 
 /// Máximo de beliefs procedurais injetados por turn (após ranking). Constante

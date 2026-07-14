@@ -16,9 +16,8 @@ use tokio::task::JoinSet;
 
 use crate::cabinet::{CabinetTable, Turn, TurnKind};
 use crate::hooks::egress::check_egress;
-use crate::persona::runner::PersonaId;
 use crate::provider::SharedProvider;
-use crate::types::{CallConfig, Message, MessageContent, Role};
+use crate::types::{CallConfig, Message, MessageContent, PersonaId, Role};
 
 pub const DEFAULT_ROUNDS: u8 = 2;
 pub const MAX_ROUNDS: u8 = 3;
@@ -197,8 +196,8 @@ mod tests {
     use crate::cabinet::{CabinetTable, TurnKind};
     use crate::capability::CapabilityRegistry;
     use crate::memory::PrivacyTier;
-    use crate::persona::Persona;
     use crate::provider::{Provider, SharedProvider};
+    use crate::types::Persona;
     use crate::types::{CallConfig, LlmResponse, Message, TokenUsage};
     use async_trait::async_trait;
     use std::sync::Arc;

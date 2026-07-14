@@ -31,6 +31,7 @@ bastion-memory     = { path = "crates/bastion-memory" }
 bastion-providers  = { path = "crates/bastion-providers" }
 bastion-mcp        = { path = "crates/bastion-mcp" }
 bastion-agent-runtime = { path = "crates/bastion-agent-runtime" }
+bastion-cognition  = { path = "crates/bastion-cognition" }
 tokio              = { version = "1",    features = ["full"] }
 async-openai       = { version = "0.38", features = ["chat-completion"] }
 reqwest            = { version = "0.13", features = ["json", "stream"] }

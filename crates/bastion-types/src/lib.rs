@@ -321,6 +321,76 @@ pub struct CabinetVerdict {
     pub dissents: Vec<Dissent>,
 }
 
+/// Canonical persona identifier — a `String` alias for readability at call
+/// sites (`Turn.persona`, `RunnerOutput` tags). Moved here from
+/// `src/persona/runner.rs` (M2 step 6) — a zero-cost alias referenced by
+/// `bastion-cognition`'s Cabinet (`Turn.persona`, `orchestrator.rs`'s JoinSet
+/// tagging) without pulling in the `bastion-personas` crate. `persona::runner`
+/// re-exports it under the old path.
+pub type PersonaId = String;
+
+/// A loaded persona ready for execution. Moved here from `src/persona/mod.rs`
+/// (M2 step 6) — pure data (no I/O, no registry lookup logic) referenced by
+/// `bastion-cognition`'s Cabinet (`CabinetTable.personas`, `build_table`)
+/// without pulling in the `bastion-personas` crate (which owns `PersonaRegistry`,
+/// the behavior-bearing type `build_table` no longer needs directly — see
+/// `cabinet::build_table`'s `lookup` closure param). `persona::mod` re-exports
+/// this under the old path.
+#[derive(Debug, Clone, Serialize)]
+pub struct Persona {
+    /// Canonical persona identifier (matches the directory name / SOUL.md `name` field).
+    pub name: String,
+    /// Human-readable description from SOUL.md `description:`.
+    pub description: Option<String>,
+    /// The markdown body of the SOUL.md — used as the LLM system prompt.
+    pub system_prompt: String,
+    /// Privacy tier: controls which provider backend may process this persona's context.
+    pub tier: PrivacyTier,
+    /// Routing weight — higher-weight personas are preferred by the router for their domain.
+    pub weight: f32,
+    /// Declared skill tags (from SOUL.md `skills:`).
+    pub skills: Vec<String>,
+}
+
+/// Router mode for a turn — Single/Parallel persona dispatch, or convene the
+/// Cabinet. Moved here from `src/persona/router.rs` (M2 step 6) — pure
+/// `JsonSchema`-deriving data (the router's structured-output schema target)
+/// referenced by `bastion-cognition`'s Cabinet (`build_table`'s `RouterDecision`
+/// param) without pulling in `bastion-personas`. `persona::router` re-exports
+/// it under the old path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseMode {
+    Single,
+    Parallel,
+    Cabinet,
+}
+
+/// Why the Cabinet was convened for this turn (GOAL-04 / D-06). Moved here
+/// from `src/persona/router.rs` (M2 step 6), same rationale as [`ResponseMode`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConveneReason {
+    HighWeight,
+    MultiDomainConflict,
+    GoalImpact,
+    ManualOverride,
+}
+
+/// The router's classification of one turn — VERBATIM from spec §2 / AI-SPEC
+/// §4b. Moved here from `src/persona/router.rs` (M2 step 6), same rationale as
+/// [`ResponseMode`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RouterDecision {
+    /// PersonaId values to invoke.
+    pub personas: Vec<String>,
+    /// OwnerId (MESH-ready, multi-owner-aware).
+    pub owner: String,
+    pub mode: ResponseMode,
+    /// Some(..) only when mode == Cabinet.
+    pub convene_reason: Option<ConveneReason>,
+}
+
 /// A single `[mcp.servers.*]` entry from `bastion.toml`. Moved here from
 /// `src/config.rs` (M2 step 5) — pure `Deserialize` data referenced by
 /// `bastion-mcp`'s `McpClient::connect_from_config`, which must not depend

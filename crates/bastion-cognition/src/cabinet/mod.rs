@@ -12,9 +12,7 @@ pub mod policy;
 pub mod synth;
 
 use crate::memory::PrivacyTier;
-use crate::persona::router::{ConveneReason, RouterDecision};
-use crate::persona::runner::PersonaId;
-use crate::persona::{Persona, PersonaRegistry};
+use crate::types::{ConveneReason, Persona, PersonaId, RouterDecision};
 
 /// The set of personas convened for a single Cabinet deliberation, plus
 /// the resolved tier for this deliberation (may be downgraded by policy::table_tier).
@@ -45,12 +43,27 @@ pub enum TurnKind {
 /// 1. GOAL-04: add the guardian persona when `convene_reason == GoalImpact`.
 /// 2. PRIV-04: resolve effective tier via `policy::table_tier` (D-01, D-02).
 ///
-/// Returns an error if any requested persona is missing from the registry.
-pub fn build_table(
-    registry: &PersonaRegistry,
+/// `lookup` resolves a persona name to its (cloned) `Persona` data — M2 step 6:
+/// this used to take `&PersonaRegistry` directly, but `PersonaRegistry` is a
+/// behavior-bearing type (`load_dir`'s filesystem scan) owned by
+/// `bastion-personas`, and `bastion-personas` depends on `bastion-cognition`
+/// (which owns this Cabinet code) for `PersonaResponder`'s deliberation calls —
+/// a direct `&PersonaRegistry` param here would create a crate cycle. Inverting
+/// to a plain `Fn(&str) -> Option<Persona>` closure lets the one production
+/// caller (`persona::responder::PersonaResponder`, which already owns the
+/// registry) resolve names itself and hand this function only the pure
+/// `Persona` data it actually needs — identical behavior, no registry type
+/// crossing the crate boundary.
+///
+/// Returns an error if any requested persona is missing (`lookup` returns `None`).
+pub fn build_table<F>(
+    lookup: F,
     decision: &RouterDecision,
     guardian_name: Option<&str>,
-) -> anyhow::Result<CabinetTable> {
+) -> anyhow::Result<CabinetTable>
+where
+    F: Fn(&str) -> Option<Persona>,
+{
     let mut names: Vec<String> = decision.personas.clone();
 
     // GOAL-04: include the guardian persona when convene_reason is GoalImpact.
@@ -64,10 +77,8 @@ pub fn build_table(
 
     let mut personas: Vec<Persona> = Vec::with_capacity(names.len());
     for name in &names {
-        let p = registry
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("persona '{}' not found in registry", name))?
-            .clone();
+        let p = lookup(name)
+            .ok_or_else(|| anyhow::anyhow!("persona '{}' not found in registry", name))?;
         personas.push(p);
     }
 
@@ -81,8 +92,7 @@ pub fn build_table(
 mod tests {
     use super::*;
     use crate::memory::PrivacyTier;
-    use crate::persona::router::{ConveneReason, ResponseMode, RouterDecision};
-    use crate::persona::PersonaRegistry;
+    use crate::types::{ConveneReason, ResponseMode, RouterDecision};
     use std::collections::HashMap;
 
     fn make_persona(name: &str, tier: PrivacyTier) -> Persona {
@@ -96,12 +106,16 @@ mod tests {
         }
     }
 
-    fn make_registry(personas: Vec<Persona>) -> PersonaRegistry {
+    /// M2 step 6: a plain `HashMap` fixture stands in for `PersonaRegistry` —
+    /// `build_table` only needs a `Fn(&str) -> Option<Persona>` lookup now
+    /// (see `build_table`'s doc comment), so these tests no longer need
+    /// `bastion-personas`'s registry type at all.
+    fn make_registry(personas: Vec<Persona>) -> HashMap<String, Persona> {
         let mut map = HashMap::new();
         for p in personas {
             map.insert(p.name.clone(), p);
         }
-        PersonaRegistry::new_from_map(map)
+        map
     }
 
     fn cabinet_decision_with_reason(
@@ -123,7 +137,7 @@ mod tests {
             make_persona("Finance", PrivacyTier::CloudOk),
         ]);
         let decision = cabinet_decision_with_reason(&["Aria", "Finance"], None);
-        let table = build_table(&registry, &decision, None).unwrap();
+        let table = build_table(|name| registry.get(name).cloned(), &decision, None).unwrap();
         assert_eq!(table.tier, PrivacyTier::CloudOk);
         assert_eq!(table.personas.len(), 2);
     }
@@ -135,7 +149,7 @@ mod tests {
             make_persona("Saude", PrivacyTier::LocalOnly),
         ]);
         let decision = cabinet_decision_with_reason(&["Aria", "Saude"], None);
-        let table = build_table(&registry, &decision, None).unwrap();
+        let table = build_table(|name| registry.get(name).cloned(), &decision, None).unwrap();
         // PRIV-04: any LocalOnly → whole table LocalOnly
         assert_eq!(table.tier, PrivacyTier::LocalOnly);
     }
@@ -147,7 +161,12 @@ mod tests {
             make_persona("Guardian", PrivacyTier::CloudOk),
         ]);
         let decision = cabinet_decision_with_reason(&["Aria"], Some(ConveneReason::GoalImpact));
-        let table = build_table(&registry, &decision, Some("Guardian")).unwrap();
+        let table = build_table(
+            |name| registry.get(name).cloned(),
+            &decision,
+            Some("Guardian"),
+        )
+        .unwrap();
         // GOAL-04: guardian must be included
         assert!(table.personas.iter().any(|p| p.name == "Guardian"));
         assert_eq!(table.personas.len(), 2);
@@ -162,7 +181,12 @@ mod tests {
         // Guardian already in decision
         let decision =
             cabinet_decision_with_reason(&["Aria", "Guardian"], Some(ConveneReason::GoalImpact));
-        let table = build_table(&registry, &decision, Some("Guardian")).unwrap();
+        let table = build_table(
+            |name| registry.get(name).cloned(),
+            &decision,
+            Some("Guardian"),
+        )
+        .unwrap();
         // Must not be duplicated
         assert_eq!(
             table
@@ -178,6 +202,6 @@ mod tests {
     fn build_table_unknown_persona_errors() {
         let registry = make_registry(vec![make_persona("Aria", PrivacyTier::CloudOk)]);
         let decision = cabinet_decision_with_reason(&["Aria", "Unknown"], None);
-        assert!(build_table(&registry, &decision, None).is_err());
+        assert!(build_table(|name| registry.get(name).cloned(), &decision, None).is_err());
     }
 }

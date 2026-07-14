@@ -105,8 +105,13 @@ pub async fn is_duplicate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::{CapabilityRegistry, DirectFnAdapter, InvokeCtx};
+    use crate::capability::{CapabilityRegistry, InvokeCtx};
     use crate::memory::PrivacyTier;
+    // M2 step 6: `DirectFnAdapter` is an MCP→capability adapter (extracted to
+    // `bastion-mcp` in M2 step 5); this dev-only test fixture is the only
+    // reason this crate touches `bastion-mcp` at all (dev-dependency, not a
+    // production edge).
+    use bastion_mcp::adapters::DirectFnAdapter;
     use std::sync::Arc;
 
     /// Registers a deterministic mock `memory_embed`: any text containing "concise"

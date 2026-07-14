@@ -1,14 +1,16 @@
 pub mod command;
-pub mod dream;
-pub mod identity;
-pub mod memory_rag;
-pub mod procedural;
 pub mod skills;
 
 // M2 step 3b: the kernel agent modules moved to `bastion_runtime::agent`.
 // Re-exported under the old paths so every existing `crate::agent::...` path
 // keeps compiling unchanged.
 pub use bastion_runtime::agent::{compactor, context, handle, loop_, ports};
+
+// M2 step 6: Dream/procedural/memory_rag/identity (cognition-layer SEAM #2
+// context providers + belief distillation) moved to `bastion-cognition`.
+// Re-exported under the old paths so every existing `crate::agent::{dream,
+// identity, memory_rag, procedural}::...` path keeps compiling unchanged.
+pub use bastion_cognition::agent::{dream, identity, memory_rag, procedural};
 
 use crate::memory::SharedMemory;
 

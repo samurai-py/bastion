@@ -16,8 +16,12 @@ impl DreamFlush {
     }
 }
 
+// M2 step 6: fully-qualified (not `crate::agent::ports`) — once this file
+// lives in `bastion-cognition`, `crate::agent` is this crate's OWN dream/
+// procedural/memory_rag/identity module, not the kernel's ports/context
+// (those stay in `bastion_runtime::agent`).
 #[async_trait::async_trait]
-impl crate::agent::ports::PreCompactionFlush for DreamFlush {
+impl bastion_runtime::agent::ports::PreCompactionFlush for DreamFlush {
     async fn flush(&self, history: &[Message], owner: &str) -> anyhow::Result<()> {
         // `memory_flush` logs and swallows its own errors (flush failure must
         // not abort the turn) — identical contract to the old direct call.

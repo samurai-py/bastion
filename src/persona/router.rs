@@ -5,7 +5,7 @@
 // Safe fallback to single persona + review flag on parse exhaustion (CF-2, T-02-09).
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::capability::CapabilityRegistry;
 use crate::persona::PersonaRegistry;
@@ -16,33 +16,12 @@ use crate::types::{CallConfig, Message, MessageContent, Role};
 // RouterDecision types — VERBATIM from spec §2 / AI-SPEC §4b
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ResponseMode {
-    Single,
-    Parallel,
-    Cabinet,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ConveneReason {
-    HighWeight,
-    MultiDomainConflict,
-    GoalImpact,
-    ManualOverride,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RouterDecision {
-    /// PersonaId values to invoke.
-    pub personas: Vec<String>,
-    /// OwnerId (MESH-ready, multi-owner-aware).
-    pub owner: String,
-    pub mode: ResponseMode,
-    /// Some(..) only when mode == Cabinet.
-    pub convene_reason: Option<ConveneReason>,
-}
+/// `ResponseMode`/`ConveneReason`/`RouterDecision` moved to `bastion_types`
+/// (M2 step 6) — pure `JsonSchema`-deriving data referenced by
+/// `bastion-cognition`'s Cabinet (`build_table`) without pulling in this
+/// crate. Re-exported here so every existing `crate::persona::router::...`
+/// path keeps compiling.
+pub use bastion_types::{ConveneReason, ResponseMode, RouterDecision};
 
 /// What the LLM actually decides. `owner` is NOT here — it is contextual and is
 /// injected by `route()` from its caller, never produced by the model. Using this
