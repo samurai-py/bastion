@@ -8,11 +8,13 @@
 >
 > Scorecards below are from live runs against real, host-authenticated
 > harnesses on this dev machine (`acpx 0.12.0`, `claude` Claude Code CLI
-> logged in, `codex-cli 0.144.1` logged in via ChatGPT) on 2026-07-13/14.
-> Reproduce with `cargo test -p bastion-agent-runtime --test <name> --
-> --ignored --nocapture` (tests are `#[ignore]`-gated — they spawn real
-> subprocesses and cost real tokens, so they never run in default
-> `cargo test`).
+> logged in, `codex-cli 0.144.1` logged in via ChatGPT, `opencode 1.17.15`
+> logged in via `opencode auth login`) on 2026-07-13/14. Reproduce with
+> `cargo test -p bastion-agent-runtime --test <name> -- --ignored
+> --nocapture` (tests are `#[ignore]`-gated — they spawn real subprocesses
+> and cost real tokens, so they never run in default `cargo test`; the
+> opencode run in §2A is the one exception that costs zero tokens, see
+> that section for why).
 
 ## 1. Scope actually covered
 
@@ -20,7 +22,7 @@
 |---|---|
 | `claude` via `acpx` (A-04) | **Done** — full run, see §2 |
 | `codex` native app-server (A-03) | **Done** — full run, see §3 |
-| `opencode` via `acpx` (A-04 smoke) | **Unavailable** — needs `opencode auth login`, not set up on this host; the ACP handshake itself worked (`initialize`/`session/new` succeeded), the process just hung on the first prompt waiting for interactive auth. Not a code defect. |
+| `opencode` via `acpx` (A-04 smoke) | **Blocked** — `opencode auth login` is now done on this host, and the underlying transport genuinely works (proven with a raw manual `acpx opencode prompt` call), but the *adapter's* hardcoded `--auth-policy fail` collides with how acpx brokers opencode's auth, so every real live run through `AcpxAgentRuntime` still fails — see §2A. Not the same blocker as before (that was host auth; this is an acpx/adapter interaction), and not a code defect in `opencode` or in acpx's core transport. |
 | `codex` via `acpx` (would complete the 3-way matrix) | **Unavailable** — see §4. `acpx codex ...` genuinely reaches the codex ACP bridge, but every prompt fails with `The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account` (verified with the default model and every explicit `gpt-5.3-codex[*]` variant the bridge advertises) — a login-mode mismatch in the bridge itself, not something a prompt/config change on our side fixes. |
 
 The three-way "same suite, three transports" comparison from A-01 §5.14
@@ -54,6 +56,107 @@ Command: `cargo test -p bastion-agent-runtime --test acpx_live_claude -- --ignor
 earlier runs hit `WATCHDOG`-related timeouts — see §5.1).
 
 ### `PolicyCoverage` declared
+
+```
+tool_visibility: DeclaredOnly
+approvals:       HarnessOwned
+egress:          HarnessOwned
+budget:          Reported
+sandbox:         None
+```
+
+`supports`: `resume=false, steer=false, usage_reporting=true, diff_events=true, permission_bridge=false, concurrent_sessions=true`.
+
+## 2A. `AcpxAgentRuntime` × `opencode` — live scorecard (blocked)
+
+Command: `cargo test -p bastion-agent-runtime --test acpx_live_opencode -- --ignored --nocapture`
+(new test added this cycle; runs the real, unmodified `AcpxAgentRuntime`
+against a real `opencode` process — no mocks, no code changes to the
+adapter).
+
+`opencode auth login` is done on this host (`opencode auth list` shows
+`OpenCode Go`/`OpenAI`/`OpenCode Zen` credentials), which resolves the
+*previous* blocker recorded here (missing host auth). Re-testing surfaced a
+**different, adapter-level** blocker:
+
+`AcpxAgentRuntime::build_prompt_command` (`src/acpx.rs`) unconditionally
+appends `--auth-policy fail` for every wrapped agent. `opencode`'s native
+ACP server (`opencode acp`, spawned by acpx as `npx -y opencode-ai acp`)
+advertises ACP `authMethods: [{"id": "opencode-login", ...}]` on
+`initialize`. acpx tries to match that against its **own** credential
+store (the one it uses to broker auth directly for agents it understands),
+finds nothing — opencode keeps its own, separate
+`~/.local/share/opencode/auth.json` that acpx's matcher doesn't know
+about — and with `--auth-policy fail` aborts the whole invocation with an
+unsolicited, uncorrelated (`"id": null`, no `"method"`) top-level JSON-RPC
+error **before `session/prompt` is ever sent**:
+
+```
+{"jsonrpc":"2.0","id":null,"error":{"code":-32603,
+ "message":"agent advertised auth methods [opencode-login] but no
+ matching credentials found",
+ "data":{"acpxCode":"RUNTIME","detailCode":"AUTH_REQUIRED","origin":"acp", ...}}}
+```
+
+**Proof the underlying pairing is not broken**: the exact same manual
+invocation with `--auth-policy skip` (or no `--auth-policy` flag at all —
+acpx's own CLI default) completes a full turn using the host's already-
+persisted opencode credentials — `session/resume` → `session/prompt` →
+`agent_message_chunk` → `Ended{Success}`, real reply, `$0` cost (opencode's
+own `-free` models were available too, e.g. `opencode/north-mini-code-free`,
+but the default `opencode/big-pickle` used in the working manual run also
+reported `cost: {"amount": 0}`).
+
+`claude` is unaffected by the same hardcoded flag because acpx spawns it
+through a **built-in agent bridge**
+(`@agentclientprotocol/claude-agent-acp`) that never advertises ACP
+`authMethods`, so the credential-matching/abort branch simply never
+triggers for that agent — an acpx-side, per-wrapped-agent inconsistency,
+not something `AcpxAgentRuntime` controls once it hardcodes `fail`.
+
+Because the abort frame has no `"method"` and an `"id"` that never matches
+our own `session/prompt` request id, the private `FrameInterpreter` in
+`src/acpx.rs` doesn't recognize it as anything actionable (by design — it
+only reacts to `session/update` and to responses/errors correlated by id);
+it's silently ignored, the acpx child process then exits, stdout hits EOF,
+and `run_prompt_reader` reports the generic
+`TaskOutcome::Failed { reason: "acpx process ended without a terminal
+frame (crash or premature exit)" }` — never anything auth-specific. **Not
+fixed here** — fixing it means either making `--auth-policy` configurable
+per-agent in `AcpxAgentRuntime`, or teaching `FrameInterpreter` to recognize
+this frame shape, both real adapter changes needing their own impact
+analysis/review, out of scope for filling a conformance-matrix cell.
+
+| Check | Result |
+|---|---|
+| happy_path | FAIL — `expected Success, got Failed { reason: "acpx process ended without a terminal frame (crash or premature exit)" }` |
+| resume | PASS (typed `NotResumable` — agent-independent, same as claude) |
+| steer | PASS (typed `Protocol` — agent-independent, same as claude) |
+| cancel_graceful | PASS — tolerates any terminal state, not just Success; the immediate abort still satisfies it |
+| cancel_kill | PASS — same tolerance |
+| timeout | PASS — same tolerance |
+| queue_or_reject | FAIL — `task_b ended with Failed { reason: "acpx process ended without a terminal frame..." }` |
+| event_ordering_terminal | FAIL — `expected task1 Success, got Failed { reason: "..." }` |
+| artifact_digest | FAIL — `expected Success, got Failed { reason: "..." }` |
+| permission_bridge_allow | SKIP — `policy_coverage.approvals == HarnessOwned` |
+| permission_bridge_deny | SKIP — `policy_coverage.approvals == HarnessOwned` |
+| crash_isolation | SKIP — `FaultInjection::induce_crash` unimplemented |
+| auth_typed | SKIP — `FaultInjection::induce_auth_failure` unimplemented |
+| protocol_garbage | SKIP — `FaultInjection::feed_garbage_frame` unimplemented |
+
+**5 passed, 5 skipped, 4 failed** — reproduced clean; the test file
+(`crates/bastion-agent-runtime/tests/acpx_live_opencode.rs`) asserts on
+this exact result set as a regression lock, so a future fix to the
+`--auth-policy` handling (in either acpx or the adapter) will make the
+assertions fail loudly, signaling that this section needs updating.
+**Zero LLM tokens spent** — the abort happens before `session/prompt` is
+sent, so the whole sweep is a free, deterministic transport-level failure.
+
+### `PolicyCoverage` declared
+
+Identical to §2 (`AcpxAgentRuntime`'s `descriptor()` is not
+agent-parameterized for `policy_coverage`/`supports` — same declaration for
+every wrapped agent):
 
 ```
 tool_visibility: DeclaredOnly
