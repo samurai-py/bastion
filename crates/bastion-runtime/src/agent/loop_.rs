@@ -11,7 +11,7 @@ use crate::memory::SharedMemory;
 use crate::provider::{call_with_retry, SharedProvider};
 use crate::session::SessionManager;
 use crate::types::{
-    BastionError, CallConfig, ContentPart, Message, MessageContent, Role, TokenUsage,
+    BastionError, CallConfig, ContentPart, DenyScope, Message, MessageContent, Role, TokenUsage,
 };
 use opentelemetry::trace::{Span as _, SpanKind, Tracer as _};
 use opentelemetry::{global as otel_global, KeyValue};
@@ -653,6 +653,16 @@ impl AgentLoop {
     ///
     /// Returns the final text answer from the LLM (after all tool rounds complete).
     ///
+    /// Ciclo 2.1 (`docs/revamp/C2-approval-port-design.md` §2/§3, behavior
+    /// change): an `Err(BastionError::ApprovalDenied)` from `invoke()` is a
+    /// structured tool-result error, not a crash of the turn — same handling
+    /// as any other caught error. When its `scope` is `DenyScope::Turn` (the
+    /// product default), every remaining tool call THIS round is skipped
+    /// without dispatching (fail-closed against alternative-tool routing,
+    /// LOOP-REPORT.md #5.5) and the turn ends right after this round with the
+    /// text already produced plus a warning — never propagated as an `Err`
+    /// out of this function.
+    ///
     /// # Arguments
     /// - `history`: mutable session history — updated with assistant+tool messages
     /// - `session_id`: for persistence
@@ -724,9 +734,44 @@ impl AgentLoop {
                     // NEXT round is quarantined (below), independent of the turn-level
                     // `untrusted` flag on `run_turn_for_with_trust`.
                     let mut round_untrusted = false;
+                    // Ciclo 2.1 (§3): set the moment a `DenyScope::Turn` denial fires
+                    // THIS round — every tool call after it is skipped WITHOUT
+                    // dispatching (never even reaching `capability_registry.invoke`),
+                    // closing the "deny one tool, model routes around it via another"
+                    // gap (LOOP-REPORT.md #5.5). Carries the denied capability name
+                    // for the end-of-turn warning below.
+                    let mut turn_denied: Option<String> = None;
 
                     for tc in &tool_calls {
                         tracing::debug!(event = "tool_dispatch", tool = %tc.name);
+
+                        // A prior tool call THIS round already triggered a
+                        // Turn-scoped denial — this call is skipped, not
+                        // dispatched. Still write a paired tool_result (every
+                        // tool_use in this round's assistant message, pushed
+                        // above, needs one) so the persisted history stays
+                        // well-formed for the provider on a later turn.
+                        if let Some(denied_capability) = &turn_denied {
+                            let skip_msg = Message {
+                                role: Role::Tool,
+                                content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                                    tool_use_id: tc.id.clone(),
+                                    content: serde_json::json!({
+                                        "skipped": true,
+                                        "reason": format!(
+                                            "turn ended: approval for '{denied_capability}' was denied"
+                                        ),
+                                    })
+                                    .to_string(),
+                                }]),
+                            };
+                            self.session
+                                .append(session_id, skip_msg.clone(), None)
+                                .await?;
+                            history.push(skip_msg);
+                            continue;
+                        }
+
                         // D-13: route ALL tool calls through capability_registry.invoke.
                         // SEC-01: the approval gate is real now — whether this call queues
                         // is decided entirely by the capability's own needs_approval().
@@ -808,6 +853,23 @@ impl AgentLoop {
                                     // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
                                     tool_span
                                         .set_attribute(KeyValue::new("error.type", e.to_string()));
+                                    // Ciclo 2.1 (§2/§3): a denied approval is a structured
+                                    // error result for the model, NOT a crash of the turn
+                                    // (parity with the egress gate's caught-error handling
+                                    // above) — the tool-loop keeps going for THIS tool call's
+                                    // result the same way it always has. `DenyScope::Turn`
+                                    // additionally records the denial so every REMAINING
+                                    // tool call this round is skipped and the turn ends
+                                    // right after this round (below).
+                                    if let Some(BastionError::ApprovalDenied {
+                                        capability,
+                                        scope,
+                                    }) = e.downcast_ref::<BastionError>()
+                                    {
+                                        if *scope == DenyScope::Turn {
+                                            turn_denied = Some(capability.clone());
+                                        }
+                                    }
                                     (serde_json::json!({"error": e.to_string()}), true)
                                 }
                             }
@@ -857,6 +919,22 @@ impl AgentLoop {
                             .await?;
                         history.push(tool_msg);
                     }
+
+                    // Ciclo 2.1 (§3, DenyScope::Turn — product default): end the
+                    // turn HERE, before any further tool round. Every tool_use in
+                    // this round already has a paired tool_result (real or
+                    // skipped, above) — the persisted history is well-formed for
+                    // a later turn. The answer is the text the model already
+                    // produced this round plus a visible warning: a structured
+                    // "no" to the model/user, never a `BastionError` propagating
+                    // out of `dispatch_tool_loop` as if the turn crashed.
+                    if let Some(denied_capability) = turn_denied {
+                        break Ok(format!(
+                            "{}\n\n[Ação negada: '{denied_capability}' não foi executada — turno encerrado.]",
+                            response.text
+                        ));
+                    }
+
                     rounds += 1;
 
                     // Budget check BEFORE next cloud call (PROV-06)

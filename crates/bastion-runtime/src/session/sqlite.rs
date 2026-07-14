@@ -294,7 +294,16 @@ impl SessionManager {
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&path)?;
 
-            // Enforce role sequence integrity: Tool message must follow Assistant
+            // Enforce role sequence integrity: a Tool message must belong to an
+            // active tool-dispatch sequence — the immediately preceding row must
+            // be either the Assistant message that requested it, or another Tool
+            // result from the SAME round (Ciclo 2.1: `dispatch_tool_loop` appends
+            // one Tool row per `tool_calls` entry, sequentially, for a
+            // multi-tool-call round — e.g. the "denied tool + a skipped-not-executed
+            // tool" pairing DenyScope::Turn produces, `docs/revamp/C2-approval-port-design.md`
+            // §3 — the second and later Tool rows in that same round were
+            // previously and incorrectly rejected as orphaned). Tool after
+            // User/System/nothing is still rejected — unchanged.
             if msg.role == Role::Tool {
                 let mut stmt = conn.prepare(
                     "SELECT role FROM messages WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 1"
@@ -305,7 +314,7 @@ impl SessionManager {
                     .transpose()?;
 
                 match preceding_role.as_deref() {
-                    Some("assistant") => {}, // OK
+                    Some("assistant") | Some("tool") => {}, // OK
                     _ => return Err(anyhow::anyhow!(BastionError::OrphanedToolResult)),
                 }
             }

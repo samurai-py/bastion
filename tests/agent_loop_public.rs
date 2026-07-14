@@ -398,6 +398,194 @@ async fn approval_resolution_resolves_oldest_pending_row_only() {
     assert_eq!(pending[0].capability_name, "action_b");
 }
 
+// --- Ciclo 2.1 (docs/revamp/C2-approval-port-design.md §2/§3): typed
+// ApprovalDenied + DenyScope::Turn ---------------------------------------
+
+/// Acceptance criterion #2: a `DenyScope::Turn` denial (the product default)
+/// must end the tool-loop for the CURRENT round — a second, unrelated,
+/// available tool call in the SAME LLM response must NEVER dispatch. Proves
+/// this at three levels: `cap_b` (the second tool) never runs, the provider
+/// is never asked for a second round (would panic if it were), and the
+/// returned text is `Ok` (a structured result, not a propagated `Err` —
+/// §2's "NÃO como crash do turn").
+#[tokio::test]
+async fn turn_scoped_denial_skips_remaining_tool_calls_and_ends_turn() {
+    use bastion::types::ToolCall;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CapA {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl bastion::capability::Capability for CapA {
+        fn name(&self) -> &str {
+            "cap_a"
+        }
+        fn description(&self) -> &str {
+            "dangerous action a"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| serde_json::json!({}))
+        }
+        fn needs_approval(&self) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &bastion::capability::InvokeCtx,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"ran": "a"}))
+        }
+    }
+
+    struct CapB {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl bastion::capability::Capability for CapB {
+        fn name(&self) -> &str {
+            "cap_b"
+        }
+        fn description(&self) -> &str {
+            "unrelated, always-allowed action b"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| serde_json::json!({}))
+        }
+        async fn invoke(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &bastion::capability::InvokeCtx,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"ran": "b"}))
+        }
+    }
+
+    /// `PersonaResponder::respond` calls `persona::router::route` BEFORE
+    /// dispatching to a persona — it classifies the turn via up to 3
+    /// `provider.complete()` attempts against the SAME provider instance,
+    /// falling back to safe single-persona routing when none parses as valid
+    /// `RouterDecision` JSON (`router.rs`'s CF-2 fallback). This double serves
+    /// both roles: calls 0..=2 return plain, deliberately non-JSON text (so
+    /// routing always falls through to the safe single-persona fallback,
+    /// deterministically), call 3 is the REAL turn's first response
+    /// (tool_calls=[cap_a, cap_b]). Any call beyond that panics — proving the
+    /// tool-loop genuinely ended after round 0 rather than merely skipping
+    /// cap_b for some unrelated reason.
+    struct TwoToolsThenNeverAgain {
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl Provider for TwoToolsThenNeverAgain {
+        async fn complete(&self, _: &[Message], _: &CallConfig) -> anyhow::Result<LlmResponse> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            match n {
+                0..=2 => Ok(LlmResponse {
+                    text: "not valid router json".to_owned(),
+                    tool_calls: None,
+                    usage: TokenUsage::default(),
+                }),
+                3 => Ok(LlmResponse {
+                    text: "calling two tools".to_owned(),
+                    tool_calls: Some(vec![
+                        ToolCall {
+                            id: "1".to_owned(),
+                            name: "cap_a".to_owned(),
+                            arguments: serde_json::json!({}),
+                            extra: None,
+                        },
+                        ToolCall {
+                            id: "2".to_owned(),
+                            name: "cap_b".to_owned(),
+                            arguments: serde_json::json!({}),
+                            extra: None,
+                        },
+                    ]),
+                    usage: TokenUsage::default(),
+                }),
+                _ => panic!(
+                    "a Turn-scoped denial must end the tool-loop — the provider must never \
+                     be asked for a second round of the actual turn"
+                ),
+            }
+        }
+        async fn complete_simple(&self, _: &str) -> anyhow::Result<String> {
+            Ok("s".to_owned())
+        }
+        fn context_limit(&self) -> usize {
+            8192
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_str().unwrap().to_owned();
+    let mut agent = make_loop(&path).await;
+
+    let calls_a = Arc::new(AtomicUsize::new(0));
+    let calls_b = Arc::new(AtomicUsize::new(0));
+    agent
+        .capability_registry
+        .register(Arc::new(CapA {
+            calls: calls_a.clone(),
+        }))
+        .expect("register cap_a");
+    agent
+        .capability_registry
+        .register(Arc::new(CapB {
+            calls: calls_b.clone(),
+        }))
+        .expect("register cap_b");
+
+    // Pre-reject cap_a for owner "alice" with the EXACT args the turn below
+    // will invoke it with (`{}`) — same idempotency hash, so the turn's
+    // invoke() call hits the already-Rejected row instead of freshly queuing.
+    let gate = agent.capability_registry.approval_gate().clone();
+    let outcome = gate
+        .enqueue_or_reuse("alice", "cap_a", &serde_json::json!({}))
+        .await
+        .expect("enqueue cap_a");
+    let id = match outcome {
+        bastion::capability::ApprovalOutcome::NewlyQueued(id) => id,
+        other => panic!("expected NewlyQueued, got {other:?}"),
+    };
+    gate.reject("alice", id).await.expect("reject cap_a");
+
+    agent.provider = Arc::new(RwLock::new(Box::new(TwoToolsThenNeverAgain {
+        calls: AtomicUsize::new(0),
+    }) as Box<dyn Provider>));
+
+    let resp = agent
+        .run_turn_for("do stuff", "alice")
+        .await
+        .expect("a Turn-scoped denial must be a structured Ok result, never a propagated Err");
+
+    assert_eq!(
+        calls_a.load(Ordering::SeqCst),
+        0,
+        "the denied capability must never dispatch"
+    );
+    assert_eq!(
+        calls_b.load(Ordering::SeqCst),
+        0,
+        "the SECOND tool must never execute once a Turn-scoped denial fires this round"
+    );
+    assert!(
+        resp.contains("calling two tools"),
+        "the turn's answer must be the text already produced this round, plus a warning; got: {resp:?}"
+    );
+}
+
 #[tokio::test]
 async fn run_turn_contestation_phrase_revokes_belief() {
     let f = NamedTempFile::new().unwrap();

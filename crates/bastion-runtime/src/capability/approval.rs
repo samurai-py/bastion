@@ -24,7 +24,7 @@
 //! replaces the old `Option::None` "no queue wired" state.
 
 use crate::agent::ports::ApprovalGate;
-pub use bastion_types::{ApprovalOutcome, ApprovalRow, ApprovalStatus};
+pub use bastion_types::{ApprovalOutcome, ApprovalRow, ApprovalStatus, DenyScope};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -81,12 +81,32 @@ fn read_row_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<ApprovalR
 }
 
 /// Translate an existing row's state into the outcome `enqueue_or_reuse` should
-/// report. NOTE: a `Rejected`/`Expired` row currently reports `AlreadyPending`
-/// (i.e. "do not dispatch") — there is no dedicated outcome variant for those
-/// terminal-but-not-executed states in this plan's scope; the safe behavior
-/// (never dispatch) is preserved either way. A future plan (11-04, NL-intercept
-/// resolution) may want to distinguish them explicitly.
-fn outcome_for_existing_row(row: ApprovalRow) -> anyhow::Result<ApprovalOutcome> {
+/// report.
+///
+/// Ciclo 2.1 (behavior change, `docs/revamp/C2-approval-port-design.md` §2): a
+/// `Rejected` row now surfaces as `ApprovalOutcome::Rejected(DenyScope::Turn)`
+/// — never the same `AlreadyPending` outcome an undecided row reports. The
+/// FIRST time this happens for a given row, the row is atomically consumed
+/// into the SAME terminal "resolved and done" state `record_executed` already
+/// uses (`executed_at`/`result_json`) — reusing the row's EXISTING lifecycle
+/// mechanism (D-03 idempotent-resume) rather than inventing a new column or
+/// status. This is what keeps a denied action from becoming an unbounded
+/// stream of fresh `Err`s on every later identical call: the second (and
+/// every subsequent) `enqueue_or_reuse` for this hash hits the
+/// `executed_at.is_some()` branch above and returns
+/// `Ok(AlreadyExecuted(denial_marker))` — the same idempotent-resume contract
+/// a real dispatch's cached result already gets, applied uniformly to a
+/// denial. `status` stays `'rejected'` forever (never rewritten to look
+/// "executed") and `resolved_at` is untouched — the audit trail (who
+/// rejected it, when) is fully preserved; only `executed_at`/`result_json`
+/// record that the denial was SIGNALED once. `DenyScope::Turn` is the
+/// product default (§3) — the kernel tool-loop ends the turn on this Err,
+/// which is the OTHER half of what prevents an in-turn retry loop.
+///
+/// `Expired` is unreached in production today (no code path ever sets
+/// `status='expired'`) and is left mapping to `AlreadyPending`, unchanged —
+/// out of this cycle's scope.
+fn outcome_for_existing_row(tx: &Connection, row: ApprovalRow) -> anyhow::Result<ApprovalOutcome> {
     if row.executed_at.is_some() {
         let cached: Value = match row.result_json.as_deref() {
             Some(s) => serde_json::from_str(s)?,
@@ -96,6 +116,18 @@ fn outcome_for_existing_row(row: ApprovalRow) -> anyhow::Result<ApprovalOutcome>
     }
     if row.status == ApprovalStatus::Approved {
         return Ok(ApprovalOutcome::ApprovedPendingExecution(row.id));
+    }
+    if row.status == ApprovalStatus::Rejected {
+        let marker = serde_json::json!({
+            "approval_denied": true,
+            "capability": row.capability_name,
+        });
+        let now = now_nanos();
+        tx.execute(
+            "UPDATE approval_queue SET executed_at = ?2, result_json = ?3 WHERE id = ?1",
+            rusqlite::params![row.id, now, marker.to_string()],
+        )?;
+        return Ok(ApprovalOutcome::Rejected(DenyScope::Turn));
     }
     Ok(ApprovalOutcome::AlreadyPending)
 }
@@ -160,7 +192,7 @@ impl ApprovalGate for SqliteApprovalGate {
             let tx = conn.transaction()?;
 
             if let Some(row) = read_row_by_hash(&tx, &hash)? {
-                let outcome = outcome_for_existing_row(row)?;
+                let outcome = outcome_for_existing_row(&tx, row)?;
                 tx.commit()?;
                 return Ok(outcome);
             }
@@ -191,7 +223,7 @@ impl ApprovalGate for SqliteApprovalGate {
                             "approval_queue row vanished after a UNIQUE constraint race on hash {hash}"
                         )
                     })?;
-                    let outcome = outcome_for_existing_row(row)?;
+                    let outcome = outcome_for_existing_row(&tx, row)?;
                     tx.commit()?;
                     Ok(outcome)
                 }
@@ -498,5 +530,89 @@ mod tests {
 
         let bob_pending = queue.pending_for_owner("bob").await.unwrap();
         assert_eq!(bob_pending.len(), 1);
+    }
+
+    // --- Ciclo 2.1 (docs/revamp/C2-approval-port-design.md §2): typed
+    // rejection + one-time consumption ---------------------------------
+
+    #[tokio::test]
+    async fn rejected_row_surfaces_rejected_turn_once_then_already_executed() {
+        let (_f, queue) = make_queue().await;
+        let args = serde_json::json!({});
+        let outcome = queue
+            .enqueue_or_reuse("alice", "cap_a", &args)
+            .await
+            .unwrap();
+        let id = match outcome {
+            ApprovalOutcome::NewlyQueued(id) => id,
+            other => panic!("expected NewlyQueued, got {other:?}"),
+        };
+        queue.reject("alice", id).await.unwrap();
+
+        // First re-invoke after reject: typed Rejected(Turn) — this is the
+        // signal `CapabilityRegistry::invoke` turns into `Err(ApprovalDenied)`.
+        let first = queue
+            .enqueue_or_reuse("alice", "cap_a", &args)
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, ApprovalOutcome::Rejected(DenyScope::Turn)),
+            "a freshly-rejected row must surface as Rejected(Turn), not AlreadyPending; got {first:?}"
+        );
+
+        // Second re-invoke: the row was consumed into the SAME terminal state
+        // `record_executed` uses — never an unbounded stream of fresh Errs for
+        // the identical (owner, capability, args) triple.
+        let second = queue
+            .enqueue_or_reuse("alice", "cap_a", &args)
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, ApprovalOutcome::AlreadyExecuted(_)),
+            "a Rejected row must be consumed after signaling once — got {second:?}"
+        );
+        if let ApprovalOutcome::AlreadyExecuted(marker) = second {
+            assert_eq!(marker["approval_denied"], serde_json::json!(true));
+            assert_eq!(marker["capability"], serde_json::json!("cap_a"));
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_row_status_and_resolved_at_are_preserved_after_consumption() {
+        let (_f, queue) = make_queue().await;
+        let path = queue.db_path.clone();
+        let args = serde_json::json!({});
+        let outcome = queue
+            .enqueue_or_reuse("alice", "cap_a", &args)
+            .await
+            .unwrap();
+        let id = match outcome {
+            ApprovalOutcome::NewlyQueued(id) => id,
+            other => panic!("expected NewlyQueued, got {other:?}"),
+        };
+        queue.reject("alice", id).await.unwrap();
+        // Consume the denial signal (mirrors what a real invoke() does).
+        let _ = queue
+            .enqueue_or_reuse("alice", "cap_a", &args)
+            .await
+            .unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let row = read_row_by_id(&conn, id).unwrap().expect("row must exist");
+        assert_eq!(
+            row.status,
+            ApprovalStatus::Rejected,
+            "status must stay 'rejected' forever — auditing who rejected it must never be \
+             overwritten to look like a normal execution"
+        );
+        assert!(
+            row.resolved_at.is_some(),
+            "resolved_at (set by reject()) must be preserved"
+        );
+        assert!(
+            row.executed_at.is_some(),
+            "executed_at is now set — this is the consumption marker, not a claim the \
+             capability actually ran"
+        );
     }
 }

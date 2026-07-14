@@ -498,6 +498,26 @@ pub struct ApprovalRow {
     pub executed_at: Option<i64>,
 }
 
+/// Scope of a denied approval (Ciclo 2.1, `docs/revamp/C2-approval-port-design.md`
+/// §3 — `docs/revamp/LOOP-REPORT.md` finding #5.5): denying a single tool-call
+/// does not stop a capable model from reaching the same intent through a
+/// different, ungated tool. `Turn` closes that gap fail-closed; `Instance` is
+/// reserved for a future "deny just this one" UX (not wired to any producer
+/// in this cycle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenyScope {
+    /// Deny only this specific invocation — the tool-loop continues normally,
+    /// exactly like every other per-call error the loop already catches and
+    /// reports to the model as a tool result.
+    Instance,
+    /// Deny AND end the tool-loop for this turn — fail-closed against
+    /// alternative-tool routing. The turn ends with whatever text the model
+    /// already produced this round, plus a warning. Product default (§3):
+    /// a user who denies one action almost never wants the same intent
+    /// carried out through a different tool in the same turn.
+    Turn,
+}
+
 /// Disposition returned by an [`ApprovalGate`](../../bastion_runtime/agent/ports/trait.ApprovalGate.html)'s
 /// `enqueue_or_reuse` — always the full state, never a bare bool, so
 /// `CapabilityRegistry::invoke()` knows exactly what to do next. Moved here
@@ -517,6 +537,12 @@ pub enum ApprovalOutcome {
     ApprovedPendingExecution(i64),
     /// A brand-new row was inserted. Do not dispatch — awaiting owner approval.
     NewlyQueued(i64),
+    /// The owner explicitly rejected this row (Ciclo 2.1 — behavior change,
+    /// `docs/revamp/C2-approval-port-design.md` §2): callers must surface
+    /// this as `Err(BastionError::ApprovalDenied)`, never the same
+    /// `Ok({awaiting_approval: true})` shape `AlreadyPending`/`NewlyQueued`
+    /// produce. Carries the scope the tool-loop must enforce.
+    Rejected(DenyScope),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -536,6 +562,19 @@ pub enum BastionError {
     OrphanedToolResult,
     #[error("Privacy egress blocked: local-only context bound for non-Ollama provider")]
     PrivacyEgressBlocked,
+    /// SEC-01 approval explicitly denied by the owner (Ciclo 2.1 — behavior
+    /// change, `docs/revamp/C2-approval-port-design.md` §2). Deliberate
+    /// symmetry with `PrivacyEgressBlocked`: callers `downcast_ref::<BastionError>()`
+    /// to distinguish "denied" from every other error, exactly like the
+    /// egress gate's caught-error. `scope` decides how the kernel tool-loop
+    /// reacts — `DenyScope::Instance` reports this as a per-call tool-result
+    /// error and continues the round; `DenyScope::Turn` (the product
+    /// default, §3) additionally ends the tool-loop for this turn.
+    #[error("Approval denied for capability '{capability}'")]
+    ApprovalDenied {
+        capability: String,
+        scope: DenyScope,
+    },
     /// Input guardrail rejection — structural input check failed (HOOK-02).
     /// Carries a detail string for logging; MUST NOT be echoed to the client.
     #[error("Input guardrail rejected: {0}")]

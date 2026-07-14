@@ -10,16 +10,18 @@
 //!    block the kernel concatenates without interpreting (SEAM #2).
 //! 2. **A custom capability, registered through the public
 //!    `CapabilityRegistry` API** — no fork of the registry, no product code.
-//! 3. **An authorization policy that denies an action** — the host marks its
-//!    capability `needs_approval() == true` (a typed property) and rejects
-//!    the queued row through the real `ApprovalQueue::reject`. Writing this
-//!    surfaced a REAL API gap: the denial never reaches `invoke()`'s caller
-//!    as an `Err` (typed or otherwise) — see the `KNOWN API GAP` comment on
-//!    `demonstrate_denied_capability` below, the most valuable output of
-//!    this example.
+//! 3. **An authorization policy that denies an action, through the host's OWN
+//!    `ApprovalGate`** — Ciclo 2.1 (`docs/revamp/C2-approval-port-design.md`)
+//!    closed the API gap M3 found here (`AgentLoop::new` used to hardwire its
+//!    own SQLite queue with no opt-out, and a denial was indistinguishable
+//!    from "still pending"): the host now injects `ThresholdDenyGate` — its
+//!    OWN `ApprovalGate` impl, no SQLite at all — into `AgentLoop::new`, and
+//!    observes a typed `Err(BastionError::ApprovalDenied)` from `invoke()`.
+//!    See `demonstrate_denied_capability` below.
 //!
-//! Fully offline (mock provider, temp-dir SQLite). `cargo run -p
-//! embedded-host` exits 0.
+//! Fully offline (mock provider, temp-dir SQLite for session/memory only —
+//! the approval gate itself needs no database). `cargo run -p embedded-host`
+//! exits 0.
 
 use std::sync::Arc;
 
@@ -29,15 +31,14 @@ use bastion_memory::{Memory, SharedMemory};
 use bastion_runtime::agent::context::{ContextBlock, TurnContextProvider};
 use bastion_runtime::agent::loop_::{AgentLoop, DEFAULT_OWNER};
 use bastion_runtime::agent::ports::{
-    FailureSink, ProviderResolver, RespondOutcome, Responder, ToolSource, TurnContext,
+    ApprovalGate, FailureSink, ProviderResolver, RespondOutcome, Responder, ToolSource, TurnContext,
 };
-use bastion_runtime::capability::approval::SqliteApprovalGate;
 use bastion_runtime::capability::{Capability, InvokeCtx};
 use bastion_runtime::memory::PrivacyTier;
 use bastion_runtime::provider::{Provider, SharedProvider};
 use bastion_runtime::session::SessionManager;
 use bastion_runtime::types::{CallConfig, LlmResponse, Message, TokenUsage};
-use bastion_types::FailureKind;
+use bastion_types::{ApprovalOutcome, ApprovalRow, BastionError, DenyScope, FailureKind};
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
@@ -104,10 +105,73 @@ impl Capability for WireTransferCapability {
         args: serde_json::Value,
         _ctx: &InvokeCtx,
     ) -> anyhow::Result<serde_json::Value> {
-        // Never reached in this example — the action is queued by Policy 2 and
-        // then rejected, so dispatch never happens
-        // (see `demonstrate_denied_capability`).
+        // Never reached in this example — the host's ThresholdDenyGate denies
+        // the amount used below before dispatch, so this never runs (see
+        // `demonstrate_denied_capability`).
         Ok(serde_json::json!({"transferred": args}))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3. The host's OWN authorization policy — a custom `ApprovalGate`, no
+// SQLite at all (Ciclo 2.1, docs/revamp/C2-approval-port-design.md §1).
+// ---------------------------------------------------------------------------
+
+/// A minimal, in-memory authorization policy: denies any capability whose
+/// `args.amount` exceeds `threshold`, resolved SYNCHRONOUSLY on the very
+/// first call — no queue round-trip needed. This is exactly the second
+/// authorization mechanism M3-CLOSE found this API had no lever for:
+/// `ApprovalQueue` used to be a concrete SQLite struct, not a trait, so the
+/// only lever available was reject()-ing an already-queued row. Now a host
+/// implements its own decision logic against the `ApprovalGate` port
+/// directly.
+///
+/// The non-`enqueue_or_reuse` methods are unreachable from
+/// `CapabilityRegistry::invoke`'s Policy 2 for a capability this gate always
+/// resolves synchronously (no row is ever queued, approved, or replayed) —
+/// they fail loudly rather than silently no-opping if that assumption ever
+/// changes.
+struct ThresholdDenyGate {
+    threshold: i64,
+}
+
+#[async_trait]
+impl ApprovalGate for ThresholdDenyGate {
+    async fn enqueue_or_reuse(
+        &self,
+        _owner_id: &str,
+        capability_name: &str,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<ApprovalOutcome> {
+        let amount = args.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+        if amount > self.threshold {
+            // Ciclo 2.1 §3: `DenyScope::Turn` — the product default. A host
+            // that wants "deny just this one" instead would return
+            // `DenyScope::Instance`.
+            return Ok(ApprovalOutcome::Rejected(DenyScope::Turn));
+        }
+        anyhow::bail!(
+            "ThresholdDenyGate only demonstrates denial in this example — \
+             capability '{capability_name}' under the threshold has no defined behavior"
+        );
+    }
+
+    async fn pending_for_owner(&self, _owner_id: &str) -> anyhow::Result<Vec<ApprovalRow>> {
+        Ok(Vec::new())
+    }
+
+    async fn approve(&self, _owner_id: &str, id: i64) -> anyhow::Result<ApprovalRow> {
+        anyhow::bail!("ThresholdDenyGate resolves synchronously — no queued row {id} to approve")
+    }
+
+    async fn reject(&self, _owner_id: &str, id: i64) -> anyhow::Result<()> {
+        anyhow::bail!("ThresholdDenyGate resolves synchronously — no queued row {id} to reject")
+    }
+
+    async fn record_executed(&self, id: i64, _result: &serde_json::Value) -> anyhow::Result<()> {
+        anyhow::bail!(
+            "ThresholdDenyGate resolves synchronously — no queued row {id} to record executed"
+        )
     }
 }
 
@@ -220,39 +284,20 @@ async fn demonstrate_opaque_context(agent: &AgentLoop) {
 
 /// Proves the host's own capability is reachable through the SAME public
 /// `CapabilityRegistry::invoke` every kernel-internal capability uses — no
-/// forked dispatch path. Then tries to express the host's authorization
-/// POLICY of denying this specific action.
+/// forked dispatch path — and that the host's OWN authorization policy
+/// (`ThresholdDenyGate`, injected into `AgentLoop::new` in `main()` below,
+/// no SQLite involved) can deny it with a typed `Err`.
 ///
-/// KNOWN API GAP (M3 finding — this is the most valuable output of this
-/// example, report it precisely): the task this example was written for
-/// asked for "a custom approval policy that denies an action and shows a
-/// typed `Err`". That is not buildable against today's public API, for two
-/// separate reasons discovered while writing this function:
-///
-/// 1. **No opt-out, so "no queue" isn't reachable through `AgentLoop` at
-///    all.** `AgentLoop::new` (`crates/bastion-runtime/src/agent/loop_.rs`)
-///    unconditionally constructs `CapabilityRegistry::new().with_approval_queue(
-///    Arc::new(ApprovalQueue::new(db_path)))` — there is no constructor
-///    parameter to opt out or inject an alternative. So `agent.capability_registry`
-///    ALWAYS has a live queue; a host using `AgentLoop` (the only public entry
-///    point for a full turn) can never reach the fail-closed `None => bail!`
-///    branch of Policy 2 that denies unconditionally when no queue is wired
-///    (that branch only fires against a bare, standalone `CapabilityRegistry::new()`
-///    built outside `AgentLoop` entirely — not what an embedding host that
-///    wants a full turn would build).
-/// 2. **Given a queue always exists, there is no injectable decision port
-///    either** — `ApprovalQueue` (`crates/bastion-runtime/src/capability/approval.rs`)
-///    is a concrete SQLite-backed struct, not a trait. A host's only lever is
-///    to call the real `.reject(owner, id)` on a pending row. This function
-///    does exactly that — and the result is the actual gap: calling
-///    `invoke()` again for the SAME (owner, capability, args) after an
-///    explicit reject does **not** return `Err`. `outcome_for_existing_row`
-///    (`approval.rs`) maps a `Rejected` row to `ApprovalOutcome::AlreadyPending`
-///    — bit-for-bit the same outcome as a still-undecided row — so a
-///    rejected action is indistinguishable from a pending one to `invoke()`'s
-///    caller. There is no `ApprovalOutcome::Rejected` surfaced at all, typed
-///    or otherwise. An embedding host cannot express (or observe) "this
-///    action was denied" through this API today — only "not yet approved".
+/// RESOLVED (Ciclo 2.1, `docs/revamp/C2-approval-port-design.md`): this used
+/// to document a real API gap found while writing this example — `AgentLoop::new`
+/// hardwired its own SQLite `ApprovalQueue` with no opt-out, and even the
+/// only available lever (`.reject(owner, id)` on an already-queued row)
+/// produced no observable signal: a rejected row mapped to the SAME
+/// `Ok({awaiting_approval: true})` outcome as a still-undecided one. Both are
+/// closed now: `AgentLoop::new` takes an injected `Arc<dyn ApprovalGate>`
+/// (this example's `ThresholdDenyGate`, not `SqliteApprovalGate` — no queue,
+/// no database, entirely the host's own in-memory policy), and a denial
+/// surfaces as `Err(BastionError::ApprovalDenied { capability, scope })`.
 async fn demonstrate_denied_capability(agent: &mut AgentLoop) {
     agent
         .capability_registry
@@ -263,58 +308,37 @@ async fn demonstrate_denied_capability(agent: &mut AgentLoop) {
         owner: DEFAULT_OWNER.to_string(),
         privacy_tier: Some(PrivacyTier::CloudOk),
     };
-    let args = serde_json::json!({"amount": 100});
+    // Over the host's ThresholdDenyGate threshold (100) — denied synchronously,
+    // no queue round-trip.
+    let args = serde_json::json!({"amount": 999});
 
-    // First call: AgentLoop's always-wired queue enqueues it — Ok, not Err.
-    let first = agent
-        .capability_registry
-        .invoke("wire_transfer", args.clone(), &ctx)
-        .await
-        .expect("a freshly wired queue enqueues, it does not error");
-    assert_eq!(
-        first.data["awaiting_approval"],
-        serde_json::json!(true),
-        "unexpected first-call shape: {:?}",
-        first.data
-    );
-
-    // The host's authorization policy decides to DENY this specific action
-    // (e.g. "amount over threshold") via the only lever available: reject
-    // the now-pending row on the queue `AgentLoop` already wired.
-    let queue = agent.capability_registry.approval_gate().clone();
-    let pending = queue
-        .pending_for_owner(DEFAULT_OWNER)
-        .await
-        .expect("read pending rows");
-    let row = pending
-        .iter()
-        .find(|r| r.capability_name == "wire_transfer")
-        .expect("the row we just enqueued must be pending");
-    queue
-        .reject(DEFAULT_OWNER, row.id)
-        .await
-        .expect("reject the pending row");
-
-    // THE GAP: invoking the SAME action again after an explicit reject does
-    // NOT return Err — it returns the identical Ok(awaiting_approval: true)
-    // as before the reject. A host cannot observe "denied" through invoke().
-    let second = agent
+    let err = agent
         .capability_registry
         .invoke("wire_transfer", args, &ctx)
         .await
-        .expect("this does not error today — that IS the gap");
-    assert_eq!(
-        second.data["awaiting_approval"],
-        serde_json::json!(true),
-        "if this ever changes, the API gap documented above has been closed \
-         upstream — update this example and its doc comment"
-    );
-    println!(
-        "[2/3] wire_transfer rejected via ApprovalQueue::reject, but a subsequent \
-         invoke() still returns Ok({:?}) — no typed (or untyped) Err reaches the \
-         caller for a denied action; see the API gap documented above",
-        second.data
-    );
+        .expect_err(
+            "the host's ThresholdDenyGate denies amounts over its threshold — \
+             invoke() must return Err, never Ok({awaiting_approval: true})",
+        );
+
+    match err.downcast_ref::<BastionError>() {
+        Some(BastionError::ApprovalDenied { capability, scope }) => {
+            assert_eq!(capability, "wire_transfer");
+            assert_eq!(
+                *scope,
+                DenyScope::Turn,
+                "ThresholdDenyGate returns the product default scope"
+            );
+            println!(
+                "[2/3] wire_transfer denied by the host's own ApprovalGate \
+                 (ThresholdDenyGate, no SQLite) — invoke() returned a typed \
+                 Err(BastionError::ApprovalDenied{{capability: {capability:?}, scope: {scope:?}}})"
+            );
+        }
+        other => {
+            panic!("expected Err(BastionError::ApprovalDenied), got: {other:?} (display: {err})")
+        }
+    }
 }
 
 #[tokio::main]
@@ -347,7 +371,10 @@ async fn main() -> anyhow::Result<()> {
         memory,
         None,
         vec![],
-        Arc::new(SqliteApprovalGate::new(db_path.clone())),
+        // The host's OWN authorization policy (Ciclo 2.1) — no SQLite queue,
+        // no product code, just an `Arc<dyn ApprovalGate>` this example
+        // built itself. Denies any `amount` over 100 (see `ThresholdDenyGate`).
+        Arc::new(ThresholdDenyGate { threshold: 100 }),
         Arc::new(NoopFailureSink),
         // The seam a second consumer uses to inject its own authoritative
         // context — no patch to the kernel, just a `Box<dyn TurnContextProvider>`.

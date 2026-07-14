@@ -2,7 +2,7 @@ use crate::agent::ports::ApprovalGate;
 use crate::capability::approval::NullApprovalGate;
 use crate::memory::PrivacyTier;
 use async_trait::async_trait;
-use bastion_types::ApprovalOutcome;
+use bastion_types::{ApprovalOutcome, BastionError};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -222,16 +222,21 @@ impl CapabilityRegistry {
     ///
     /// Policy order:
     /// 1. Egress check — fail-closed on LocalOnly or None tier for non-local adapters
-    /// 2. Approval gate (SEC-01) — if `cap.needs_approval()`, gate on the real
-    ///    `ApprovalQueue` (queue/idempotent-resume/cache), or fail-closed deny if
-    ///    no queue is wired
+    /// 2. Approval gate (SEC-01) — if `cap.needs_approval()`, gate on the wired
+    ///    `ApprovalGate` (queue/idempotent-resume/cache/typed-deny), or fail-closed
+    ///    deny if only the default `NullApprovalGate` is wired
     /// 3. Dispatch to capability adapter
     ///
-    /// SEC-04 (spotlighting): every return path wraps its `Value` in a
+    /// SEC-04 (spotlighting): every Ok return path wraps its `Value` in a
     /// `TaggedValue{data, source, trusted}` — computed ONCE here from
     /// `cap.is_trusted()` — including the approval-gate early-returns above
     /// (Policy 2's `AlreadyExecuted`/`awaiting_approval` branches), so every
-    /// exit from `invoke()` produces the new type consistently.
+    /// Ok exit from `invoke()` produces the new type consistently. Ciclo 2.1
+    /// (behavior change, `docs/revamp/C2-approval-port-design.md` §2): a
+    /// `Rejected` outcome is the one Policy-2 branch that does NOT produce a
+    /// `TaggedValue` — it returns `Err(BastionError::ApprovalDenied)` instead,
+    /// mirroring Policy 1's own `Err` shape (never a disguised-as-success
+    /// `Ok({awaiting_approval: true})`).
     pub async fn invoke(
         &self,
         name: &str,
@@ -297,6 +302,21 @@ impl CapabilityRegistry {
                         source: name.to_owned(),
                         trusted: cap.is_trusted(),
                     })
+                }
+                // Ciclo 2.1 (behavior change, §2): the owner explicitly
+                // rejected this action. Typed `Err` — never the ambiguous
+                // `Ok({awaiting_approval: true})` a still-undecided row gets.
+                // `scope` travels with the error so the kernel tool-loop
+                // (never this registry — a single-invocation policy boundary
+                // has no notion of "the rest of the turn") can decide whether
+                // to end the turn (`DenyScope::Turn`, product default) or
+                // treat this as a per-call error and continue
+                // (`DenyScope::Instance`).
+                ApprovalOutcome::Rejected(scope) => {
+                    Err(anyhow::anyhow!(BastionError::ApprovalDenied {
+                        capability: name.to_owned(),
+                        scope,
+                    }))
                 }
             };
         }
