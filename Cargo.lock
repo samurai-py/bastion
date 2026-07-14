@@ -468,6 +468,7 @@ dependencies = [
  "bastion-cognition",
  "bastion-mcp",
  "bastion-memory",
+ "bastion-personas",
  "bastion-providers",
  "bastion-runtime",
  "bastion-types",
@@ -586,6 +587,25 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "bastion-personas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bastion-cognition",
+ "bastion-memory",
+ "bastion-runtime",
+ "bastion-types",
+ "opentelemetry",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
