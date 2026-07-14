@@ -21,7 +21,9 @@
 //!   any content reaches the harness;
 //! - auth is an opaque [`AuthProfileRef`]; errors never carry secrets.
 
+pub mod acpx;
 pub mod conformance;
+mod util;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
