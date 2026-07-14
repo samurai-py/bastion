@@ -1,3 +1,4 @@
+// TEMPORARY re-export shim (M2). Remove by end of M3 (docs/revamp/M1-ADR-substrate-split.md).
 // Memory backends. The `Memory` trait + `SharedMemory` alias moved to
 // `bastion_runtime::memory` (M2 step 3b, decision D1 — the runtime defines
 // the port, backends here implement it) and the pure data types in its

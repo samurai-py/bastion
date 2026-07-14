@@ -1,3 +1,4 @@
+// TEMPORARY re-export shim (M2). Remove by end of M3 (docs/revamp/M1-ADR-substrate-split.md).
 //! Unified capability registry — single invoke surface with policy middleware.
 //!
 //! M2 step 3b: the kernel half of this module (`registry`, `approval`,

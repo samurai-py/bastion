@@ -1,6 +1,7 @@
 pub mod command;
 pub mod skills;
 
+// TEMPORARY re-export shim (M2). Remove by end of M3 (docs/revamp/M1-ADR-substrate-split.md).
 // M2 step 3b: the kernel agent modules moved to `bastion_runtime::agent`.
 // Re-exported under the old paths so every existing `crate::agent::...` path
 // keeps compiling unchanged.

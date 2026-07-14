@@ -12,6 +12,7 @@
 
 pub mod server;
 
+// TEMPORARY re-export shim (M2). Remove by end of M3 (docs/revamp/M1-ADR-substrate-split.md).
 pub use bastion_mcp::{client, oauth, registry, registry_setup, tool_source};
 pub use bastion_mcp::{ComposioOAuth, McpClient, McpToolSource, ToolRegistry};
 pub use server::BastionMcpServer;

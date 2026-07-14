@@ -1,3 +1,4 @@
+// TEMPORARY re-export shim (M2). Remove by end of M3 (docs/revamp/M1-ADR-substrate-split.md).
 //! Shim (M2 step 5): the concrete providers (Anthropic/OpenAI/Ollama/Gemini/
 //! Groq/OpenRouter/terminal-agent), the OpenAI-compat translation helpers,
 //! and the registry moved to `bastion_providers`. Re-exported here so every

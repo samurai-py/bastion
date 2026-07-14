@@ -97,8 +97,8 @@ Topologia alvo (decisão #1 — intermediária, 10 crates + app; confirmar desti
 - [x] **M2-03/04/05** `bastion-runtime` extraída (`849e67d` + 3 commits de ports): capability/session/hooks/agent-core + traits Provider e Memory no kernel; 9 ports (Responder, TurnKernel, FailureSink, ToolSource, GoalPort, CommandHandler, PreCompactionFlush, ToolResultObserver, ProviderResolver); 535 testes/24 suites; binário +0,16%.
 - [x] **M2-04b** `bastion-memory` extraída (`f6575b5`) — backend SqliteMemory implementa o trait do kernel; aresta V4 memory→mesh era test-only (testes relocados pro allowlist).
 - [x] **M2-05b** `bastion-providers` (`9ed9844` — V4 ollama→cabinet cortado via CabinetVerdict→types; terminal_agent foi junto, divergência da tabela documentada), `bastion-mcp` (`0488259` — BastionMcpServer fica pro passo 6/7) e `bastion-agent-runtime` (`b614f01`) extraídas; 535 testes; binário +0,19% acumulado.
-- [ ] **M2-06** Extrair cognition/personas/mesh/mcp como extensões.
-- [ ] **M2-07** Binário atual vira composição das crates.
+- [x] **M2-06** `bastion-cognition` (`b46c28f`), `bastion-personas` (`535c7cc`), `bastion-mesh` (`adb13c8` — scheduler/cron foi pra mesh, é sync de mesh puro) extraídas; cabinet→persona invertido via closure; tipos de router/persona puros pra bastion-types; zero ciclos; 535 testes/38 suites.
+- [x] **M2-07** Binário atual vira composição das crates (root `Cargo.toml` depende das 9 crates; `src/` reduzido a app + 19 shims de re-export datados — auditoria e inventário em `docs/revamp/M2-CLOSE.md`).
 - [ ] **M2-08** CI de dependências proibidas (regras da seção 0).
 
 Regras de migração: commits pequenos por boundary; comportamento preservado antes de redesign; re-exports temporários com data de remoção; zero rename cosmético misturado à extração; medir binário/performance a cada marco.
