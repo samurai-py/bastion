@@ -83,6 +83,10 @@ bastion-agent-runtime = { path = "crates/bastion-agent-runtime" }
 # package manager (src/extension/) — product code, not kernel, so it lives
 # here rather than in a substrate crate.
 bastion-extension-protocol = { path = "crates/bastion-extension-protocol" }
+# Loop 3-C: the Wasm mechanism's sandbox (src/extension/wasm.rs wraps it into
+# an ExtensionInstance/Capability) — the wasm runtime (wasmi) dependency
+# itself is isolated in this crate, never touching the kernel/protocol crates.
+bastion-extension-wasm = { path = "crates/bastion-extension-wasm" }
 bastion-cognition  = { path = "crates/bastion-cognition" }
 bastion-personas   = { path = "crates/bastion-personas" }
 bastion-mesh       = { path = "crates/bastion-mesh" }

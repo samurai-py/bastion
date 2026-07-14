@@ -44,6 +44,12 @@ ALLOWED_DEPS[bastion-mesh]="bastion-types bastion-runtime bastion-memory bastion
 # PermissionSet/trust tiers). Depends only on bastion-types — zero product
 # I/O, no other substrate/extension crate needed.
 ALLOWED_DEPS[bastion-extension-protocol]="bastion-types"
+# Loop 3-C (docs/revamp/C3-extension-protocol-design.md §2/§8.7): the `Wasm`
+# mechanism's sandbox. Zero bastion-* dependencies — it knows nothing about
+# ExtensionManifest/PermissionSet/Capability, only how to run a wasm32
+# module with a fuel budget and no imports. `src/extension/wasm.rs` (app)
+# wraps this into an ExtensionInstance/Capability.
+ALLOWED_DEPS[bastion-extension-wasm]=""
 
 # --- Allowlist: [dev-dependencies] only (test-only edges, never production) -
 declare -A ALLOWED_DEV_DEPS
@@ -57,6 +63,7 @@ ALLOWED_DEV_DEPS[bastion-cognition]="bastion-mcp"
 ALLOWED_DEV_DEPS[bastion-personas]=""
 ALLOWED_DEV_DEPS[bastion-mesh]=""
 ALLOWED_DEV_DEPS[bastion-extension-protocol]=""
+ALLOWED_DEV_DEPS[bastion-extension-wasm]=""
 
 contains_word() {
   local needle="$1"

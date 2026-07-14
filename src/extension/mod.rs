@@ -19,11 +19,16 @@
 //! - [`declarative`] — the `Declarative` mechanism (data only, §2).
 //! - [`subprocess`] — the `Subprocess` mechanism (separate process,
 //!   `env_clear`, versioned stdio protocol, §2).
+//! - [`wasm`] — the `Wasm` mechanism (sandboxed, zero imports, fuel-bounded,
+//!   §2). The wasm runtime dependency (`wasmi`) itself lives in the isolated
+//!   `bastion-extension-wasm` crate (§8.7) — this module only wraps it into
+//!   an `ExtensionInstance`/`Capability`.
 
 pub mod declarative;
 pub mod facade;
 pub mod host;
 pub mod subprocess;
+pub mod wasm;
 
 pub use facade::{ExtensionInstance, HostFacade};
 pub use host::{ExtensionHost, Loadout};

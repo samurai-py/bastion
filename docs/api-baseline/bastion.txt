@@ -134,11 +134,17 @@ mod extension/mod.rs:declarative
 mod extension/mod.rs:facade
 mod extension/mod.rs:host
 mod extension/mod.rs:subprocess
+mod extension/mod.rs:wasm
 struct extension/subprocess.rs:SubprocessCapability
 type extension/subprocess.rs:SubprocessEntry
 struct extension/subprocess.rs:SubprocessExtension
 const extension/subprocess.rs:WIRE_VERSION
 fn extension/subprocess.rs:new
+const extension/wasm.rs:DEFAULT_FUEL
+struct extension/wasm.rs:WasmCapability
+type extension/wasm.rs:WasmEntry
+struct extension/wasm.rs:WasmExtension
+fn extension/wasm.rs:new
 mod lib.rs:agent
 mod lib.rs:agent_runtime_registry
 mod lib.rs:api
