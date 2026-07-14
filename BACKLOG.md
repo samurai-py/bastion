@@ -110,7 +110,7 @@ Gate: workspace compila por crate e como produto; kernel compila sem features de
 Distribuição durante incubação: **path deps no workspace + git deps version-pinned para consumidores externos; crates.io só no M6** (decisão #3).
 
 - [ ] **M3-01** Reduzir `pub` ao contrato; erros tipados fail-closed nas bordas.
-- [ ] **M3-02** Documentar invariantes de segurança: toda invocation passa pelo registry; `privacy_tier` ausente não vira allow; conteúdo não confiável não ganha autoridade; approval não bypassável por adapter; sessions owner-scoped; agente nunca recebe SQL cru.
+- [x] **M3-02** Documentar invariantes de segurança: toda invocation passa pelo registry; `privacy_tier` ausente não vira allow; conteúdo não confiável não ganha autoridade; approval não bypassável por adapter; sessions owner-scoped; agente nunca recebe SQL cru. (`docs/SECURITY-INVARIANTS.md`)
 - [ ] **M3-03** Compatibility tests contra a versão anterior suportada; checagem de API breaking no CI.
 - [ ] **M3-04** Exemplos `minimal-agent` e `embedded-host` sem dependência do produto.
 - [ ] **M3-05** Feature flags + matriz de combinações suportadas; build mínimo sem features de produto.
