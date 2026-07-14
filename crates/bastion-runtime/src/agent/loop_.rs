@@ -107,6 +107,15 @@ pub struct AgentLoop {
     /// (`RuntimeRegistry::resolve`), never silently degrades to `Model`.
     /// Populated post-construction via [`AgentLoop::with_runtime_registry`].
     pub runtime_registry: RuntimeRegistry,
+    /// Ciclo 2.4 (design doc §3, mode 3): cancellation channel per in-flight
+    /// delegated task, keyed by its `runtime_sessions` persistence key.
+    /// Bookkeeping only — NOT a DAG/workflow engine (AGENTS.md architecture
+    /// law): the only two operations are "remember how to signal a cancel"
+    /// (`delegate_task`/`resume_delegated_task`) and "forget once the task
+    /// ended" (the spawned consumer removes its own entry) — nothing here
+    /// schedules or sequences across entries.
+    pub delegated_tasks:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, mpsc::Sender<()>>>>,
 }
 
 impl AgentLoop {
@@ -180,6 +189,7 @@ impl AgentLoop {
             // every caller that doesn't opt in via the builders below.
             backend_profile: BackendProfile::default(),
             runtime_registry: RuntimeRegistry::default(),
+            delegated_tasks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -363,44 +373,9 @@ impl AgentLoop {
         }
         prompt.push_str(user_input);
 
-        let workspace_root = runtime_workspace_root(owner);
-        let _ = tokio::fs::create_dir_all(&workspace_root).await;
-
-        let mut env_allow = std::collections::BTreeMap::new();
-        for var in ["HOME", "PATH"] {
-            if let Ok(v) = std::env::var(var) {
-                env_allow.insert(var.to_string(), v);
-            }
-        }
-
-        let timeout = bastion_agent_runtime::TimeoutPolicy {
-            per_task: std::time::Duration::from_secs(120),
-            idle: std::time::Duration::from_secs(300),
-        };
-        // Conservative default (design doc §6 scope: declarative config, not
-        // rich permission UX yet) — empty `allow` maps to the most
-        // restrictive posture each adapter has (acpx: `--deny-all`; codex:
-        // `on-request`, bridged to the ApprovalGate below).
-        let permissions = bastion_agent_runtime::PermissionProfile::default();
-        let env = bastion_agent_runtime::EnvPolicy { allow: env_allow };
-        let spec = bastion_agent_runtime::SessionSpec {
-            owner: owner.to_string(),
-            workspace: bastion_agent_runtime::WorkspacePolicy {
-                root: workspace_root,
-                read_only: false,
-                deny: Vec::new(),
-            },
-            sandbox: bastion_agent_runtime::SandboxProfile::WorkspaceNet,
-            permissions: permissions.clone(),
-            auth: self.backend_profile.auth.clone().unwrap_or_else(|| {
-                bastion_agent_runtime::AuthProfileRef("host-cli-login".to_string())
-            }),
-            runtime_id: runtime_id.to_string(),
-            timeout,
-            env: env.clone(),
-            mcp_bridge: None,
-            otel: bastion_agent_runtime::OtelContext::default(),
-        };
+        let _ = tokio::fs::create_dir_all(runtime_workspace_root(owner)).await;
+        let (spec, timeout, permissions, env) =
+            build_runtime_session_spec(owner, runtime_id, &self.backend_profile);
 
         // Restart recovery (design doc §3 mode 2): reuse a persisted handle
         // for this Bastion session if the adapter can genuinely reattach.
@@ -542,6 +517,177 @@ impl AgentLoop {
                 anyhow::bail!(BastionError::BackendUnavailable(reason))
             }
         }
+    }
+
+    /// Ciclo 2.4 (design doc §3, mode 3): delegate a short coding task to
+    /// `BackendProfile.task_runtime` — independent of the conversation
+    /// backend (Model or Runtime); a `Model`-conversation owner can still
+    /// delegate. Returns immediately with the task's persistence key; the
+    /// task itself runs on a SEPARATE spawned tokio task against its OWN
+    /// harness session (never the mode-2 conversation session), so the
+    /// caller's turn loop stays responsive. Bastion is a host here, not an
+    /// orchestrator: this method starts exactly one task and hands back a
+    /// key — it does not schedule, sequence, or retry across tasks.
+    ///
+    /// The result comes back later as a proactive message on `pending_tx` —
+    /// the SAME PROACT-05 seam goal-drift nudges already use (`main.rs`'s
+    /// `pending_rx` select arm), not a new delivery mechanism.
+    pub async fn delegate_task(&mut self, owner: &str, prompt: String) -> anyhow::Result<String> {
+        let runtime_id = self.backend_profile.task_runtime.clone().ok_or_else(|| {
+            anyhow::Error::new(BastionError::BackendUnavailable(
+                "no task_runtime configured in BackendProfile — delegation is disabled".to_string(),
+            ))
+        })?;
+        let runtime = self
+            .runtime_registry
+            .resolve(&runtime_id)
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
+        let _ = tokio::fs::create_dir_all(runtime_workspace_root(owner)).await;
+        let (spec, _timeout, _permissions, _env) =
+            build_runtime_session_spec(owner, &runtime_id, &self.backend_profile);
+
+        let mut session = runtime
+            .start(spec)
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
+        let key = format!("task:{owner}:{}", unique_task_suffix());
+        self.session
+            .save_runtime_handle(&key, &session.handle())
+            .await?;
+
+        let task_id = session
+            .submit(bastion_agent_runtime::TaskInput {
+                prompt,
+                attachments: Vec::new(),
+                expected: bastion_agent_runtime::TaskExpectation::CodeChange,
+            })
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
+        self.delegated_tasks
+            .lock()
+            .await
+            .insert(key.clone(), cancel_tx);
+
+        spawn_delegated_task_consumer(
+            key.clone(),
+            owner.to_string(),
+            runtime_id,
+            session,
+            task_id,
+            self.session.clone(),
+            self.capability_registry.approval_gate().clone(),
+            self.pending_tx.clone(),
+            self.delegated_tasks.clone(),
+            cancel_rx,
+        );
+
+        Ok(key)
+    }
+
+    /// Ciclo 2.4 (design doc §3, mode 3): cancel a running delegated task by
+    /// its `delegate_task`-returned key. Returns `false` (not an error) when
+    /// no live task is registered under `key` — already finished, already
+    /// cancelled, or the key never existed; idempotent by construction (a
+    /// second cancel on the same key is just another `false`, since the
+    /// consumer removes its own entry before returning).
+    pub async fn cancel_delegated_task(&self, key: &str) -> anyhow::Result<bool> {
+        let tx = self.delegated_tasks.lock().await.get(key).cloned();
+        match tx {
+            Some(tx) => {
+                // Best-effort signal — if the consumer already raced past
+                // its select! and is mid-cleanup, a dropped receiver here is
+                // not an error (the task is ending anyway).
+                let _ = tx.send(()).await;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Ciclo 2.4 (design doc §3, mode 3): reattach a delegated task's
+    /// harness session after a daemon restart (uses the persisted
+    /// `SessionHandle` + `ResumeSpec`, A-01 v2).
+    ///
+    /// Contract-honest limitation (found running A-07, not a shortcut in
+    /// this integration): `AgentRuntime::resume` reattaches the harness
+    /// SESSION — neither shipped adapter's protocol buffers or replays
+    /// events for a task that was already in flight when the connection was
+    /// lost, so there is no way to "continue watching" the original task
+    /// across a genuine process restart. This method proves session-level
+    /// reattachment (the same bar `codex_v2_resume_smoke` established at the
+    /// adapter layer) and submits `followup_prompt` as a NEW task on the
+    /// reattached session, wired through the same consumer/notify path as a
+    /// fresh delegation.
+    pub async fn resume_delegated_task(
+        &mut self,
+        key: &str,
+        owner: &str,
+        followup_prompt: String,
+    ) -> anyhow::Result<()> {
+        let handle = self
+            .session
+            .load_runtime_handle(key)
+            .await?
+            .ok_or_else(|| {
+                anyhow::Error::new(BastionError::BackendUnavailable(format!(
+                    "no persisted handle for delegated task '{key}'"
+                )))
+            })?;
+        let runtime = self
+            .runtime_registry
+            .resolve(&handle.runtime_id)
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+        let (_spec, timeout, permissions, env) =
+            build_runtime_session_spec(owner, &handle.runtime_id, &self.backend_profile);
+        let resume_spec = bastion_agent_runtime::ResumeSpec {
+            timeout,
+            permissions,
+            env,
+        };
+        let mut session = runtime
+            .resume(&handle, resume_spec)
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
+        self.session
+            .save_runtime_handle(key, &session.handle())
+            .await?;
+
+        let task_id = session
+            .submit(bastion_agent_runtime::TaskInput {
+                prompt: followup_prompt,
+                attachments: Vec::new(),
+                expected: bastion_agent_runtime::TaskExpectation::CodeChange,
+            })
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
+        self.delegated_tasks
+            .lock()
+            .await
+            .insert(key.to_string(), cancel_tx);
+
+        spawn_delegated_task_consumer(
+            key.to_string(),
+            owner.to_string(),
+            handle.runtime_id,
+            session,
+            task_id,
+            self.session.clone(),
+            self.capability_registry.approval_gate().clone(),
+            self.pending_tx.clone(),
+            self.delegated_tasks.clone(),
+            cancel_rx,
+        );
+
+        Ok(())
     }
 
     /// Execute one full agent turn for the default local owner.
@@ -1735,20 +1881,6 @@ impl TurnKernel for AgentLoop {
     }
 }
 
-/// Classify a `ToolSource`-bypass dispatch outcome into a `TaggedValue` —
-/// Ciclo 2.1 (`docs/revamp/C2-approval-port-design.md` §4, LOOP-REPORT.md
-/// finding #4). The two registry-bypass call sites (`dispatch_tool_loop`'s
-/// empty-registry fallback, `run_provider_fallback`'s whole tool loop) have
-/// no `Capability` object to call `.is_trusted()` on — this function is the
-/// ONE place either derives its tag, reusing `TaggedValue::untrusted`
-/// (`capability/registry.rs`) rather than a parallel/duplicated convention.
-///
-/// Preserves the pre-existing (pre-M3) trust split for errors, now shared
-/// instead of copy-pasted at each call site: an egress denial is an
-/// internally-generated safe message (`trusted: true`, mirrors
-/// `CapabilityRegistry::invoke`'s own errors); any other dispatch error stays
-/// untrusted (fail-closed default — an external tool's error text may itself
-/// carry attacker-influenced content, e.g. an echoed argument).
 /// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §3): filesystem
 /// confinement root for a runtime-backed session/task, one directory per
 /// owner. A minimal, deliberately simple default for this cycle (declarative
@@ -1768,6 +1900,267 @@ fn runtime_workspace_root(owner: &str) -> std::path::PathBuf {
         })
 }
 
+/// Ciclo 2.4 (design doc §3): `SessionSpec` construction shared by mode 2
+/// (`AgentLoop::run_runtime_backed_turn`) and mode 3
+/// (`AgentLoop::delegate_task`). Returns the spec plus its
+/// timeout/permissions/env pieces separately (cheap to clone/copy) so a
+/// caller that later needs a `ResumeSpec` doesn't have to destructure `spec`
+/// itself — `workspace`/`sandbox` are deliberately NOT part of `ResumeSpec`
+/// (see its rustdoc in `bastion-agent-runtime`: fixed by the original
+/// session, not re-appliable on reattach).
+fn build_runtime_session_spec(
+    owner: &str,
+    runtime_id: &str,
+    backend_profile: &BackendProfile,
+) -> (
+    bastion_agent_runtime::SessionSpec,
+    bastion_agent_runtime::TimeoutPolicy,
+    bastion_agent_runtime::PermissionProfile,
+    bastion_agent_runtime::EnvPolicy,
+) {
+    let mut env_allow = std::collections::BTreeMap::new();
+    for var in ["HOME", "PATH"] {
+        if let Ok(v) = std::env::var(var) {
+            env_allow.insert(var.to_string(), v);
+        }
+    }
+    let timeout = bastion_agent_runtime::TimeoutPolicy {
+        per_task: std::time::Duration::from_secs(120),
+        idle: std::time::Duration::from_secs(300),
+    };
+    // Conservative default (design doc §6 scope: declarative config, not
+    // rich permission UX yet) — empty `allow` maps to the most restrictive
+    // posture each adapter has (acpx: `--deny-all`; codex: `on-request`,
+    // bridged to the ApprovalGate).
+    let permissions = bastion_agent_runtime::PermissionProfile::default();
+    let env = bastion_agent_runtime::EnvPolicy { allow: env_allow };
+    let spec = bastion_agent_runtime::SessionSpec {
+        owner: owner.to_string(),
+        workspace: bastion_agent_runtime::WorkspacePolicy {
+            root: runtime_workspace_root(owner),
+            read_only: false,
+            deny: Vec::new(),
+        },
+        sandbox: bastion_agent_runtime::SandboxProfile::WorkspaceNet,
+        permissions: permissions.clone(),
+        auth: backend_profile
+            .auth
+            .clone()
+            .unwrap_or_else(|| bastion_agent_runtime::AuthProfileRef("host-cli-login".to_string())),
+        runtime_id: runtime_id.to_string(),
+        timeout,
+        env: env.clone(),
+        mcp_bridge: None,
+        otel: bastion_agent_runtime::OtelContext::default(),
+    };
+    (spec, timeout, permissions, env)
+}
+
+/// Ciclo 2.4 (design doc §3, mode 3): unique suffix for a delegated task's
+/// persistence key. Mirrors the same nanos+counter shape
+/// `bastion-agent-runtime`'s acpx adapter uses for its own session names
+/// (`acpx.rs::unique_suffix`) — a local copy, not a shared dependency, since
+/// that helper is private to its crate.
+fn unique_task_suffix() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}-{n}")
+}
+
+/// Ciclo 2.4 (design doc §3, mode 3): the background consumer for one
+/// delegated task — submitted already; this drives it to completion (or
+/// cancellation) and reports the outcome. Shared by `delegate_task` (fresh
+/// start) and `resume_delegated_task` (reattach) so the two call sites never
+/// duplicate the event-interpretation/cleanup logic.
+///
+/// Deliberately a free function, not an `AgentLoop` method: it runs inside a
+/// `tokio::spawn`'d `'static` task that outlives the `&mut self` call that
+/// started it, so it takes only the small, `Clone`-able/`Arc`-wrapped pieces
+/// it actually needs (never the whole `AgentLoop`) — the same "narrow
+/// capability handle, not the whole kernel" discipline `TurnKernel` already
+/// applies to the `Responder` port.
+#[allow(clippy::too_many_arguments)]
+fn spawn_delegated_task_consumer(
+    key: String,
+    owner: String,
+    runtime_id: String,
+    mut session: Box<dyn bastion_agent_runtime::RuntimeSession>,
+    task_id: bastion_agent_runtime::TaskId,
+    session_manager: SessionManager,
+    approval_gate: Arc<dyn ApprovalGate>,
+    pending_tx: mpsc::Sender<String>,
+    delegated_tasks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, mpsc::Sender<()>>>>,
+    mut cancel_rx: mpsc::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        tracing::info!(event = "agent_runtime_delegated_task_started", key = %key, runtime_id = %runtime_id);
+        let mut response_text = String::new();
+        let mut artifacts: Vec<String> = Vec::new();
+
+        let outcome = loop {
+            tokio::select! {
+                // Cooperative cancel requested via `cancel_delegated_task`.
+                // Not itself terminal — the loop keeps consuming events
+                // until the harness reports the task actually `Ended`
+                // (`RuntimeSession::cancel`'s own idempotent contract).
+                _ = cancel_rx.recv() => {
+                    tracing::info!(event = "agent_runtime_delegated_cancel_requested", key = %key, runtime_id = %runtime_id);
+                    let _ = session
+                        .cancel(bastion_agent_runtime::CancelMode::Graceful {
+                            grace: std::time::Duration::from_secs(5),
+                        })
+                        .await;
+                }
+                event = session.next_event() => {
+                    let Some(event) = event else {
+                        break bastion_agent_runtime::TaskOutcome::Failed {
+                            reason: "runtime session event stream closed before the task ended"
+                                .to_string(),
+                        };
+                    };
+                    match event {
+                        bastion_agent_runtime::RuntimeEvent::MessageDelta { task: t, text }
+                            if t == task_id =>
+                        {
+                            tracing::debug!(event = "agent_runtime_delegated_message_delta", key = %key, len = text.len());
+                            response_text.push_str(&text);
+                        }
+                        bastion_agent_runtime::RuntimeEvent::ToolCall { task: t, name, .. }
+                            if t == task_id =>
+                        {
+                            tracing::debug!(event = "agent_runtime_delegated_tool_call", key = %key, tool = %name);
+                        }
+                        bastion_agent_runtime::RuntimeEvent::ToolResult { task: t, name, is_error, .. }
+                            if t == task_id =>
+                        {
+                            tracing::debug!(event = "agent_runtime_delegated_tool_result", key = %key, tool = %name, is_error);
+                        }
+                        bastion_agent_runtime::RuntimeEvent::PermissionRequest {
+                            task: t,
+                            id,
+                            action,
+                            detail,
+                        } if t == task_id => {
+                            tracing::info!(
+                                event = "agent_runtime_delegated_permission_request",
+                                key = %key,
+                                ?action,
+                                detail = %detail,
+                            );
+                            // Same fail-closed audited-deny posture as mode 2
+                            // (`run_runtime_backed_turn`) and for the same
+                            // reason: nothing here can wait for a LATER
+                            // conversational turn's plain-language decision.
+                            let capability_name = format!("agent_runtime:{runtime_id}:{action:?}");
+                            let args = serde_json::json!({ "detail": detail, "runtime_id": runtime_id });
+                            if let Err(e) = approval_gate
+                                .enqueue_or_reuse(&owner, &capability_name, &args)
+                                .await
+                            {
+                                tracing::warn!(event = "agent_runtime_permission_audit_failed", error = %e);
+                            }
+                            if let Err(e) = session
+                                .respond_permission(
+                                    id,
+                                    bastion_agent_runtime::PermissionDecision::Deny {
+                                        scope: bastion_agent_runtime::DenyScope::Turn,
+                                    },
+                                )
+                                .await
+                            {
+                                tracing::warn!(event = "agent_runtime_respond_permission_failed", error = %e);
+                            }
+                        }
+                        bastion_agent_runtime::RuntimeEvent::Artifact { task: t, artifact }
+                            if t == task_id =>
+                        {
+                            artifacts.push(format!("{:?} {}", artifact.kind, artifact.path.display()));
+                        }
+                        bastion_agent_runtime::RuntimeEvent::Diff { task: t, path, added, removed }
+                            if t == task_id =>
+                        {
+                            artifacts.push(format!("diff {} (+{added}/-{removed})", path.display()));
+                        }
+                        bastion_agent_runtime::RuntimeEvent::Usage { task: t, delta } if t == task_id => {
+                            tracing::debug!(
+                                event = "agent_runtime_delegated_usage",
+                                key = %key,
+                                runtime_id = %runtime_id,
+                                input_tokens = delta.input_tokens,
+                                output_tokens = delta.output_tokens,
+                            );
+                        }
+                        bastion_agent_runtime::RuntimeEvent::Warning { code, detail, .. } => {
+                            tracing::warn!(
+                                event = "agent_runtime_delegated_warning",
+                                key = %key,
+                                runtime_id = %runtime_id,
+                                ?code,
+                                detail = %detail,
+                            );
+                        }
+                        bastion_agent_runtime::RuntimeEvent::Ended { task: t, outcome } if t == task_id => {
+                            tracing::info!(event = "agent_runtime_delegated_task_ended", key = %key, ?outcome);
+                            break outcome;
+                        }
+                        other => {
+                            tracing::debug!(event = "agent_runtime_delegated_event_ignored", key = %key, ?other);
+                        }
+                    }
+                }
+            }
+        };
+
+        // Cleanup — the task is over either way: no longer cancellable, no
+        // longer resumable (its handle is stale the moment it ends).
+        delegated_tasks.lock().await.remove(&key);
+        let _ = session_manager.delete_runtime_handle(&key).await;
+
+        let artifact_summary = if artifacts.is_empty() {
+            String::new()
+        } else {
+            format!("\nArtefatos: {}", artifacts.join(", "))
+        };
+        // PROACT-05 reuse (design doc §3: "resultado/artefatos voltam como
+        // evento pro owner") — the SAME seam goal-drift nudges already feed;
+        // `main.rs`'s daemon select! arm turns this into the next proactive
+        // turn for the owner.
+        let summary = match outcome {
+            bastion_agent_runtime::TaskOutcome::Success => {
+                format!("[Tarefa delegada '{key}' concluída]\n{response_text}{artifact_summary}")
+            }
+            bastion_agent_runtime::TaskOutcome::Cancelled => {
+                format!("[Tarefa delegada '{key}' cancelada]{artifact_summary}")
+            }
+            bastion_agent_runtime::TaskOutcome::TimedOut => {
+                format!("[Tarefa delegada '{key}' expirou por timeout]{artifact_summary}")
+            }
+            bastion_agent_runtime::TaskOutcome::Failed { reason } => {
+                format!("[Tarefa delegada '{key}' falhou: {reason}]{artifact_summary}")
+            }
+        };
+        let _ = pending_tx.send(summary).await;
+    });
+}
+
+/// Classify a `ToolSource`-bypass dispatch outcome into a `TaggedValue` —
+/// Ciclo 2.1 (`docs/revamp/C2-approval-port-design.md` §4, LOOP-REPORT.md
+/// finding #4). The two registry-bypass call sites (`dispatch_tool_loop`'s
+/// empty-registry fallback, `run_provider_fallback`'s whole tool loop) have
+/// no `Capability` object to call `.is_trusted()` on — this function is the
+/// ONE place either derives its tag, reusing `TaggedValue::untrusted`
+/// (`capability/registry.rs`) rather than a parallel/duplicated convention.
+///
+/// Preserves the pre-existing (pre-M3) trust split for errors, now shared
+/// instead of copy-pasted at each call site: an egress denial is an
+/// internally-generated safe message (`trusted: true`, mirrors
+/// `CapabilityRegistry::invoke`'s own errors); any other dispatch error stays
+/// untrusted (fail-closed default — an external tool's error text may itself
+/// carry attacker-influenced content, e.g. an echoed argument).
 fn tag_bypass_result(
     source: &str,
     outcome: anyhow::Result<serde_json::Value>,

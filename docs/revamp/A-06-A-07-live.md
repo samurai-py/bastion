@@ -30,6 +30,26 @@ What this proves, concretely: a turn that starts at `AgentLoop::run_turn_for` (t
 
 ## A-07 — delegated task (mode 3)
 
-**Status: <!-- filled in by Commit 3 -->**
+**Status: PASS, run live.**
 
-(placeholder — populated once Commit 3 lands the delegation mechanism and its live test)
+| Field | Value |
+|---|---|
+| Test | `tests/agent_runtime_delegated_task_live.rs::a07_delegated_task_concurrent_cancel_and_resume_live` |
+| Command | `cargo test --test agent_runtime_delegated_task_live -- --ignored --nocapture` |
+| Harness | `CodexAppServerRuntime` → `codex-cli 0.144.1` (host ChatGPT login) |
+| Surface exercised | `AgentLoop::delegate_task` / `AgentLoop::cancel_delegated_task` / `AgentLoop::resume_delegated_task` — the real host-level API (not a bypass); conversation backend stayed `Model` throughout (delegation is independent of the conversation backend) |
+| Run at | 2026-07-14, this cycle | 16.14s total wall time |
+
+Four things proven in one run, all through the real methods:
+
+1. **Delegation is non-blocking.** `delegate_task` (task1, prompt `"Reply with exactly this and nothing else: BASTION-A07-TASK1-OK"`) returned in 1.64s (start + submit only — it does not wait for the task).
+2. **The conversation stays responsive concurrently.** Immediately after delegating task1, a normal `run_turn_for` call (Model backend, mocked provider) on the SAME `AgentLoop` completed in 19ms — not blocked on the background task.
+3. **Cancel works and reports back.** Task2 (a `sleep 15 && echo done` shell prompt) was cancelled ~2s after delegation via `cancel_delegated_task`; the harness reported `TaskOutcome::Cancelled` ~2s later, delivered via the `pending_tx` PROACT-05 seam as `"[Tarefa delegada '...' cancelada]"`.
+4. **Resume-after-restart works, with a disclosed contract limitation.** A third session was started directly, warmed up with one completed turn (codex only persists a resumable rollout after a real turn ran — same finding `codex_v2_resume_smoke` documented), then the process was killed (`drop(session)`, `kill_on_drop`) to simulate a daemon restart. `AgentLoop::resume_delegated_task` reattached the session successfully and submitted a follow-up task (`"...BASTION-A07-RESUME-OK"`), which completed and delivered its result via the same `pending_tx` path. The adapter correctly surfaced a `Warning{code: DegradedTransport}` on resume — codex's `thread/resume` protocol has no field for `PermissionProfile`, so the reattached thread kept its original `approvalPolicy` (documented in `codex.rs`, re-confirmed live here).
+
+### Known scope limits / findings from this cycle (not defects — see rationale in code + `run_runtime_backed_turn`'s rustdoc, shared by mode 3)
+
+- **No cross-restart task continuation in the contract.** `AgentRuntime::resume` reattaches the harness SESSION; neither shipped adapter buffers/replays events for a task that was already in flight when the connection was lost. `resume_delegated_task` is honest about this: it submits a NEW follow-up task on the reattached session rather than pretending to continue the original one. A richer "the exact same task keeps going across a restart" guarantee is not something this contract can deliver today without a protocol-level replay mechanism neither codex nor acpx expose.
+- **Permission requests during a delegated task get the same fail-closed audited-deny as mode 2** (`Deny { scope: DenyScope::Turn }`) — a task that genuinely needs a tool call approved will end up cancelled by its own adapter (Codex's `respond_permission` cancels gracefully on a `Turn`-scoped deny). Neither task1 nor task3 needed a tool call in this run (pure conversational replies); task2's shell command was cancelled by the EXPLICIT `cancel_delegated_task` call before any approval negotiation was observed in the trace.
+- **`pending_tx`/`pending_rx` is not owner-routed.** The PROACT-05 seam this reuses was built for the single-owner CLI daemon's goal-drift nudges (`main.rs`'s `pending_rx` arm feeds `agent.run_turn(&msg)` — always `DEFAULT_OWNER`). Reusing it for a multi-owner deployment's delegated-task notifications is a real gap (a result meant for owner B could surface as a proactive turn for the default owner) — richer, owner-scoped delivery is M4-pleno scope, not addressed here.
+- **acpx cannot be used for the resume leg** (`supports.resume = false`, always `NotResumable` — by honest design, see `acpx.rs`) — A-07's resume proof required Codex specifically; acpx remains a valid `task_runtime` choice for the non-resume parts (delegate/cancel).

@@ -11,6 +11,12 @@ fn open_conn(path: &str) -> rusqlite::Result<rusqlite::Connection> {
     Ok(conn)
 }
 
+/// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §3 mode 3):
+/// `Clone` added so a delegated task's spawned tokio task (which outlives the
+/// `run_turn_for` call that started it) can hold its own handle to persist/
+/// delete its `runtime_sessions` row without borrowing `AgentLoop` — cheap
+/// (wraps one `String`), no new state, every existing call site unaffected.
+#[derive(Clone)]
 pub struct SessionManager {
     db_path: String,
 }
