@@ -13,6 +13,7 @@ use persona/mod.rs:PersonaFront
 struct persona/mod.rs:PersonaRegistry
 use persona/mod.rs:PersonaResponder
 fn persona/mod.rs:get
+fn persona/mod.rs:load_dir
 fn persona/mod.rs:names
 fn persona/mod.rs:new_from_map
 use persona/mod.rs:parse_soul
@@ -26,8 +27,10 @@ fn persona/responder.rs:new
 use persona/router.rs:ConveneReason
 use persona/router.rs:ResponseMode
 use persona/router.rs:RouterDecision
+fn persona/router.rs:route
 use persona/runner.rs:PersonaId
 enum persona/runner.rs:RunnerOutput
+fn persona/runner.rs:run
 struct persona/soul.rs:BastionBlock
 struct persona/soul.rs:PersonaFront
 fn persona/soul.rs:parse_soul

@@ -10,6 +10,9 @@ fn identity/age_identity.rs:verify_agent_card
 const identity/mod.rs:AGENT_CARD_VERSION
 struct identity/mod.rs:AgentCard
 mod identity/mod.rs:age_identity
+fn interop/export.rs:export_full
+fn interop/export.rs:export_template
+fn interop/import.rs:import
 const interop/mod.rs:AF_VERSION
 struct interop/mod.rs:AgentConfigExport
 struct interop/mod.rs:AgentFile
@@ -39,6 +42,7 @@ struct mesh/context_provider.rs:MeshSliceProvider
 type mesh/context_provider.rs:MeshSliceStore
 fn mesh/context_provider.rs:from_store
 fn mesh/context_provider.rs:new
+fn mesh/context_provider.rs:write_cabinet_synthesis
 struct mesh/mod.rs:MeshEnvelope
 struct mesh/mod.rs:MeshPeer
 struct mesh/mod.rs:MeshPeerMap

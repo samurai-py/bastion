@@ -65,8 +65,21 @@ import os
 root = sys.argv[1]
 entries = []
 
+#
+# 6c (docs/revamp/C3-runtime-followups-design.md): `pub fn` alone missed
+# every `pub async fn` in the kernel (`run_turn`, `delegate_task`, etc.) —
+# the whole async public surface was invisible to this baseline. The
+# modifier group below accepts zero or more of `async`/`unsafe`/`const`
+# between `pub` and the kind keyword (defensive: `unsafe` never appears
+# under this crate's `#![forbid(unsafe_code)]`, but a workspace crate
+# could still add one without violating that lint if it were ever
+# scoped narrower). `pub const fn foo()` still classifies as `fn` (the
+# kind alternation prefers `fn` when both `const` and `fn` are present)
+# while a real `pub const NAME: T = ...;` still classifies as `const`
+# (Python `re` backtracks: the modifier group re-tries consuming zero
+# repetitions when `fn|struct|...` fails to follow a consumed `const`).
 decl_pat = re.compile(
-    r'^\s*pub (fn|struct|enum|trait|const|static|type|mod)\s+([A-Za-z_][A-Za-z0-9_]*)'
+    r'^\s*pub\s+(?:(?:async|unsafe|const)\s+)*(fn|struct|enum|trait|const|static|type|mod)\s+([A-Za-z_][A-Za-z0-9_]*)'
 )
 use_start_pat = re.compile(r'^\s*pub use\b')
 

@@ -3,6 +3,9 @@ struct adapters.rs:McpToolAdapter
 struct adapters.rs:NlCommandAdapter
 fn adapters.rs:new
 struct client.rs:McpClient
+fn client.rs:call_tool_with_timeout
+fn client.rs:connect_all
+fn client.rs:connect_from_config
 fn client.rs:load_mcp_config
 fn client.rs:registry
 fn client.rs:with_composio_oauth
@@ -19,8 +22,14 @@ mod lib.rs:registry_setup
 mod lib.rs:tool_source
 mod lib.rs:types
 struct oauth.rs:ComposioOAuth
+fn oauth.rs:consume_state
+fn oauth.rs:current_connection
+fn oauth.rs:initiate
+fn oauth.rs:insert_state_for_test
 fn oauth.rs:new
 fn oauth.rs:new_for_test
+fn oauth.rs:refresh_if_expired
+fn oauth.rs:store_connection
 struct registry.rs:ToolRegistry
 fn registry.rs:get_tool_description
 fn registry.rs:get_tool_schema
