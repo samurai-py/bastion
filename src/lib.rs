@@ -4,4 +4,5 @@ pub mod api;
 pub mod auth_profile_registry;
 pub mod channel;
 pub mod config;
+pub mod extension;
 pub mod mcp;

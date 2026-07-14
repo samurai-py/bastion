@@ -18,6 +18,17 @@ path = "src/main.rs"
 name = "pokedev-cli"
 path = "src/bin/pokedev_cli.rs"
 
+# Loop 3-C (docs/revamp/C3-extension-protocol-design.md §2/§6): the reference
+# `Subprocess`-kind extension child — a tiny, dependency-free helper that
+# speaks the versioned NDJSON protocol `src/extension/subprocess.rs`
+# implements the host side of. A `[[bin]]` in THIS package (rather than a
+# separate `examples/*` crate) so `env!("CARGO_BIN_EXE_reference-extension-echo")`
+# resolves automatically in this package's own tests — no cross-crate binary
+# path plumbing needed.
+[[bin]]
+name = "reference-extension-echo"
+path = "src/bin/reference_extension_echo.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 
@@ -68,6 +79,10 @@ bastion-memory     = { path = "crates/bastion-memory" }
 bastion-providers  = { path = "crates/bastion-providers" }
 bastion-mcp        = { path = "crates/bastion-mcp" }
 bastion-agent-runtime = { path = "crates/bastion-agent-runtime" }
+# Loop 3-C (docs/revamp/C3-extension-protocol-design.md): extension host +
+# package manager (src/extension/) — product code, not kernel, so it lives
+# here rather than in a substrate crate.
+bastion-extension-protocol = { path = "crates/bastion-extension-protocol" }
 bastion-cognition  = { path = "crates/bastion-cognition" }
 bastion-personas   = { path = "crates/bastion-personas" }
 bastion-mesh       = { path = "crates/bastion-mesh" }
@@ -86,6 +101,9 @@ rmcp               = { version = "1.6",  features = [
 ed25519-dalek      = { version = "2", features = ["rand_core"] }
 base64             = "0.22"
 sha2               = "0.10"
+# Loop 3-C: ExtensionManifest.version/compat comparisons in src/extension/host.rs
+# (upgrade compat-range + dependent-requirement checks).
+semver             = "1"
 chrono             = { version = "0.4", default-features = false, features = ["clock"] }
 serde              = { version = "1",    features = ["derive"] }
 serde_json         = "1"

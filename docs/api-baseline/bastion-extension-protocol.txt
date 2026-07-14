@@ -11,6 +11,7 @@ use lib.rs:LoadoutLock
 use lib.rs:LockEntry
 use lib.rs:MemoryScope
 use lib.rs:MigrationRef
+const lib.rs:PROTOCOL_VERSION
 use lib.rs:PackManifest
 use lib.rs:PermissionSet
 use lib.rs:Provided

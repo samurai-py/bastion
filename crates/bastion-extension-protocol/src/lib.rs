@@ -31,6 +31,13 @@
 
 #![forbid(unsafe_code)]
 
+/// This crate's own version — what `ExtensionManifest.compat` (a
+/// `VersionReq`) is checked against before install/upgrade. Exposed as a
+/// constant (rather than each host call site hardcoding a literal) so a
+/// protocol version bump can't silently drift out of sync with the actual
+/// crate version.
+pub const PROTOCOL_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod error;
 pub mod lockfile;
 pub mod manifest;
