@@ -5,7 +5,7 @@
 //! connection setup degrades gracefully, and unknown tools fail before dispatch.
 
 use bastion::config::McpServerEntry;
-use bastion::mcp::McpClient;
+use bastion_mcp::McpClient;
 use serde_json::json;
 use std::collections::HashMap;
 

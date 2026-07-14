@@ -4,15 +4,15 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing_subscriber::fmt;
 
-use bastion::agent::handle;
-use bastion::agent::loop_::AgentLoop;
-use bastion::goal::{GoalEngine, ScoringConfig};
-use bastion::mcp::McpClient;
-use bastion::memory::sqlite::SqliteMemory;
-use bastion::persona::PersonaRegistry;
-use bastion::proactive::CronService;
-use bastion::provider::registry::resolve_provider;
-use bastion::session::SessionManager;
+use bastion_cognition::goal::{GoalEngine, ScoringConfig};
+use bastion_cognition::proactive::CronService;
+use bastion_mcp::McpClient;
+use bastion_memory::sqlite::SqliteMemory;
+use bastion_personas::persona::PersonaRegistry;
+use bastion_providers::registry::resolve_provider;
+use bastion_runtime::agent::handle;
+use bastion_runtime::agent::loop_::AgentLoop;
+use bastion_runtime::session::SessionManager;
 
 /// Inicializa o OTel TracerProvider.
 ///
@@ -147,9 +147,9 @@ async fn main() -> anyhow::Result<()> {
     // deliberate fail-loud contract for direct callers), so this guard is what keeps
     // the daemon from panicking at startup for deployments that simply don't use
     // Composio at all.
-    let composio_oauth: Option<Arc<bastion::mcp::ComposioOAuth>> =
+    let composio_oauth: Option<Arc<bastion_mcp::ComposioOAuth>> =
         if std::env::var("COMPOSIO_API_KEY").is_ok_and(|v| !v.trim().is_empty()) {
-            let oauth = Arc::new(bastion::mcp::ComposioOAuth::new(&db_path));
+            let oauth = Arc::new(bastion_mcp::ComposioOAuth::new(&db_path));
             mcp_client = mcp_client.with_composio_oauth(oauth.clone());
             tracing::info!(event = "composio_oauth_enabled");
             Some(oauth)
@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Init provider from config (default_model from bastion.toml, overridable via env BASTION__AGENT__DEFAULT_MODEL)
     let default_model = cfg.agent.default_model.clone();
-    let provider: bastion::provider::SharedProvider =
+    let provider: bastion_providers::SharedProvider =
         Arc::new(RwLock::new(resolve_provider(&default_model)?));
 
     let daily_budget = cfg.agent.daily_budget_usd;
@@ -179,14 +179,15 @@ async fn main() -> anyhow::Result<()> {
     // `PersonaRegistry` handle; keep a clone from BEFORE the move, same pattern
     // as `goals_for_product`/`mcp_for_product` above.
     let registry_for_product = registry.clone();
-    let responder: Arc<dyn bastion::agent::ports::Responder> =
-        Arc::new(bastion::persona::responder::PersonaResponder::new(registry));
+    let responder: Arc<dyn bastion_runtime::agent::ports::Responder> = Arc::new(
+        bastion_personas::persona::responder::PersonaResponder::new(registry),
+    );
 
     // Init shared memory
-    let memory: bastion::memory::SharedMemory = Arc::new(RwLock::new(Box::new(SqliteMemory::new(
+    let memory: bastion_memory::SharedMemory = Arc::new(RwLock::new(Box::new(SqliteMemory::new(
         &db_path,
     ))
-        as Box<dyn bastion::memory::Memory>));
+        as Box<dyn bastion_memory::Memory>));
 
     // Init goal engine
     let goals = GoalEngine::new(&db_path, ScoringConfig::default());
@@ -210,9 +211,9 @@ async fn main() -> anyhow::Result<()> {
         });
     opentelemetry::global::set_tracer_provider(_otel_provider.clone());
 
-    let agent_identity: Option<Arc<bastion::identity::age_identity::AgeIdentity>> =
+    let agent_identity: Option<Arc<bastion_mesh::identity::age_identity::AgeIdentity>> =
         if let Ok(identity_key) = std::env::var("MESH_IDENTITY_KEY") {
-            match bastion::identity::age_identity::AgeIdentity::from_bech32(&identity_key) {
+            match bastion_mesh::identity::age_identity::AgeIdentity::from_bech32(&identity_key) {
                 Ok(id) => {
                     tracing::info!(event = "agent_identity_enabled");
                     Some(Arc::new(id))
@@ -221,8 +222,9 @@ async fn main() -> anyhow::Result<()> {
                     // WR-03: route through the sanitizer instead of logging `e` directly —
                     // keeps the public-facing message generic even if a future error
                     // variant here ever carries secret material.
-                    let sanitized =
-                        bastion::identity::age_identity::sanitised_identity_error(&e.to_string());
+                    let sanitized = bastion_mesh::identity::age_identity::sanitised_identity_error(
+                        &e.to_string(),
+                    );
                     tracing::warn!(event = "agent_identity_init_failed", error = %sanitized);
                     None
                 }
@@ -238,8 +240,8 @@ async fn main() -> anyhow::Result<()> {
     // of this itself.
     // P3 `ToolSource` port: wraps the SAME Arc<McpClient> shared with the
     // McpToolAdapters registered into capability_registry below.
-    let tool_source: std::sync::Arc<dyn bastion::agent::ports::ToolSource> =
-        std::sync::Arc::new(bastion::mcp::McpToolSource::new(mcp_client.clone()));
+    let tool_source: std::sync::Arc<dyn bastion_runtime::agent::ports::ToolSource> =
+        std::sync::Arc::new(bastion_mcp::McpToolSource::new(mcp_client.clone()));
     let mut agent = AgentLoop::new(
         provider.clone(),
         session,
@@ -250,15 +252,17 @@ async fn main() -> anyhow::Result<()> {
         memory.clone(),
         Some(std::sync::Arc::new(goals)),
         cfg.agent.fallback_models.clone(),
-        std::sync::Arc::new(bastion::capability::SqliteApprovalGate::new(&db_path)),
-        std::sync::Arc::new(bastion::eval::failure_sink::EvalFailureSink),
+        std::sync::Arc::new(bastion_runtime::capability::SqliteApprovalGate::new(
+            &db_path,
+        )),
+        std::sync::Arc::new(bastion_cognition::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
         // A3 `ProviderResolver`: registry-backed fallback-ladder resolution.
-        std::sync::Arc::new(bastion::provider::registry::RegistryProviderResolver),
+        std::sync::Arc::new(bastion_providers::registry::RegistryProviderResolver),
         // A1 `PreCompactionFlush`: MEM-09 dream flush, closing over the memory.
-        Some(std::sync::Arc::new(bastion::agent::dream::DreamFlush::new(
-            memory.clone(),
-        ))),
+        Some(std::sync::Arc::new(
+            bastion_cognition::agent::dream::DreamFlush::new(memory.clone()),
+        )),
         // A2 `ToolResultObserver`: skill-writer hot-reload signal (D-06/Gap 1).
         Some(std::sync::Arc::new(
             bastion::agent::skills::SkillReloadObserver,
@@ -266,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
     );
     // BIG-1 (Gap 2): one McpToolAdapter per connected MCP tool, into the SAME
     // registry instance the loop owns (moved verbatim out of `AgentLoop::new`).
-    bastion::mcp::registry_setup::register_mcp_tools(&mut agent.capability_registry, &mcp_client);
+    bastion_mcp::registry_setup::register_mcp_tools(&mut agent.capability_registry, &mcp_client);
 
     match cli.command {
         Command::Agent { message } => {
@@ -291,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
 
             let token_perms = build_token_perms(&cfg);
             let local_owner = std::env::var("BASTION_OWNER_ID")
-                .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+                .unwrap_or_else(|_| bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string());
             let personas = Arc::new(registry_for_product.clone());
             let mcp_server = bastion::mcp::server::BastionMcpServer::new(
                 Arc::new(agent.capability_registry.clone()),
@@ -318,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
             output,
         } => {
             let owner_id = std::env::var("BASTION_OWNER_ID")
-                .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+                .unwrap_or_else(|_| bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string());
 
             let af = match mode.as_str() {
                 "full" => {
@@ -327,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         None
                     };
-                    bastion::interop::export::export_full(
+                    bastion_mesh::interop::export::export_full(
                         &memory,
                         &registry_for_product,
                         &goals_for_product,
@@ -341,8 +345,11 @@ async fn main() -> anyhow::Result<()> {
                     if with_identity {
                         anyhow::bail!("--with-identity is only valid with --mode full");
                     }
-                    bastion::interop::export::export_template(&registry_for_product, &cfg.agent)
-                        .await?
+                    bastion_mesh::interop::export::export_template(
+                        &registry_for_product,
+                        &cfg.agent,
+                    )
+                    .await?
                 }
                 other => {
                     anyhow::bail!("Invalid export mode '{}'. Use 'full' or 'template'.", other)
@@ -365,7 +372,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Import { input } => {
             let owner_id = std::env::var("BASTION_OWNER_ID")
-                .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+                .unwrap_or_else(|_| bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string());
 
             let json = match input {
                 Some(path) => tokio::fs::read_to_string(&path).await?,
@@ -377,8 +384,8 @@ async fn main() -> anyhow::Result<()> {
                     buf
                 }
             };
-            let af: bastion::interop::AgentFile = serde_json::from_str(&json)?;
-            let restored = bastion::interop::import::import(
+            let af: bastion_mesh::interop::AgentFile = serde_json::from_str(&json)?;
+            let restored = bastion_mesh::interop::import::import(
                 af,
                 &memory,
                 &registry_for_product,
@@ -410,11 +417,11 @@ async fn main() -> anyhow::Result<()> {
 async fn daemon_loop(
     agent: &mut AgentLoop,
     cfg: &bastion::config::BastionConfig,
-    agent_identity: Option<Arc<bastion::identity::age_identity::AgeIdentity>>,
+    agent_identity: Option<Arc<bastion_mesh::identity::age_identity::AgeIdentity>>,
     // SEC-03: opt-in Composio OAuth client (Some only when COMPOSIO_API_KEY is
     // configured) — wired into both the agent (/connect-app-composio) and the
     // webhook server's /auth/composio/callback route below.
-    composio_oauth: Option<Arc<bastion::mcp::ComposioOAuth>>,
+    composio_oauth: Option<Arc<bastion_mcp::ComposioOAuth>>,
     // M2 (P4 `GoalPort`): concrete `GoalEngine` for the two product-level
     // consumers `daemon_loop` wires up (`BastionMcpServer`'s MCP-over-HTTP
     // resources, `CronService`'s heartbeat) that need more than the loop's
@@ -505,62 +512,63 @@ async fn daemon_loop(
         })?;
 
         // Phase 6 Wave 2: P2PTransport + MeshSliceProvider when MESH_IDENTITY_KEY is set.
-        let (mesh_transport, mesh_slice_store) =
-            if let Ok(identity_key) = std::env::var("MESH_IDENTITY_KEY") {
-                let local_owner = std::env::var("BASTION_OWNER_ID")
-                    .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
-                let transport = bastion::mesh::p2p::P2PTransport::new(
-                    local_owner.clone(),
-                    identity_key,
-                    mesh_peer_map.clone(),
-                    events_tx.clone(),
-                );
-                let shared: bastion::mesh::SharedMeshTransport = Arc::new(transport);
+        let (mesh_transport, mesh_slice_store) = if let Ok(identity_key) =
+            std::env::var("MESH_IDENTITY_KEY")
+        {
+            let local_owner = std::env::var("BASTION_OWNER_ID")
+                .unwrap_or_else(|_| bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string());
+            let transport = bastion_mesh::mesh::p2p::P2PTransport::new(
+                local_owner.clone(),
+                identity_key,
+                mesh_peer_map.clone(),
+                events_tx.clone(),
+            );
+            let shared: bastion_mesh::mesh::SharedMeshTransport = Arc::new(transport);
 
-                // MeshSliceProvider::new returns (provider, store); build the `from_store`
-                // provider here (M2 P5 despejo — `add_mesh_slice_provider` is gone from the
-                // loop; it only receives an already-built `TurnContextProvider` boxed now).
-                let (_, store) =
-                    bastion::mesh::context_provider::MeshSliceProvider::new(local_owner.clone());
-                // WR-06: mirrors the removed `add_mesh_slice_provider`'s OWN owner
-                // resolution exactly (BASTION_OWNER_ID, then MESH_OWNER_ID, then
-                // DEFAULT_OWNER) — deliberately NOT the outer `local_owner` above (no
-                // MESH_OWNER_ID fallback there); preserved verbatim, not reconciled.
-                let local_owner_for_mesh_provider = std::env::var("BASTION_OWNER_ID")
-                    .or_else(|_| std::env::var("MESH_OWNER_ID"))
-                    .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
-                let mesh_provider = bastion::mesh::context_provider::MeshSliceProvider::from_store(
-                    local_owner_for_mesh_provider,
-                    store.clone(),
-                );
-                agent.add_context_provider(Box::new(mesh_provider));
-                tracing::info!(
-                    event = "mesh_slice_provider_registered",
-                    "MeshSliceProvider registered in context_providers (SEAM #2)"
-                );
+            // MeshSliceProvider::new returns (provider, store); build the `from_store`
+            // provider here (M2 P5 despejo — `add_mesh_slice_provider` is gone from the
+            // loop; it only receives an already-built `TurnContextProvider` boxed now).
+            let (_, store) =
+                bastion_mesh::mesh::context_provider::MeshSliceProvider::new(local_owner.clone());
+            // WR-06: mirrors the removed `add_mesh_slice_provider`'s OWN owner
+            // resolution exactly (BASTION_OWNER_ID, then MESH_OWNER_ID, then
+            // DEFAULT_OWNER) — deliberately NOT the outer `local_owner` above (no
+            // MESH_OWNER_ID fallback there); preserved verbatim, not reconciled.
+            let local_owner_for_mesh_provider = std::env::var("BASTION_OWNER_ID")
+                .or_else(|_| std::env::var("MESH_OWNER_ID"))
+                .unwrap_or_else(|_| bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string());
+            let mesh_provider = bastion_mesh::mesh::context_provider::MeshSliceProvider::from_store(
+                local_owner_for_mesh_provider,
+                store.clone(),
+            );
+            agent.add_context_provider(Box::new(mesh_provider));
+            tracing::info!(
+                event = "mesh_slice_provider_registered",
+                "MeshSliceProvider registered in context_providers (SEAM #2)"
+            );
 
-                // Periodic mesh sync (mesh.sync_interval minutes, default 15; 0 = disable)
-                let sync_interval = cfg.mesh.sync_interval;
-                let _mesh_sync_handle = bastion::scheduler::cron::spawn_mesh_sync_job(
-                    shared.clone(),
-                    mesh_peer_map.clone(),
-                    agent.memory.clone(),
-                    local_owner,
-                    sync_interval,
-                );
-                tracing::info!(
-                    event = "mesh_transport_enabled",
-                    sync_interval_minutes = sync_interval
-                );
+            // Periodic mesh sync (mesh.sync_interval minutes, default 15; 0 = disable)
+            let sync_interval = cfg.mesh.sync_interval;
+            let _mesh_sync_handle = bastion_mesh::scheduler::cron::spawn_mesh_sync_job(
+                shared.clone(),
+                mesh_peer_map.clone(),
+                agent.memory.clone(),
+                local_owner,
+                sync_interval,
+            );
+            tracing::info!(
+                event = "mesh_transport_enabled",
+                sync_interval_minutes = sync_interval
+            );
 
-                (Some(shared), Some(store))
-            } else {
-                tracing::info!(
-                    event = "mesh_transport_disabled",
-                    "MESH_IDENTITY_KEY not set — mesh disabled"
-                );
-                (None, None)
-            };
+            (Some(shared), Some(store))
+        } else {
+            tracing::info!(
+                event = "mesh_transport_disabled",
+                "MESH_IDENTITY_KEY not set — mesh disabled"
+            );
+            (None, None)
+        };
 
         // agent_identity was already loaded above (line ~170) — reuse outer scope.
         let agent_name =
@@ -577,7 +585,7 @@ async fn daemon_loop(
             let personas = Arc::new(registry_for_product.clone());
             let goals = goals_for_product.clone();
             let local_owner = std::env::var("BASTION_OWNER_ID")
-                .unwrap_or_else(|_| bastion::agent::loop_::DEFAULT_OWNER.to_string());
+                .unwrap_or_else(|_| bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string());
             let token_perms = build_token_perms(cfg);
             // WR-06: after CR-01's fail-closed auth fix, an empty token map means the
             // server is enabled but permanently unreachable (no token can ever match) —
@@ -875,7 +883,7 @@ async fn daemon_loop(
     // between turns via the pending_rx arm.
     {
         let cron = CronService::new(agent.pending_tx.clone(), goals_for_product.clone());
-        let owner = bastion::agent::loop_::DEFAULT_OWNER.to_string();
+        let owner = bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string();
         // Only spawn heartbeat if there are goals to nudge (fire-and-forget task)
         tokio::spawn(async move {
             cron.run_heartbeat(std::time::Duration::from_secs(86_400), &owner)
@@ -891,9 +899,9 @@ async fn daemon_loop(
         // Minimal registry scoped to exactly what the Reflector's dedup leg needs
         // (memupalace's memory_embed tool) — avoids refactoring AgentLoop.capability_registry's
         // field type just to share it across a separately-spawned task.
-        let mut reflector_registry = bastion::capability::CapabilityRegistry::new();
+        let mut reflector_registry = bastion_runtime::capability::CapabilityRegistry::new();
         if let Err(e) = reflector_registry.register(Arc::new(
-            bastion::capability::adapters::McpToolAdapter {
+            bastion_mcp::adapters::McpToolAdapter {
                 tool_name: "memory_embed".to_string(),
                 server_label: "memupalace".to_string(),
                 description: "Return the embedding vector for a text (dedup similarity)"
@@ -918,20 +926,20 @@ async fn daemon_loop(
         // LEARN-05 gap fix: an explicit [reflector].model must actually select the
         // Reflector's provider, not just be threaded through inertly. Unset/empty falls
         // back to the exact same default-agent provider instance (safe pre-fix behavior).
-        let reflector_provider = bastion::provider::registry::resolve_reflector_provider(
+        let reflector_provider = bastion_providers::registry::resolve_reflector_provider(
             cfg.reflector.model.as_deref(),
             &cfg.agent.default_model,
             agent.provider.clone(),
         )?;
 
-        let generator: Arc<dyn bastion::learn::CandidateGenerator> =
-            Arc::new(bastion::learn::LlmCandidateGenerator::new(
+        let generator: Arc<dyn bastion_cognition::learn::CandidateGenerator> =
+            Arc::new(bastion_cognition::learn::LlmCandidateGenerator::new(
                 reflector_provider,
                 cfg.reflector.model.clone(),
                 cfg.reflector.allow_cloud,
             ));
 
-        let reflector = bastion::learn::Reflector::new(
+        let reflector = bastion_cognition::learn::Reflector::new(
             agent.memory.clone(),
             generator,
             Arc::new(reflector_registry),
@@ -939,7 +947,7 @@ async fn daemon_loop(
             cfg.session.db_path.clone(),
             cfg.logging.log_path.clone(),
         );
-        let owner = bastion::agent::loop_::DEFAULT_OWNER.to_string();
+        let owner = bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string();
         let interval_hours = cfg.reflector.interval_hours;
         tokio::spawn(async move {
             reflector.run(&owner).await;
@@ -988,7 +996,7 @@ async fn daemon_loop(
                         match agent
                             .handle_command(
                                 s.trim(),
-                                bastion::agent::loop_::DEFAULT_OWNER,
+                                bastion_runtime::agent::loop_::DEFAULT_OWNER,
                                 &command_handler,
                             )
                             .await?
@@ -1121,9 +1129,9 @@ fn build_token_perms(
                     read_only: t.read_only,
                     owner_id: t.owner_id.clone(),
                     privacy_tier: if t.cloud_ok {
-                        bastion::memory::PrivacyTier::CloudOk
+                        bastion_memory::PrivacyTier::CloudOk
                     } else {
-                        bastion::memory::PrivacyTier::LocalOnly
+                        bastion_memory::PrivacyTier::LocalOnly
                     },
                 },
             )

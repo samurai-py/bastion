@@ -38,25 +38,25 @@
 //!    passes — that a `LocalOnly` tier against a non-local destination returns `Err`
 //!    with dispatch never reached, while `CloudOk` reaches dispatch.
 //!    `mcp_tool_source_gates_egress_before_attempting_dispatch` re-proves the same
-//!    thing against the REAL production `bastion::mcp::McpToolSource`: a `LocalOnly`
+//!    thing against the REAL production `bastion_mcp::McpToolSource`: a `LocalOnly`
 //!    tier fails with the egress error BEFORE the (nonexistent) tool is even looked
 //!    up, distinguishable from the "tool not found" error a `CloudOk` tier gets
 //!    once the gate lets it through to the empty MCP client.
 
 use async_trait::async_trait;
-use bastion::agent::context::{ContextBlock, TurnContextProvider};
-use bastion::agent::loop_::{AgentLoop, DEFAULT_OWNER};
-use bastion::agent::ports::{ApprovalGate, ToolSource};
-use bastion::capability::approval::SqliteApprovalGate;
-use bastion::capability::{Capability, CapabilityRegistry, InvokeCtx};
-use bastion::goal::{GoalEngine, ScoringConfig};
-use bastion::mcp::McpClient;
-use bastion::memory::sqlite::SqliteMemory;
-use bastion::memory::{Memory, PrivacyTier, SharedMemory};
-use bastion::persona::{Persona, PersonaRegistry, PersonaResponder};
-use bastion::provider::{Provider, SharedProvider};
-use bastion::session::SessionManager;
-use bastion::types::{CallConfig, LlmResponse, Message, TokenUsage};
+use bastion_cognition::goal::{GoalEngine, ScoringConfig};
+use bastion_mcp::McpClient;
+use bastion_memory::sqlite::SqliteMemory;
+use bastion_memory::{Memory, PrivacyTier, SharedMemory};
+use bastion_personas::persona::{Persona, PersonaRegistry, PersonaResponder};
+use bastion_providers::{Provider, SharedProvider};
+use bastion_runtime::agent::context::{ContextBlock, TurnContextProvider};
+use bastion_runtime::agent::loop_::{AgentLoop, DEFAULT_OWNER};
+use bastion_runtime::agent::ports::{ApprovalGate, ToolSource};
+use bastion_runtime::capability::approval::SqliteApprovalGate;
+use bastion_runtime::capability::{Capability, CapabilityRegistry, InvokeCtx};
+use bastion_runtime::session::SessionManager;
+use bastion_types::{CallConfig, LlmResponse, Message, TokenUsage};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -380,7 +380,7 @@ async fn make_agent(db_path: &str) -> AgentLoop {
     AgentLoop::new(
         provider,
         SessionManager::new(db_path),
-        Arc::new(bastion::mcp::McpToolSource::new(mcp)),
+        Arc::new(bastion_mcp::McpToolSource::new(mcp)),
         session.create_session().await.expect("create_session"),
         10.0,
         Arc::new(PersonaResponder::new(make_registry_for_agent())),
@@ -388,10 +388,10 @@ async fn make_agent(db_path: &str) -> AgentLoop {
         Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],
         Arc::new(SqliteApprovalGate::new(db_path)),
-        Arc::new(bastion::eval::failure_sink::EvalFailureSink),
+        Arc::new(bastion_cognition::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
-        Arc::new(bastion::provider::registry::RegistryProviderResolver),
-        Some(Arc::new(bastion::agent::dream::DreamFlush::new(
+        Arc::new(bastion_providers::registry::RegistryProviderResolver),
+        Some(Arc::new(bastion_cognition::agent::dream::DreamFlush::new(
             memory.clone(),
         ))),
         Some(Arc::new(bastion::agent::skills::SkillReloadObserver)),
@@ -527,7 +527,7 @@ impl ToolSource for GateRecordingToolSource {
     ) -> anyhow::Result<Value> {
         // Same chokepoint McpToolSource uses (crates/bastion-mcp/src/tool_source.rs):
         // gate BEFORE marking dispatch as having happened.
-        bastion::hooks::egress::check_egress(resolved_tier, "external")?;
+        bastion_runtime::hooks::egress::check_egress(resolved_tier, "external")?;
         self.dispatched
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(serde_json::json!({"ok": true}))
@@ -577,7 +577,7 @@ async fn tool_source_gate_blocks_dispatch_on_local_only_tier() {
 }
 
 /// Same invariant, against the REAL production `ToolSource`
-/// (`bastion::mcp::McpToolSource`), not a fake: a `LocalOnly` tier must fail
+/// (`bastion_mcp::McpToolSource`), not a fake: a `LocalOnly` tier must fail
 /// with the egress error BEFORE the (nonexistent) tool name is even looked up
 /// in the (empty) MCP registry — distinguishable from the "tool not found"
 /// error a `CloudOk` tier gets once the gate lets it through to dispatch.
@@ -591,7 +591,7 @@ async fn mcp_tool_source_gates_egress_before_attempting_dispatch() {
             .await
             .expect("connect_all empty"),
     );
-    let source = bastion::mcp::McpToolSource::new(mcp);
+    let source = bastion_mcp::McpToolSource::new(mcp);
 
     let blocked = source
         .call_tool_with_timeout(
@@ -630,7 +630,7 @@ async fn mcp_tool_source_gates_egress_before_attempting_dispatch() {
 // finding #4) — trust-tagging parity on the two `ToolSource`-bypass call
 // sites (`dispatch_tool_loop`'s empty-registry fallback,
 // `run_provider_fallback`'s whole tool loop). Both now tag their raw
-// dispatch result via `bastion::capability::TaggedValue::untrusted` — the
+// dispatch result via `bastion_runtime::capability::TaggedValue::untrusted` — the
 // SAME wrapping `CapabilityRegistry::invoke` applies to a non-local
 // capability — instead of handing the model untagged JSON.
 // ===========================================================================
@@ -681,7 +681,8 @@ async fn bypass_tag_matches_registry_tag_for_equivalent_non_local_result() {
         .await
         .expect("non-local capability must dispatch under CloudOk");
 
-    let via_bypass = bastion::capability::TaggedValue::untrusted("shared_tool", data.clone());
+    let via_bypass =
+        bastion_runtime::capability::TaggedValue::untrusted("shared_tool", data.clone());
 
     assert_eq!(
         via_registry.data, via_bypass.data,

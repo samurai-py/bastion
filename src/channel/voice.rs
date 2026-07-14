@@ -16,11 +16,11 @@
 // Trigger: push-to-talk (default, always on) via `crossterm` SPACE key
 // press/release. Wake-word (D-10, opt-in, default OFF) is a second, independent
 // trigger that reuses the exact same `handle_voice_turn` core (Task 4).
-use crate::agent::handle::AgentHandle;
-use crate::capability::registry::{CapabilityRegistry, InvokeCtx};
 use crate::channel::Channel;
-use crate::memory::PrivacyTier;
 use base64::Engine;
+use bastion_memory::PrivacyTier;
+use bastion_runtime::agent::handle::AgentHandle;
+use bastion_runtime::capability::registry::{CapabilityRegistry, InvokeCtx};
 use std::sync::{Arc, Mutex};
 
 /// Pure capability-invocation chain for a single voice turn (VOICE-01).
@@ -109,7 +109,7 @@ impl VoiceChannel {
         wake_word_enabled: bool,
     ) -> Self {
         let owner = std::env::var("BASTION_OWNER_ID")
-            .unwrap_or_else(|_| crate::agent::loop_::DEFAULT_OWNER.to_string());
+            .unwrap_or_else(|_| bastion_runtime::agent::loop_::DEFAULT_OWNER.to_string());
         Self {
             owner,
             default_persona: None,
@@ -658,10 +658,10 @@ async fn wake_word_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::handle;
-    use crate::capability::registry::Capability;
     use async_trait::async_trait;
     use base64::Engine;
+    use bastion_runtime::agent::handle;
+    use bastion_runtime::capability::registry::Capability;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;

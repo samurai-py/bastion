@@ -6,11 +6,11 @@
 //! weight.
 
 use anyhow::Result;
-use bastion::agent::context::TurnContextProvider;
-use bastion::agent::memory_rag::MemoryRagProvider;
-use bastion::memory::sqlite::SqliteMemory;
-use bastion::memory::{BeliefDraft, Memory, PrivacyTier, SharedMemory};
-use bastion::session::SessionManager;
+use bastion_cognition::agent::memory_rag::MemoryRagProvider;
+use bastion_memory::sqlite::SqliteMemory;
+use bastion_memory::{BeliefDraft, Memory, PrivacyTier, SharedMemory};
+use bastion_runtime::agent::context::TurnContextProvider;
+use bastion_runtime::session::SessionManager;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::sync::RwLock;

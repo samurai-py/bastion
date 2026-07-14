@@ -18,12 +18,12 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::capability::CapabilityRegistry;
-use crate::goal::GoalEngine;
-use crate::hooks::egress::check_egress;
-use crate::memory::{PrivacyTier, SharedMemory};
-use crate::persona::PersonaRegistry;
 use axum::Router;
+use bastion_cognition::goal::GoalEngine;
+use bastion_memory::{PrivacyTier, SharedMemory};
+use bastion_personas::persona::PersonaRegistry;
+use bastion_runtime::capability::CapabilityRegistry;
+use bastion_runtime::hooks::egress::check_egress;
 use rmcp::handler::server::router::Router as McpRouter;
 use rmcp::model::*;
 use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
@@ -200,7 +200,7 @@ impl ServerHandler for BastionMcpServer {
             // tier — never a blanket CloudOk applied to every MCP caller, which
             // would silently disable check_egress's fail-closed guarantee for
             // every capability routed through this server.
-            let ctx = crate::capability::InvokeCtx {
+            let ctx = bastion_runtime::capability::InvokeCtx {
                 owner: perms.owner_id,
                 privacy_tier: Some(perms.privacy_tier),
             };
@@ -292,7 +292,7 @@ impl ServerHandler for BastionMcpServer {
                     vec![ResourceContents::text(json, &uri).with_mime_type("application/json")]
                 }
                 "bastion://personas" => {
-                    let all_personas: Vec<&crate::persona::Persona> = personas
+                    let all_personas: Vec<&bastion_personas::persona::Persona> = personas
                         .names()
                         .into_iter()
                         .filter_map(|name| personas.get(name))

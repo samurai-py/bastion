@@ -3,11 +3,11 @@
 // Security: owner is resolved from a trusted auth-token→owner_id map (CR-03).
 // The request body MUST NOT control owner identity. Unknown tokens → 401.
 // Errors are mapped to non-2xx status codes without leaking internal detail (CR-05).
-use crate::agent::handle::AgentHandle;
 use crate::channel::{Channel, OwnerMap};
-use crate::mesh::{MeshPeer, MeshPeerMap};
-use crate::types::BastionError;
 use axum::http::StatusCode;
+use bastion_mesh::mesh::{MeshPeer, MeshPeerMap};
+use bastion_runtime::agent::handle::AgentHandle;
+use bastion_types::BastionError;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -138,12 +138,12 @@ struct AppState {
     /// JWT signing secret for /auth/exchange (HS256).
     jwt_secret: String,
     /// Pluggable mesh transport (P2PTransport or relay). None if mesh not configured.
-    mesh_transport: Option<crate::mesh::SharedMeshTransport>,
+    mesh_transport: Option<bastion_mesh::mesh::SharedMeshTransport>,
     /// In-memory store of received mesh slices, keyed by from_owner.
     /// Updated by ingest_handler; read by MeshSliceProvider (SEAM #2).
-    mesh_slice_store: Option<crate::mesh::context_provider::MeshSliceStore>,
+    mesh_slice_store: Option<bastion_mesh::mesh::context_provider::MeshSliceStore>,
     /// Agent identity for Agent Card endpoint (SEC-06). None = /agent-card returns 404.
-    agent_identity: Option<std::sync::Arc<crate::identity::age_identity::AgeIdentity>>,
+    agent_identity: Option<std::sync::Arc<bastion_mesh::identity::age_identity::AgeIdentity>>,
     /// Human-readable agent name for Agent Card.
     agent_name: String,
     /// WhatsApp Cloud API config (CHAN-01). None = /whatsapp/webhook routes reject
@@ -152,7 +152,7 @@ struct AppState {
     /// Composio OAuth client (SEC-03). None = /auth/composio/callback rejects with
     /// 501 rather than panicking — Composio integration is opt-in per instance
     /// (requires COMPOSIO_API_KEY).
-    composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
+    composio_oauth: Option<std::sync::Arc<bastion_mcp::oauth::ComposioOAuth>>,
 }
 
 /// Categorize an anyhow error for safe HTTP status mapping.
@@ -323,7 +323,7 @@ async fn ingest_handler(
         Ok(o) => o,
         Err(resp) => return *resp,
     };
-    let envelope: crate::mesh::MeshEnvelope = match serde_json::from_slice(&body) {
+    let envelope: bastion_mesh::mesh::MeshEnvelope = match serde_json::from_slice(&body) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(event = "mesh_ingest_bad_body", error = %e);
@@ -755,7 +755,11 @@ async fn mesh_pair_handler(
                     .expect("failed to build reqwest client");
                 let card_url = format!("{}/agent-card", body.peer_url.trim_end_matches('/'));
 
-                let card: crate::identity::AgentCard = match client.get(&card_url).send().await {
+                let card: bastion_mesh::identity::AgentCard = match client
+                    .get(&card_url)
+                    .send()
+                    .await
+                {
                     Ok(resp) => match resp.json().await {
                         Ok(c) => c,
                         Err(e) => {
@@ -801,7 +805,7 @@ async fn mesh_pair_handler(
                     }
                 };
 
-                match crate::identity::age_identity::AgeIdentity::verify_agent_card(
+                match bastion_mesh::identity::age_identity::AgeIdentity::verify_agent_card(
                     &card, &sig_bytes,
                 ) {
                     Ok(true) => {}
@@ -895,8 +899,8 @@ async fn agent_card_handler(
         Some(format!("{}/mcp", public_url))
     };
 
-    let mut card = crate::identity::AgentCard {
-        version: crate::identity::AGENT_CARD_VERSION,
+    let mut card = bastion_mesh::identity::AgentCard {
+        version: bastion_mesh::identity::AGENT_CARD_VERSION,
         name: state.agent_name.clone(),
         pubkey_age: identity.pubkey_age(),
         pubkey_ed25519: identity.pubkey_ed25519(),
@@ -1088,10 +1092,10 @@ pub async fn serve_with_mesh(
     events_tx: broadcast::Sender<String>,
     mesh_peer_map: Arc<RwLock<MeshPeerMap>>,
     jwt_secret: String,
-    mesh_transport: Option<crate::mesh::SharedMeshTransport>,
-    mesh_slice_store: Option<crate::mesh::context_provider::MeshSliceStore>,
+    mesh_transport: Option<bastion_mesh::mesh::SharedMeshTransport>,
+    mesh_slice_store: Option<bastion_mesh::mesh::context_provider::MeshSliceStore>,
     otc_store: OtcStore,
-    agent_identity: Option<std::sync::Arc<crate::identity::age_identity::AgeIdentity>>,
+    agent_identity: Option<std::sync::Arc<bastion_mesh::identity::age_identity::AgeIdentity>>,
     agent_name: String,
     // Optional pre-built axum Router to mount alongside the webhook routes.
     // Used by the MCP server to expose its Streamable HTTP service at the
@@ -1103,7 +1107,7 @@ pub async fn serve_with_mesh(
     whatsapp: Option<crate::channel::whatsapp::WhatsAppConfig>,
     // Composio OAuth client (SEC-03). None = /auth/composio/callback rejects with
     // 501 rather than panicking — opt-in, requires COMPOSIO_API_KEY.
-    composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
+    composio_oauth: Option<std::sync::Arc<bastion_mcp::oauth::ComposioOAuth>>,
 ) -> anyhow::Result<()> {
     let state = AppState {
         agent,
@@ -1145,14 +1149,14 @@ pub async fn serve_with_mesh(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::handle;
     use crate::channel::OwnerMap;
     use axum::body::Body;
+    use bastion_runtime::agent::handle;
     use http::{Request, StatusCode};
     use tokio::sync::mpsc;
     use tower::ServiceExt;
 
-    fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
+    fn stub_consumer(mut rx: mpsc::Receiver<bastion_runtime::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let _ = req.reply.send(Ok(format!("echo:{}", req.text)));
@@ -1497,7 +1501,7 @@ mod tests {
     /// Builds a router with the given (optional) ComposioOAuth wired into AppState —
     /// `None` exercises the "not configured" 501 path, `Some` the real persist path.
     fn build_router_with_composio(
-        composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
+        composio_oauth: Option<std::sync::Arc<bastion_mcp::oauth::ComposioOAuth>>,
     ) -> Router {
         let (h, rx) = handle::channel();
         stub_consumer(rx);
@@ -1529,9 +1533,9 @@ mod tests {
     async fn post_composio_callback_persists_connection_and_returns_200() {
         let f = tempfile::NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap().to_owned();
-        let session = crate::session::SessionManager::new(&path);
+        let session = bastion_runtime::session::SessionManager::new(&path);
         session.init_schema().await.expect("init_schema");
-        let oauth = Arc::new(crate::mcp::oauth::ComposioOAuth::new_for_test(
+        let oauth = Arc::new(bastion_mcp::oauth::ComposioOAuth::new_for_test(
             &path,
             "http://unused.invalid",
         ));
@@ -1571,9 +1575,9 @@ mod tests {
     async fn post_composio_callback_ignores_spoofed_owner_field_in_body() {
         let f = tempfile::NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap().to_owned();
-        let session = crate::session::SessionManager::new(&path);
+        let session = bastion_runtime::session::SessionManager::new(&path);
         session.init_schema().await.expect("init_schema");
-        let oauth = Arc::new(crate::mcp::oauth::ComposioOAuth::new_for_test(
+        let oauth = Arc::new(bastion_mcp::oauth::ComposioOAuth::new_for_test(
             &path,
             "http://unused.invalid",
         ));
@@ -1625,9 +1629,9 @@ mod tests {
     async fn post_composio_callback_invalid_state_returns_401() {
         let f = tempfile::NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap().to_owned();
-        let session = crate::session::SessionManager::new(&path);
+        let session = bastion_runtime::session::SessionManager::new(&path);
         session.init_schema().await.expect("init_schema");
-        let oauth = Arc::new(crate::mcp::oauth::ComposioOAuth::new_for_test(
+        let oauth = Arc::new(bastion_mcp::oauth::ComposioOAuth::new_for_test(
             &path,
             "http://unused.invalid",
         ));
@@ -1710,9 +1714,9 @@ mod tests {
     async fn post_composio_callback_malformed_body_returns_400() {
         let f = tempfile::NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap().to_owned();
-        let session = crate::session::SessionManager::new(&path);
+        let session = bastion_runtime::session::SessionManager::new(&path);
         session.init_schema().await.expect("init_schema");
-        let oauth = Arc::new(crate::mcp::oauth::ComposioOAuth::new_for_test(
+        let oauth = Arc::new(bastion_mcp::oauth::ComposioOAuth::new_for_test(
             &path,
             "http://unused.invalid",
         ));

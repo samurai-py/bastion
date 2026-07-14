@@ -2,8 +2,8 @@
 //! These are integration-level smoke tests that verify the public egress contract.
 //! The full (tier × provider) matrix is in src/hooks/egress.rs unit tests.
 
-use bastion::hooks::egress::check_egress;
-use bastion::memory::PrivacyTier;
+use bastion_memory::PrivacyTier;
+use bastion_runtime::hooks::egress::check_egress;
 
 #[test]
 fn fallback_egress_gate_local_only_blocks_cloud() {

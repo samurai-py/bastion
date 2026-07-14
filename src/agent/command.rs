@@ -1,7 +1,7 @@
-use crate::memory::SharedMemory;
-use crate::persona::PersonaRegistry;
-use crate::provider::registry::resolve_provider;
-use crate::provider::SharedProvider;
+use bastion_memory::SharedMemory;
+use bastion_personas::persona::PersonaRegistry;
+use bastion_providers::registry::resolve_provider;
+use bastion_providers::SharedProvider;
 
 /// Every real Bastion slash command — single source of truth so callers (e.g.
 /// main.rs's inbound_rx arm, WEB-CMD-01) can tell "known command that's
@@ -36,14 +36,14 @@ pub const KNOWN_COMMANDS: &[&str] = &[
 #[derive(Clone, Default)]
 pub struct CommandResources {
     pub otc_store: Option<crate::channel::webhook::OtcStore>,
-    pub composio_oauth: Option<std::sync::Arc<crate::mcp::oauth::ComposioOAuth>>,
+    pub composio_oauth: Option<std::sync::Arc<bastion_mcp::oauth::ComposioOAuth>>,
     pub registry: PersonaRegistry,
 }
 
 /// Moved to `agent::ports::CommandResult` (M2 step 3b, D3 — it is the type
 /// the kernel's `CommandHandler` port returns). Re-exported here so every
 /// existing `agent::command::CommandResult` path keeps compiling unchanged.
-pub use crate::agent::ports::CommandResult;
+pub use bastion_runtime::agent::ports::CommandResult;
 
 /// P6 `CommandHandler` implementation — the product cockpit (M2 step 3b, D3).
 ///
@@ -65,7 +65,7 @@ impl CockpitCommandHandler {
 }
 
 #[async_trait::async_trait]
-impl crate::agent::ports::CommandHandler for CockpitCommandHandler {
+impl bastion_runtime::agent::ports::CommandHandler for CockpitCommandHandler {
     async fn handle(
         &self,
         input: &str,
@@ -124,7 +124,7 @@ pub async fn handle_command(
     memory: &SharedMemory,
     forced_persona: &mut Option<String>,
     otc_store: Option<&crate::channel::webhook::OtcStore>,
-    composio_oauth: Option<&crate::mcp::oauth::ComposioOAuth>,
+    composio_oauth: Option<&bastion_mcp::oauth::ComposioOAuth>,
     owner: &str,
 ) -> anyhow::Result<CommandResult> {
     let trimmed = input.trim();
@@ -396,13 +396,13 @@ fn read_recent_log_errors(path: &str, max: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::sqlite::SqliteMemory;
-    use crate::memory::Memory;
-    use crate::memory::PrivacyTier;
-    use crate::persona::{Persona, PersonaRegistry};
-    use crate::provider::{Provider, SharedProvider};
-    use crate::types::{CallConfig, LlmResponse, Message};
     use async_trait::async_trait;
+    use bastion_memory::sqlite::SqliteMemory;
+    use bastion_memory::Memory;
+    use bastion_memory::PrivacyTier;
+    use bastion_personas::persona::{Persona, PersonaRegistry};
+    use bastion_providers::{Provider, SharedProvider};
+    use bastion_types::{CallConfig, LlmResponse, Message};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
@@ -452,7 +452,7 @@ mod tests {
     }
 
     async fn make_memory(db_path: &str) -> SharedMemory {
-        let session = crate::session::SessionManager::new(db_path);
+        let session = bastion_runtime::session::SessionManager::new(db_path);
         session.init_schema().await.expect("init_schema");
         Arc::new(RwLock::new(
             Box::new(SqliteMemory::new(db_path)) as Box<dyn Memory>
@@ -841,7 +841,8 @@ mod tests {
         let mut forced = None;
 
         let addr = spawn_scripted_composio_server("https://composio.dev/auth/xyz").await;
-        let oauth = crate::mcp::oauth::ComposioOAuth::new_for_test(&path, format!("http://{addr}"));
+        let oauth =
+            bastion_mcp::oauth::ComposioOAuth::new_for_test(&path, format!("http://{addr}"));
 
         let result = handle_command(
             "/connect-app-composio gmail",

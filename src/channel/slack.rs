@@ -17,8 +17,8 @@
 // closure — it is threaded through `SlackClientEventsListenerEnvironment`'s
 // `with_user_state`/`SlackClientEventsUserState` storage instead, exactly the
 // mechanism the crate itself provides for this.
-use crate::agent::handle::AgentHandle;
 use crate::channel::{Channel, OwnerMap};
+use bastion_runtime::agent::handle::AgentHandle;
 use rvstruct::ValueStruct;
 use slack_morphism::prelude::*;
 use std::sync::Arc;
@@ -232,8 +232,8 @@ async fn on_slack_push_event(
             // M3: log turn_error WITHOUT conversation content.
             tracing::error!(event = "turn_error", user_id = %user.value());
             // M3: map error to a friendly message — never leak e.to_string().
-            match e.downcast_ref::<crate::types::BastionError>() {
-                Some(crate::types::BastionError::PrivacyEgressBlocked) => {
+            match e.downcast_ref::<bastion_types::BastionError>() {
+                Some(bastion_types::BastionError::PrivacyEgressBlocked) => {
                     "Não posso responder com este provider (restrição de privacidade).".to_owned()
                 }
                 _ => "Tive um problema neste turn. Use /logs para detalhes.".to_owned(),
@@ -255,11 +255,11 @@ async fn on_slack_push_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::handle;
+    use bastion_runtime::agent::handle;
     use tokio::sync::mpsc;
 
     /// Stub consumer: replies "echo:{text}".
-    fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
+    fn stub_consumer(mut rx: mpsc::Receiver<bastion_runtime::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let _ = req.reply.send(Ok(format!("echo:{}", req.text)));

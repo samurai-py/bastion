@@ -1,5 +1,5 @@
 //! Integration test for the A-02 `AgentRuntime` conformance suite
-//! (`bastion::agent_runtime::conformance`).
+//! (`bastion_agent_runtime::conformance`).
 //!
 //! Ships an embedded, deterministic reference implementation of the A-01
 //! contract (`FakeRuntime`/`FakeSession`, no subprocess/network) and asserts
@@ -29,8 +29,8 @@
 //! instead of just returning `NotResumable`.
 
 use async_trait::async_trait;
-use bastion::agent_runtime::conformance::{self, ConformanceScenarios, FaultInjection};
-use bastion::agent_runtime::*;
+use bastion_agent_runtime::conformance::{self, ConformanceScenarios, FaultInjection};
+use bastion_agent_runtime::*;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::path::PathBuf;

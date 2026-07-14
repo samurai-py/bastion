@@ -1,5 +1,5 @@
-use bastion::agent::compactor::AutoCompact;
-use bastion::types::{Message, MessageContent, Role};
+use bastion_runtime::agent::compactor::AutoCompact;
+use bastion_types::{Message, MessageContent, Role};
 
 fn make_messages(n: usize) -> Vec<Message> {
     (0..n)
@@ -36,8 +36,8 @@ fn needs_compaction_zero_limit() {
 
 #[tokio::test]
 async fn compact_skips_when_few_messages() {
-    use bastion::provider::Provider;
-    use bastion::types::{CallConfig, LlmResponse};
+    use bastion_providers::Provider;
+    use bastion_types::{CallConfig, LlmResponse};
 
     struct MockProvider;
     #[async_trait::async_trait]
@@ -61,7 +61,7 @@ async fn compact_skips_when_few_messages() {
 
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("t.db").to_str().unwrap().to_owned();
-    let sm = bastion::session::SessionManager::new(&db);
+    let sm = bastion_runtime::session::SessionManager::new(&db);
     sm.init_schema().await.unwrap();
     let sid = sm.create_session().await.unwrap();
 
@@ -71,7 +71,7 @@ async fn compact_skips_when_few_messages() {
         .compact(
             &sid,
             &msgs,
-            &MockProvider as &dyn bastion::provider::Provider,
+            &MockProvider as &dyn bastion_providers::Provider,
             &sm,
         )
         .await
@@ -81,8 +81,8 @@ async fn compact_skips_when_few_messages() {
 
 #[tokio::test]
 async fn compact_fires_with_enough_messages() {
-    use bastion::provider::Provider;
-    use bastion::types::{CallConfig, LlmResponse};
+    use bastion_providers::Provider;
+    use bastion_types::{CallConfig, LlmResponse};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -114,7 +114,7 @@ async fn compact_fires_with_enough_messages() {
 
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("t.db").to_str().unwrap().to_owned();
-    let sm = bastion::session::SessionManager::new(&db);
+    let sm = bastion_runtime::session::SessionManager::new(&db);
     sm.init_schema().await.unwrap();
     let sid = sm.create_session().await.unwrap();
 
@@ -122,7 +122,7 @@ async fn compact_fires_with_enough_messages() {
     let msgs = make_messages(25);
     let mock = MockProvider { called: called2 };
     let result: Vec<_> = ac
-        .compact(&sid, &msgs, &mock as &dyn bastion::provider::Provider, &sm)
+        .compact(&sid, &msgs, &mock as &dyn bastion_providers::Provider, &sm)
         .await
         .unwrap();
 

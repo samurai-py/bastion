@@ -5,8 +5,8 @@
 //! Also exposes `MockProvider` for scripted structured-completion responses.
 
 use async_trait::async_trait;
-use bastion::provider::Provider;
-use bastion::types::{CallConfig, LlmResponse, Message, TokenUsage};
+use bastion_providers::Provider;
+use bastion_types::{CallConfig, LlmResponse, Message, TokenUsage};
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------

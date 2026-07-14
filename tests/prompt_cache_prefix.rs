@@ -19,16 +19,16 @@
 //! the stable-prefix bytes this test isolates.
 
 use async_trait::async_trait;
-use bastion::agent::loop_::{AgentLoop, DEFAULT_OWNER};
-use bastion::capability::approval::SqliteApprovalGate;
-use bastion::goal::{GoalEngine, ScoringConfig};
-use bastion::mcp::McpClient;
-use bastion::memory::sqlite::SqliteMemory;
-use bastion::memory::{BeliefDraft, Memory, PrivacyTier, SharedMemory};
-use bastion::persona::{Persona, PersonaRegistry, PersonaResponder};
-use bastion::provider::{Provider, SharedProvider};
-use bastion::session::SessionManager;
-use bastion::types::{CallConfig, LlmResponse, Message, TokenUsage};
+use bastion_cognition::goal::{GoalEngine, ScoringConfig};
+use bastion_mcp::McpClient;
+use bastion_memory::sqlite::SqliteMemory;
+use bastion_memory::{BeliefDraft, Memory, PrivacyTier, SharedMemory};
+use bastion_personas::persona::{Persona, PersonaRegistry, PersonaResponder};
+use bastion_providers::{Provider, SharedProvider};
+use bastion_runtime::agent::loop_::{AgentLoop, DEFAULT_OWNER};
+use bastion_runtime::capability::approval::SqliteApprovalGate;
+use bastion_runtime::session::SessionManager;
+use bastion_types::{CallConfig, LlmResponse, Message, TokenUsage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -108,7 +108,7 @@ async fn make_agent(db_path: &str) -> (AgentLoop, SharedMemory) {
     let agent = AgentLoop::new(
         provider,
         SessionManager::new(db_path),
-        Arc::new(bastion::mcp::McpToolSource::new(mcp)),
+        Arc::new(bastion_mcp::McpToolSource::new(mcp)),
         session.create_session().await.expect("create_session 2"),
         10.0,
         Arc::new(PersonaResponder::new(make_registry())),
@@ -116,10 +116,10 @@ async fn make_agent(db_path: &str) -> (AgentLoop, SharedMemory) {
         Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],
         Arc::new(SqliteApprovalGate::new(db_path)),
-        Arc::new(bastion::eval::failure_sink::EvalFailureSink),
+        Arc::new(bastion_cognition::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
-        Arc::new(bastion::provider::registry::RegistryProviderResolver),
-        Some(Arc::new(bastion::agent::dream::DreamFlush::new(
+        Arc::new(bastion_providers::registry::RegistryProviderResolver),
+        Some(Arc::new(bastion_cognition::agent::dream::DreamFlush::new(
             memory.clone(),
         ))),
         Some(Arc::new(bastion::agent::skills::SkillReloadObserver)),

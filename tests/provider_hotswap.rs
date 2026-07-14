@@ -1,8 +1,8 @@
 // Provider hot-swap correctness test (PROV-05, D-11/D-12)
 // Tests that /model command swaps provider and that session history is preserved.
 
-use bastion::provider::{Provider, SharedProvider};
-use bastion::types::{CallConfig, LlmResponse, Message, TokenUsage};
+use bastion_providers::{Provider, SharedProvider};
+use bastion_types::{CallConfig, LlmResponse, Message, TokenUsage};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

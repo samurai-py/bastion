@@ -9,8 +9,8 @@
 // NOTE (10-RESEARCH.md Pitfall 3): GatewayIntents::MESSAGE_CONTENT below must ALSO be
 // enabled in the Discord Developer Portal (Bot -> Privileged Gateway Intents) — the
 // code-side intent alone is not sufficient; msg.content is empty otherwise.
-use crate::agent::handle::AgentHandle;
 use crate::channel::{Channel, OwnerMap};
+use bastion_runtime::agent::handle::AgentHandle;
 
 /// Discord bot channel (CHAN-03), backed by serenity's gateway client.
 pub struct DiscordChannel {
@@ -159,8 +159,8 @@ impl serenity::client::EventHandler for Handler {
                 // M3: log turn_error WITHOUT conversation content.
                 tracing::error!(event = "turn_error", user_id = %msg.author.id);
                 // M3: map error to a friendly message — never leak e.to_string().
-                match e.downcast_ref::<crate::types::BastionError>() {
-                    Some(crate::types::BastionError::PrivacyEgressBlocked) => {
+                match e.downcast_ref::<bastion_types::BastionError>() {
+                    Some(bastion_types::BastionError::PrivacyEgressBlocked) => {
                         "Não posso responder com este provider (restrição de privacidade)."
                             .to_owned()
                     }
@@ -184,11 +184,11 @@ impl serenity::client::EventHandler for Handler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::handle;
+    use bastion_runtime::agent::handle;
     use tokio::sync::mpsc;
 
     /// Stub consumer: replies "echo:{text}".
-    fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
+    fn stub_consumer(mut rx: mpsc::Receiver<bastion_runtime::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let _ = req.reply.send(Ok(format!("echo:{}", req.text)));

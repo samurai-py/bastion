@@ -3,15 +3,15 @@
 //! they need the real `SqliteMemory` backend and `EvalFailureSink` (product),
 //! which the kernel crate cannot depend on. Asserts are untouched.
 
-use bastion::hooks::output_validator::OutputValidator;
-use bastion::memory::SharedMemory;
+use bastion_memory::SharedMemory;
+use bastion_runtime::hooks::output_validator::OutputValidator;
 
 // --- end-to-end: store → contest → revoked ---
 
 #[tokio::test]
 async fn contestation_soft_revokes_matching_belief() {
-    use bastion::memory::sqlite::SqliteMemory;
-    use bastion::session::sqlite::SessionManager;
+    use bastion_memory::sqlite::SqliteMemory;
+    use bastion_runtime::session::sqlite::SessionManager;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio::sync::RwLock;
@@ -52,7 +52,9 @@ async fn contestation_soft_revokes_matching_belief() {
     assert_eq!(before.len(), 1, "belief should exist before contestation");
 
     // Contestation: user says the exercise belief is wrong
-    let validator = OutputValidator::new(Arc::new(bastion::eval::failure_sink::EvalFailureSink));
+    let validator = OutputValidator::new(Arc::new(
+        bastion_cognition::eval::failure_sink::EvalFailureSink,
+    ));
     validator
         .validate(
             "isso não é mais verdade sobre exercises morning",
@@ -77,8 +79,8 @@ async fn contestation_soft_revokes_matching_belief() {
 
 #[tokio::test]
 async fn no_contestation_leaves_belief_intact() {
-    use bastion::memory::sqlite::SqliteMemory;
-    use bastion::session::sqlite::SessionManager;
+    use bastion_memory::sqlite::SqliteMemory;
+    use bastion_runtime::session::sqlite::SessionManager;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
     use tokio::sync::RwLock;
@@ -106,7 +108,9 @@ async fn no_contestation_leaves_belief_intact() {
         .expect("store");
     }
 
-    let validator = OutputValidator::new(Arc::new(bastion::eval::failure_sink::EvalFailureSink));
+    let validator = OutputValidator::new(Arc::new(
+        bastion_cognition::eval::failure_sink::EvalFailureSink,
+    ));
     validator
         .validate("what's the weather today?", &mem, owner)
         .await

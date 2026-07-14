@@ -163,7 +163,7 @@ impl SkillsLoader {
 /// Synchronous (no awaits): `SkillsLoader::rescan` and the path checks are sync.
 pub struct SkillReloadObserver;
 
-impl crate::agent::ports::ToolResultObserver for SkillReloadObserver {
+impl bastion_runtime::agent::ports::ToolResultObserver for SkillReloadObserver {
     fn on_tool_result(&self, result: &serde_json::Value) {
         // CR-02 path-safety: rebase skill_path to core's own SKILLS_DIR —
         // skill-writer returns /skills/<name>/SKILL.md (its container path).

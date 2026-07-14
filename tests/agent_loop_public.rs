@@ -7,15 +7,15 @@
 //! paths changed (`crate::` -> `bastion::`).
 
 use async_trait::async_trait;
-use bastion::agent::loop_::{AgentLoop, DEFAULT_OWNER};
-use bastion::capability::approval::SqliteApprovalGate;
-use bastion::goal::{GoalEngine, ScoringConfig};
-use bastion::memory::sqlite::SqliteMemory;
-use bastion::memory::{PrivacyTier, SharedMemory};
-use bastion::persona::{Persona, PersonaRegistry, PersonaResponder};
-use bastion::provider::{Provider, SharedProvider};
-use bastion::session::SessionManager;
-use bastion::types::{CallConfig, ContentPart, LlmResponse, Message, MessageContent, TokenUsage};
+use bastion_cognition::goal::{GoalEngine, ScoringConfig};
+use bastion_memory::sqlite::SqliteMemory;
+use bastion_memory::{PrivacyTier, SharedMemory};
+use bastion_personas::persona::{Persona, PersonaRegistry, PersonaResponder};
+use bastion_providers::{Provider, SharedProvider};
+use bastion_runtime::agent::loop_::{AgentLoop, DEFAULT_OWNER};
+use bastion_runtime::capability::approval::SqliteApprovalGate;
+use bastion_runtime::session::SessionManager;
+use bastion_types::{CallConfig, ContentPart, LlmResponse, Message, MessageContent, TokenUsage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -32,7 +32,7 @@ impl Provider for MockProvider {
         Ok(LlmResponse {
             text: format!("response from {}", self.persona_name),
             tool_calls: None,
-            usage: bastion::types::TokenUsage {
+            usage: bastion_types::TokenUsage {
                 input_tokens: 10,
                 output_tokens: 10,
                 cache_read: 0,
@@ -83,12 +83,12 @@ async fn make_loop(db_path: &str) -> AgentLoop {
     let session_id = session.create_session().await.expect("create_session");
 
     let memory: SharedMemory = Arc::new(RwLock::new(
-        Box::new(SqliteMemory::new(db_path)) as Box<dyn bastion::memory::Memory>
+        Box::new(SqliteMemory::new(db_path)) as Box<dyn bastion_memory::Memory>
     ));
 
     // connect_all with non-existent path returns empty client (load_mcp_config returns {})
     let mcp = Arc::new(
-        bastion::mcp::McpClient::connect_all("nonexistent_mcp.json")
+        bastion_mcp::McpClient::connect_all("nonexistent_mcp.json")
             .await
             .expect("connect_all empty"),
     );
@@ -96,7 +96,7 @@ async fn make_loop(db_path: &str) -> AgentLoop {
     AgentLoop::new(
         make_provider("TestPersona"),
         session,
-        Arc::new(bastion::mcp::McpToolSource::new(mcp)),
+        Arc::new(bastion_mcp::McpToolSource::new(mcp)),
         session_id,
         10.0,
         Arc::new(PersonaResponder::new(make_registry("TestPersona"))),
@@ -104,10 +104,10 @@ async fn make_loop(db_path: &str) -> AgentLoop {
         Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],
         Arc::new(SqliteApprovalGate::new(db_path)),
-        Arc::new(bastion::eval::failure_sink::EvalFailureSink),
+        Arc::new(bastion_cognition::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
-        Arc::new(bastion::provider::registry::RegistryProviderResolver),
-        Some(Arc::new(bastion::agent::dream::DreamFlush::new(
+        Arc::new(bastion_providers::registry::RegistryProviderResolver),
+        Some(Arc::new(bastion_cognition::agent::dream::DreamFlush::new(
             memory.clone(),
         ))),
         Some(Arc::new(bastion::agent::skills::SkillReloadObserver)),
@@ -143,7 +143,7 @@ struct ApprovalResolutionStubCap {
 }
 
 #[async_trait]
-impl bastion::capability::Capability for ApprovalResolutionStubCap {
+impl bastion_runtime::capability::Capability for ApprovalResolutionStubCap {
     fn name(&self) -> &str {
         &self.cap_name
     }
@@ -156,7 +156,7 @@ impl bastion::capability::Capability for ApprovalResolutionStubCap {
     async fn invoke(
         &self,
         _args: serde_json::Value,
-        _ctx: &bastion::capability::InvokeCtx,
+        _ctx: &bastion_runtime::capability::InvokeCtx,
     ) -> anyhow::Result<serde_json::Value> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(serde_json::json!({"dispatched": true}))
@@ -166,11 +166,11 @@ impl bastion::capability::Capability for ApprovalResolutionStubCap {
     }
 }
 
-fn cloudok_ctx(owner: &str) -> bastion::capability::InvokeCtx {
+fn cloudok_ctx(owner: &str) -> bastion_runtime::capability::InvokeCtx {
     // Clears Policy 1 (egress) so enqueue_or_reuse's own invoke() call
     // reaches Policy 2 (the approval gate) — same convention as
     // capability::registry::tests::ctx_for.
-    bastion::capability::InvokeCtx {
+    bastion_runtime::capability::InvokeCtx {
         owner: owner.to_string(),
         privacy_tier: Some(PrivacyTier::CloudOk),
     }
@@ -410,14 +410,14 @@ async fn approval_resolution_resolves_oldest_pending_row_only() {
 /// §2's "NÃO como crash do turn").
 #[tokio::test]
 async fn turn_scoped_denial_skips_remaining_tool_calls_and_ends_turn() {
-    use bastion::types::ToolCall;
+    use bastion_types::ToolCall;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CapA {
         calls: Arc<AtomicUsize>,
     }
     #[async_trait]
-    impl bastion::capability::Capability for CapA {
+    impl bastion_runtime::capability::Capability for CapA {
         fn name(&self) -> &str {
             "cap_a"
         }
@@ -434,7 +434,7 @@ async fn turn_scoped_denial_skips_remaining_tool_calls_and_ends_turn() {
         async fn invoke(
             &self,
             _args: serde_json::Value,
-            _ctx: &bastion::capability::InvokeCtx,
+            _ctx: &bastion_runtime::capability::InvokeCtx,
         ) -> anyhow::Result<serde_json::Value> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!({"ran": "a"}))
@@ -445,7 +445,7 @@ async fn turn_scoped_denial_skips_remaining_tool_calls_and_ends_turn() {
         calls: Arc<AtomicUsize>,
     }
     #[async_trait]
-    impl bastion::capability::Capability for CapB {
+    impl bastion_runtime::capability::Capability for CapB {
         fn name(&self) -> &str {
             "cap_b"
         }
@@ -459,7 +459,7 @@ async fn turn_scoped_denial_skips_remaining_tool_calls_and_ends_turn() {
         async fn invoke(
             &self,
             _args: serde_json::Value,
-            _ctx: &bastion::capability::InvokeCtx,
+            _ctx: &bastion_runtime::capability::InvokeCtx,
         ) -> anyhow::Result<serde_json::Value> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!({"ran": "b"}))
@@ -556,7 +556,7 @@ async fn turn_scoped_denial_skips_remaining_tool_calls_and_ends_turn() {
         .await
         .expect("enqueue cap_a");
     let id = match outcome {
-        bastion::capability::ApprovalOutcome::NewlyQueued(id) => id,
+        bastion_runtime::capability::ApprovalOutcome::NewlyQueued(id) => id,
         other => panic!("expected NewlyQueued, got {other:?}"),
     };
     gate.reject("alice", id).await.expect("reject cap_a");
@@ -644,7 +644,7 @@ async fn run_turn_contestation_phrase_revokes_belief() {
 //    a legitimate CloudOk persona's multi-round tool loop.
 #[tokio::test]
 async fn cloud_ok_persona_tool_loop_passes_egress_gate() {
-    use bastion::types::{TokenUsage, ToolCall};
+    use bastion_types::{TokenUsage, ToolCall};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Round 0 returns a tool_call (forces a second provider round through
@@ -706,14 +706,14 @@ async fn cloud_ok_persona_tool_loop_passes_egress_gate() {
     let f = NamedTempFile::new().unwrap();
     let path = f.path().to_str().unwrap().to_owned();
 
-    let session = bastion::session::SessionManager::new(&path);
+    let session = bastion_runtime::session::SessionManager::new(&path);
     session.init_schema().await.expect("init_schema");
     let session_id = session.create_session().await.expect("create_session");
     let memory: SharedMemory = Arc::new(RwLock::new(
-        Box::new(SqliteMemory::new(&path)) as Box<dyn bastion::memory::Memory>
+        Box::new(SqliteMemory::new(&path)) as Box<dyn bastion_memory::Memory>
     ));
     let mcp = Arc::new(
-        bastion::mcp::McpClient::connect_all("nonexistent_mcp.json")
+        bastion_mcp::McpClient::connect_all("nonexistent_mcp.json")
             .await
             .expect("connect_all empty"),
     );
@@ -739,7 +739,7 @@ async fn cloud_ok_persona_tool_loop_passes_egress_gate() {
     let mut agent = AgentLoop::new(
         provider,
         session,
-        Arc::new(bastion::mcp::McpToolSource::new(mcp)),
+        Arc::new(bastion_mcp::McpToolSource::new(mcp)),
         session_id,
         10.0,
         Arc::new(PersonaResponder::new(registry)),
@@ -747,10 +747,10 @@ async fn cloud_ok_persona_tool_loop_passes_egress_gate() {
         Some(Arc::new(GoalEngine::new(&path, ScoringConfig::default()))),
         vec![],
         Arc::new(SqliteApprovalGate::new(path.clone())),
-        Arc::new(bastion::eval::failure_sink::EvalFailureSink),
+        Arc::new(bastion_cognition::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
-        Arc::new(bastion::provider::registry::RegistryProviderResolver),
-        Some(Arc::new(bastion::agent::dream::DreamFlush::new(
+        Arc::new(bastion_providers::registry::RegistryProviderResolver),
+        Some(Arc::new(bastion_cognition::agent::dream::DreamFlush::new(
             memory.clone(),
         ))),
         Some(Arc::new(bastion::agent::skills::SkillReloadObserver)),
@@ -781,7 +781,7 @@ struct SpotlightStubCap {
 }
 
 #[async_trait]
-impl bastion::capability::Capability for SpotlightStubCap {
+impl bastion_runtime::capability::Capability for SpotlightStubCap {
     fn name(&self) -> &str {
         &self.name
     }
@@ -797,7 +797,7 @@ impl bastion::capability::Capability for SpotlightStubCap {
     async fn invoke(
         &self,
         _args: serde_json::Value,
-        _ctx: &bastion::capability::InvokeCtx,
+        _ctx: &bastion_runtime::capability::InvokeCtx,
     ) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::json!({"payload": "hello"}))
     }
@@ -841,7 +841,7 @@ impl Provider for ToolThenTextNamed {
         if n == 0 {
             Ok(LlmResponse {
                 text: String::new(),
-                tool_calls: Some(vec![bastion::types::ToolCall {
+                tool_calls: Some(vec![bastion_types::ToolCall {
                     id: "t1".to_owned(),
                     name: self.tool_name.clone(),
                     arguments: serde_json::json!({}),
@@ -1180,7 +1180,7 @@ impl Provider for RoundAwareProvider {
         if n < 2 {
             Ok(LlmResponse {
                 text: String::new(),
-                tool_calls: Some(vec![bastion::types::ToolCall {
+                tool_calls: Some(vec![bastion_types::ToolCall {
                     id: format!("t{n}"),
                     name: self.tool_name.clone(),
                     arguments: serde_json::json!({}),
@@ -1235,7 +1235,7 @@ struct CountingUntrustedCap {
 }
 
 #[async_trait]
-impl bastion::capability::Capability for CountingUntrustedCap {
+impl bastion_runtime::capability::Capability for CountingUntrustedCap {
     fn name(&self) -> &str {
         &self.name
     }
@@ -1251,7 +1251,7 @@ impl bastion::capability::Capability for CountingUntrustedCap {
     async fn invoke(
         &self,
         _args: serde_json::Value,
-        _ctx: &bastion::capability::InvokeCtx,
+        _ctx: &bastion_runtime::capability::InvokeCtx,
     ) -> anyhow::Result<serde_json::Value> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(serde_json::json!({"x": 1}))
@@ -1338,7 +1338,7 @@ impl Provider for ToolVisibilityRecordingProvider {
         if n == 0 {
             Ok(LlmResponse {
                 text: String::new(),
-                tool_calls: Some(vec![bastion::types::ToolCall {
+                tool_calls: Some(vec![bastion_types::ToolCall {
                     id: "t0".to_owned(),
                     name: self.tool_name.clone(),
                     arguments: serde_json::json!({}),

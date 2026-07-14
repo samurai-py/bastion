@@ -266,7 +266,7 @@ pub struct McpConfig {
 /// `bastion-mcp`'s `McpClient::connect_from_config`, which cannot depend on this
 /// product-level config module. Re-exported here so `crate::config::McpServerEntry`
 /// (e.g. `tests/mcp_client_e2e.rs`) keeps resolving unchanged.
-pub use crate::types::McpServerEntry;
+pub use bastion_types::McpServerEntry;
 
 /// Individual token entry for the MCP server (static token auth, D-05).
 #[derive(Debug, Deserialize, Clone)]
@@ -348,12 +348,12 @@ fn default_voice_id() -> String {
 /// Load [[mesh.peer]] entries from bastion.toml into a MeshPeerMap.
 /// Called once at daemon startup. Errors are logged but do not abort startup
 /// (daemon runs without mesh peers if none configured).
-pub fn load_mesh_peers(config: &BastionConfig) -> crate::mesh::MeshPeerMap {
-    let mut map = crate::mesh::MeshPeerMap::new();
+pub fn load_mesh_peers(config: &BastionConfig) -> bastion_mesh::mesh::MeshPeerMap {
+    let mut map = bastion_mesh::mesh::MeshPeerMap::new();
     for entry in &config.mesh.peer {
         map.register(
             entry.owner_id.clone(),
-            crate::mesh::MeshPeer {
+            bastion_mesh::mesh::MeshPeer {
                 peer_url: entry.peer_url.clone(),
                 age_pubkey: entry.age_pubkey.clone(),
                 allowed_tags: entry.allowed_tags.clone(),

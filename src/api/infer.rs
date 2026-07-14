@@ -13,10 +13,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::hooks::egress::check_egress;
-use crate::memory::PrivacyTier;
-use crate::provider::SharedProvider;
-use crate::types::BastionError;
+use bastion_memory::PrivacyTier;
+use bastion_providers::SharedProvider;
+use bastion_runtime::hooks::egress::check_egress;
+use bastion_types::BastionError;
 
 #[derive(Deserialize)]
 struct InferRequest {
@@ -141,48 +141,48 @@ mod tests {
     fn build_router() -> axum::Router {
         use std::sync::Arc;
         use tokio::sync::RwLock;
-        let provider: crate::provider::SharedProvider =
+        let provider: bastion_providers::SharedProvider =
             Arc::new(RwLock::new(Box::new(StubProvider {
                 name: "anthropic",
                 fail: false,
             })
-                as Box<dyn crate::provider::Provider>));
+                as Box<dyn bastion_providers::Provider>));
         super::router(provider, None)
     }
 
     fn build_router_fail() -> axum::Router {
         use std::sync::Arc;
         use tokio::sync::RwLock;
-        let provider: crate::provider::SharedProvider =
+        let provider: bastion_providers::SharedProvider =
             Arc::new(RwLock::new(Box::new(StubProvider {
                 name: "anthropic",
                 fail: true,
             })
-                as Box<dyn crate::provider::Provider>));
+                as Box<dyn bastion_providers::Provider>));
         super::router(provider, None)
     }
 
     fn build_router_ollama() -> axum::Router {
         use std::sync::Arc;
         use tokio::sync::RwLock;
-        let provider: crate::provider::SharedProvider =
+        let provider: bastion_providers::SharedProvider =
             Arc::new(RwLock::new(Box::new(StubProvider {
                 name: "ollama",
                 fail: false,
             })
-                as Box<dyn crate::provider::Provider>));
+                as Box<dyn bastion_providers::Provider>));
         super::router(provider, None)
     }
 
     fn build_router_with_token(token: &str) -> axum::Router {
         use std::sync::Arc;
         use tokio::sync::RwLock;
-        let provider: crate::provider::SharedProvider =
+        let provider: bastion_providers::SharedProvider =
             Arc::new(RwLock::new(Box::new(StubProvider {
                 name: "anthropic",
                 fail: false,
             })
-                as Box<dyn crate::provider::Provider>));
+                as Box<dyn bastion_providers::Provider>));
         super::router(provider, Some(token.to_owned()))
     }
 
@@ -192,16 +192,16 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::provider::Provider for StubProvider {
+    impl bastion_providers::Provider for StubProvider {
         async fn complete(
             &self,
-            _messages: &[crate::types::Message],
-            _config: &crate::types::CallConfig,
-        ) -> anyhow::Result<crate::types::LlmResponse> {
-            Ok(crate::types::LlmResponse {
+            _messages: &[bastion_types::Message],
+            _config: &bastion_types::CallConfig,
+        ) -> anyhow::Result<bastion_types::LlmResponse> {
+            Ok(bastion_types::LlmResponse {
                 text: "ok".into(),
                 tool_calls: None,
-                usage: crate::types::TokenUsage::default(),
+                usage: bastion_types::TokenUsage::default(),
             })
         }
         async fn complete_simple(&self, _prompt: &str) -> anyhow::Result<String> {

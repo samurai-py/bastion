@@ -11,8 +11,8 @@
 // dropped by many servers around the ~29-minute mark — the receive loop re-issues IDLE
 // every 25 minutes, well under that threshold, and falls back to a 60s poll loop if the
 // mailbox does not advertise IDLE support at all.
-use crate::agent::handle::AgentHandle;
 use crate::channel::{Channel, OwnerMap};
+use bastion_runtime::agent::handle::AgentHandle;
 
 /// Email channel (CHAN-03): SMTP send via `lettre`, IMAP receive via `async-imap`
 /// (native `IDLE` with a polling fallback).
@@ -322,8 +322,8 @@ async fn email_loop(
                             }
                             // M3: log turn_error WITHOUT conversation content.
                             tracing::error!(event = "turn_error", from = %from_address);
-                            match e.downcast_ref::<crate::types::BastionError>() {
-                                Some(crate::types::BastionError::PrivacyEgressBlocked) => {
+                            match e.downcast_ref::<bastion_types::BastionError>() {
+                                Some(bastion_types::BastionError::PrivacyEgressBlocked) => {
                                     "Não posso responder com este provider (restrição de privacidade)."
                                         .to_owned()
                                 }
@@ -390,11 +390,11 @@ async fn connect_and_login(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::handle;
+    use bastion_runtime::agent::handle;
     use tokio::sync::mpsc;
 
     /// Stub consumer: replies "echo:{text}".
-    fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
+    fn stub_consumer(mut rx: mpsc::Receiver<bastion_runtime::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let _ = req.reply.send(Ok(format!("echo:{}", req.text)));

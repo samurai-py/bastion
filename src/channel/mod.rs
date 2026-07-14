@@ -1,4 +1,4 @@
-use crate::agent::handle::AgentHandle;
+use bastion_runtime::agent::handle::AgentHandle;
 use std::collections::HashMap;
 
 // M3-05: Discord/Slack/Email carry the heavy transport deps (serenity,

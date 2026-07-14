@@ -11,8 +11,8 @@
 // phone_number_id/access_token pair; multi-tenant routing is a deployment concern,
 // not built here. D-02: reactive-only (24h customer-service window). D-03: direct
 // Meta Cloud API via `reqwest` — no BSP/middleman crate or service in between.
-use crate::agent::handle::AgentHandle;
 use crate::channel::{Channel, OwnerMap};
+use bastion_runtime::agent::handle::AgentHandle;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -183,7 +183,7 @@ impl Channel for WhatsAppChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::handle;
+    use bastion_runtime::agent::handle;
     use tokio::sync::mpsc;
 
     fn test_sender() -> WhatsAppSender {
@@ -235,7 +235,7 @@ mod tests {
         assert!(!sender.verify_signature(body, no_prefix));
     }
 
-    fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
+    fn stub_consumer(mut rx: mpsc::Receiver<bastion_runtime::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let _ = req.reply.send(Ok(format!("echo:{}", req.text)));

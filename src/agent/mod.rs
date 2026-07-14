@@ -1,19 +1,14 @@
 pub mod command;
 pub mod skills;
 
-// TEMPORARY re-export shim (M2). Remove by end of M3 (docs/revamp/M1-ADR-substrate-split.md).
-// M2 step 3b: the kernel agent modules moved to `bastion_runtime::agent`.
-// Re-exported under the old paths so every existing `crate::agent::...` path
-// keeps compiling unchanged.
-pub use bastion_runtime::agent::{compactor, context, handle, loop_, ports};
-
-// M2 step 6: Dream/procedural/memory_rag/identity (cognition-layer SEAM #2
-// context providers + belief distillation) moved to `bastion-cognition`.
-// Re-exported under the old paths so every existing `crate::agent::{dream,
-// identity, memory_rag, procedural}::...` path keeps compiling unchanged.
-pub use bastion_cognition::agent::{dream, identity, memory_rag, procedural};
-
-use crate::memory::SharedMemory;
+// M3: the M2 re-export shim that used to live here is gone — every consumer
+// now names its real crate directly (`bastion_runtime::agent::*`,
+// `bastion_cognition::agent::*`). `default_context_providers` below still
+// needs `context`/`identity`/`memory_rag`/`procedural` in scope; these are
+// private imports (not `pub use`) so they no longer leak old paths.
+use bastion_cognition::agent::{identity, memory_rag, procedural};
+use bastion_memory::SharedMemory;
+use bastion_runtime::agent::context;
 
 /// Product-side composition of the default SEAM #2 context providers (M2 step
 /// 3b, decision D2): moved VERBATIM out of `AgentLoop::new`, which no longer

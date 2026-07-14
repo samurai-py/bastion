@@ -1,9 +1,9 @@
 //! Integration tests for CapabilityRegistry policy middleware (D-13).
 
 use async_trait::async_trait;
-use bastion::capability::adapters::NlCommandAdapter;
-use bastion::capability::{Capability, CapabilityRegistry, InvokeCtx};
-use bastion::memory::PrivacyTier;
+use bastion_mcp::adapters::NlCommandAdapter;
+use bastion_memory::PrivacyTier;
+use bastion_runtime::capability::{Capability, CapabilityRegistry, InvokeCtx};
 use serde_json::Value;
 use std::sync::Arc;
 

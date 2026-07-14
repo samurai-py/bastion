@@ -1,5 +1,5 @@
-use bastion::session::SessionManager;
-use bastion::types::{Message, MessageContent, Role};
+use bastion_runtime::session::SessionManager;
+use bastion_types::{Message, MessageContent, Role};
 
 #[tokio::test]
 async fn messages_survive_restart() {

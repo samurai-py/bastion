@@ -18,8 +18,8 @@ mod spy_provider;
 
 use spy_provider::{MockProvider, SpyProvider};
 
-use bastion::hooks::egress::check_egress;
-use bastion::memory::PrivacyTier;
+use bastion_memory::PrivacyTier;
+use bastion_runtime::hooks::egress::check_egress;
 use rstest::rstest;
 use std::sync::{Arc, Mutex};
 
@@ -57,7 +57,7 @@ fn privacy_egress_matrix(
 ) {
     // Promoted to the in-process verifier (EVAL-02) — cargo test --test evals and the
     // Reflector's runtime merge gate now exercise the SAME check_egress assertion.
-    let result = bastion::eval::verifier::assert_egress_case(tier, provider, expected_ok);
+    let result = bastion_cognition::eval::verifier::assert_egress_case(tier, provider, expected_ok);
     assert!(
         result.passed,
         "verifier case failed: {:?}",
@@ -140,9 +140,9 @@ async fn injection_blocked_regardless_of_content() {
 ///   c) retrieve_tagged returns empty (revoked rows excluded from retrieval)
 #[tokio::test]
 async fn memory_revocation_clean() {
-    use bastion::memory::sqlite::SqliteMemory;
-    use bastion::memory::{Memory, SharedMemory};
-    use bastion::session::SessionManager;
+    use bastion_memory::sqlite::SqliteMemory;
+    use bastion_memory::{Memory, SharedMemory};
+    use bastion_runtime::session::SessionManager;
     use rusqlite::Connection;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
@@ -211,9 +211,10 @@ async fn memory_revocation_clean() {
     // excludes revoked rows via the SAME assertion cargo test --test evals and the
     // Reflector's runtime merge gate both exercise.
     let memory_handle: SharedMemory = Arc::new(RwLock::new(Box::new(mem) as Box<dyn Memory>));
-    let result = bastion::eval::verifier::assert_revocation_clean(&memory_handle, "owner1")
-        .await
-        .expect("assert_revocation_clean");
+    let result =
+        bastion_cognition::eval::verifier::assert_revocation_clean(&memory_handle, "owner1")
+            .await
+            .expect("assert_revocation_clean");
     assert!(
         result.passed,
         "verifier case failed: {:?}",
@@ -231,10 +232,10 @@ async fn memory_revocation_clean() {
 /// passes" guarantee — the SAME function the offline Reflector (07-05) will gate on.
 #[tokio::test]
 async fn verify_delta_rejects_failing_candidate_and_accepts_valid_one() {
-    use bastion::eval::capture::RegressionSet;
-    use bastion::eval::verifier::verify_delta;
-    use bastion::learn::delta::DeltaOp;
-    use bastion::memory::PrivacyTier;
+    use bastion_cognition::eval::capture::RegressionSet;
+    use bastion_cognition::eval::verifier::verify_delta;
+    use bastion_cognition::learn::delta::DeltaOp;
+    use bastion_memory::PrivacyTier;
 
     // A valid Add on an empty regression set must pass.
     let valid = DeltaOp::Add {
@@ -277,8 +278,8 @@ async fn verify_delta_rejects_failing_candidate_and_accepts_valid_one() {
 /// a valid CabinetVerdict with dissents → assert dissents non-empty and attributed.
 #[tokio::test]
 async fn cabinet_preserves_dissent() {
-    use bastion::cabinet::synth::synthesize;
-    use bastion::cabinet::{Turn, TurnKind};
+    use bastion_cognition::cabinet::synth::synthesize;
+    use bastion_cognition::cabinet::{Turn, TurnKind};
 
     let transcript = vec![
         Turn {
@@ -308,7 +309,7 @@ async fn cabinet_preserves_dissent() {
     .to_string();
 
     let provider = MockProvider::always("mock", &verdict_json);
-    let mut cap_registry = bastion::capability::CapabilityRegistry::new();
+    let mut cap_registry = bastion_runtime::capability::CapabilityRegistry::new();
     let verdict = synthesize(&provider, &transcript, &mut cap_registry)
         .await
         .expect("synthesize");
@@ -347,9 +348,9 @@ async fn cabinet_preserves_dissent() {
 /// queued messages until the consumer (idle path) drains them.
 #[tokio::test]
 async fn proactive_suppressed_during_active_session() {
-    use bastion::goal::{GoalEngine, ScoringConfig};
-    use bastion::proactive::CronService;
-    use bastion::session::SessionManager;
+    use bastion_cognition::goal::{GoalEngine, ScoringConfig};
+    use bastion_cognition::proactive::CronService;
+    use bastion_runtime::session::SessionManager;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::NamedTempFile;
     use tokio::sync::mpsc;
@@ -426,16 +427,16 @@ async fn proactive_suppressed_during_active_session() {
 /// PrivacyEgressBlocked and the SpyProvider must record ZERO calls.
 #[tokio::test]
 async fn runner_egress_single_local_only_blocks_cloud_provider() {
-    use bastion::persona::router::{ResponseMode, RouterDecision};
-    use bastion::persona::runner::run;
-    use bastion::persona::{Persona, PersonaRegistry};
+    use bastion_personas::persona::router::{ResponseMode, RouterDecision};
+    use bastion_personas::persona::runner::run;
+    use bastion_personas::persona::{Persona, PersonaRegistry};
     use std::collections::HashMap;
     use tokio::sync::RwLock;
 
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let spy = SpyProvider::new("openai", Arc::clone(&calls));
     let provider = Arc::new(RwLock::new(
-        Box::new(spy) as Box<dyn bastion::provider::Provider>
+        Box::new(spy) as Box<dyn bastion_providers::Provider>
     ));
 
     let mut personas = HashMap::new();
@@ -459,16 +460,16 @@ async fn runner_egress_single_local_only_blocks_cloud_provider() {
         convene_reason: None,
     };
 
-    let history = vec![bastion::types::Message {
-        role: bastion::types::Role::User,
-        content: bastion::types::MessageContent::Text("my health data".to_owned()),
+    let history = vec![bastion_types::Message {
+        role: bastion_types::Role::User,
+        content: bastion_types::MessageContent::Text("my health data".to_owned()),
     }];
     let result = run(
         decision,
         &registry,
         provider,
         &history,
-        &bastion::types::CallConfig::default(),
+        &bastion_types::CallConfig::default(),
     )
     .await;
 
@@ -500,16 +501,16 @@ async fn runner_egress_single_local_only_blocks_cloud_provider() {
 /// - SpyProvider records ZERO calls
 #[tokio::test]
 async fn runner_egress_parallel_local_only_blocks_all_cloud_calls() {
-    use bastion::persona::router::{ResponseMode, RouterDecision};
-    use bastion::persona::runner::run;
-    use bastion::persona::{Persona, PersonaRegistry};
+    use bastion_personas::persona::router::{ResponseMode, RouterDecision};
+    use bastion_personas::persona::runner::run;
+    use bastion_personas::persona::{Persona, PersonaRegistry};
     use std::collections::HashMap;
     use tokio::sync::RwLock;
 
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let spy = SpyProvider::new("openai", Arc::clone(&calls));
     let provider = Arc::new(RwLock::new(
-        Box::new(spy) as Box<dyn bastion::provider::Provider>
+        Box::new(spy) as Box<dyn bastion_providers::Provider>
     ));
 
     let mut personas = HashMap::new();
@@ -535,16 +536,16 @@ async fn runner_egress_parallel_local_only_blocks_all_cloud_calls() {
         convene_reason: None,
     };
 
-    let history = vec![bastion::types::Message {
-        role: bastion::types::Role::User,
-        content: bastion::types::MessageContent::Text("sensitive message".to_owned()),
+    let history = vec![bastion_types::Message {
+        role: bastion_types::Role::User,
+        content: bastion_types::MessageContent::Text("sensitive message".to_owned()),
     }];
     let result = run(
         decision,
         &registry,
         provider,
         &history,
-        &bastion::types::CallConfig::default(),
+        &bastion_types::CallConfig::default(),
     )
     .await;
 
@@ -572,7 +573,7 @@ async fn runner_egress_parallel_local_only_blocks_all_cloud_calls() {
 /// Two owners get distinct sessions; their histories never mix.
 #[tokio::test]
 async fn owner_isolation_distinct_sessions() {
-    use bastion::session::SessionManager;
+    use bastion_runtime::session::SessionManager;
     use tempfile::NamedTempFile;
 
     let f = NamedTempFile::new().unwrap();
@@ -627,9 +628,9 @@ async fn owner_isolation_distinct_sessions() {
 /// A sender not in the Telegram OwnerMap is rejected; the AgentHandle never receives a message.
 #[tokio::test]
 async fn owner_isolation_spoofed_sender_rejected() {
-    use bastion::agent::handle;
     use bastion::channel::telegram::handle_update;
     use bastion::channel::OwnerMap;
+    use bastion_runtime::agent::handle;
 
     let (h, mut rx) = handle::channel();
 
@@ -662,7 +663,7 @@ async fn owner_isolation_spoofed_sender_rejected() {
 fn webhook_error_status_maps_correct_http_status() {
     use axum::http::StatusCode;
     use bastion::channel::webhook::error_status;
-    use bastion::types::BastionError;
+    use bastion_types::BastionError;
 
     // PrivacyEgressBlocked → 403 Forbidden
     let egress_err = anyhow::anyhow!(BastionError::PrivacyEgressBlocked);
@@ -710,8 +711,8 @@ fn webhook_error_status_maps_correct_http_status() {
 /// their requests must be processed independently.
 #[tokio::test]
 async fn channel_inbound_two_owners_get_distinct_sessions() {
-    use bastion::agent::handle::{self, AgentRequest};
-    use bastion::session::SessionManager;
+    use bastion_runtime::agent::handle::{self, AgentRequest};
+    use bastion_runtime::session::SessionManager;
     use tempfile::NamedTempFile;
     use tokio::sync::mpsc;
 
@@ -789,9 +790,9 @@ async fn channel_inbound_two_owners_get_distinct_sessions() {
 /// Tests that the typed error path (Err result through ask()) works end-to-end.
 #[tokio::test]
 async fn channel_inbound_unmapped_sender_rejected() {
-    use bastion::agent::handle;
     use bastion::channel::telegram::handle_update;
     use bastion::channel::OwnerMap;
+    use bastion_runtime::agent::handle;
 
     let (h, mut rx) = handle::channel();
 
@@ -829,9 +830,9 @@ async fn channel_inbound_unmapped_sender_rejected() {
 #[tokio::test]
 async fn channel_typed_error_reaches_webhook_error_status() {
     use axum::http::StatusCode;
-    use bastion::agent::handle;
     use bastion::channel::webhook::error_status;
-    use bastion::types::BastionError;
+    use bastion_runtime::agent::handle;
+    use bastion_types::BastionError;
 
     let (h, mut rx) = handle::channel();
 
@@ -868,15 +869,15 @@ async fn channel_typed_error_reaches_webhook_error_status() {
 /// Two turns on the same AgentLoop must use the SAME session_id.
 #[tokio::test]
 async fn cli_session_deterministic_across_turns() {
-    use bastion::agent::loop_::AgentLoop;
-    use bastion::capability::approval::SqliteApprovalGate;
-    use bastion::goal::{GoalEngine, ScoringConfig};
-    use bastion::mcp::McpClient;
-    use bastion::memory::sqlite::SqliteMemory;
-    use bastion::persona::{Persona, PersonaRegistry, PersonaResponder};
-    use bastion::provider::Provider;
-    use bastion::session::SessionManager;
-    use bastion::types::{CallConfig, LlmResponse, Message, TokenUsage};
+    use bastion_cognition::goal::{GoalEngine, ScoringConfig};
+    use bastion_mcp::McpClient;
+    use bastion_memory::sqlite::SqliteMemory;
+    use bastion_personas::persona::{Persona, PersonaRegistry, PersonaResponder};
+    use bastion_providers::Provider;
+    use bastion_runtime::agent::loop_::AgentLoop;
+    use bastion_runtime::capability::approval::SqliteApprovalGate;
+    use bastion_runtime::session::SessionManager;
+    use bastion_types::{CallConfig, LlmResponse, Message, TokenUsage};
     use std::collections::HashMap;
     use std::sync::{Arc as SArc, Mutex as SMutex};
     use tempfile::NamedTempFile;
@@ -929,10 +930,10 @@ async fn cli_session_deterministic_across_turns() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let new_sess = session.create_session().await.expect("new sess");
 
-    let memory: bastion::memory::SharedMemory = SArc::new(RwLock::new(Box::new(SqliteMemory::new(
+    let memory: bastion_memory::SharedMemory = SArc::new(RwLock::new(Box::new(SqliteMemory::new(
         &path,
     ))
-        as Box<dyn bastion::memory::Memory>));
+        as Box<dyn bastion_memory::Memory>));
     let mcp = SArc::new(
         McpClient::connect_all("nonexistent.json")
             .await
@@ -946,19 +947,19 @@ async fn cli_session_deterministic_across_turns() {
             name: "Local".to_string(),
             description: None,
             system_prompt: "You are Local.".into(),
-            tier: bastion::memory::PrivacyTier::CloudOk,
+            tier: bastion_memory::PrivacyTier::CloudOk,
             weight: 0.9,
             skills: vec![],
         },
     );
 
-    let provider: bastion::provider::SharedProvider =
+    let provider: bastion_providers::SharedProvider =
         SArc::new(RwLock::new(Box::new(CliMockProvider) as Box<dyn Provider>));
 
     let mut agent = AgentLoop::new(
         provider,
         SessionManager::new(&path),
-        SArc::new(bastion::mcp::McpToolSource::new(mcp)),
+        SArc::new(bastion_mcp::McpToolSource::new(mcp)),
         new_sess.clone(),
         10.0,
         SArc::new(PersonaResponder::new(PersonaRegistry::new_from_map(
@@ -968,10 +969,10 @@ async fn cli_session_deterministic_across_turns() {
         Some(SArc::new(GoalEngine::new(&path, ScoringConfig::default()))),
         vec![],
         SArc::new(SqliteApprovalGate::new(path.clone())),
-        SArc::new(bastion::eval::failure_sink::EvalFailureSink),
+        SArc::new(bastion_cognition::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
-        SArc::new(bastion::provider::registry::RegistryProviderResolver),
-        Some(SArc::new(bastion::agent::dream::DreamFlush::new(
+        SArc::new(bastion_providers::registry::RegistryProviderResolver),
+        Some(SArc::new(bastion_cognition::agent::dream::DreamFlush::new(
             memory.clone(),
         ))),
         Some(SArc::new(bastion::agent::skills::SkillReloadObserver)),

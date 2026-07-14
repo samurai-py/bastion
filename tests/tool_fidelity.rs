@@ -1,4 +1,4 @@
-use bastion::mcp::registry::ToolRegistry;
+use bastion_mcp::registry::ToolRegistry;
 
 #[test]
 fn registry_register_and_lookup() {
@@ -53,7 +53,7 @@ async fn connect_all_empty_config() {
     let dir = tempfile::tempdir().unwrap();
     let cfg_path = dir.path().join("mcp-servers.json");
     std::fs::write(&cfg_path, r#"{"mcpServers":{}}"#).unwrap();
-    let client = bastion::mcp::McpClient::connect_all(cfg_path.to_str().unwrap())
+    let client = bastion_mcp::McpClient::connect_all(cfg_path.to_str().unwrap())
         .await
         .unwrap();
     assert!(client.registry().list_tool_names().is_empty());
@@ -62,7 +62,7 @@ async fn connect_all_empty_config() {
 #[tokio::test]
 async fn connect_all_missing_config() {
     // Missing file should return empty client (graceful — Composio not configured)
-    let client = bastion::mcp::McpClient::connect_all("/tmp/nonexistent-mcp-servers.json")
+    let client = bastion_mcp::McpClient::connect_all("/tmp/nonexistent-mcp-servers.json")
         .await
         .unwrap();
     assert!(client.registry().list_tool_names().is_empty());

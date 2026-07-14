@@ -3,8 +3,8 @@
 // Security: chat_id is mapped to a trusted owner_id via OwnerMap (CR-03).
 // Messages from chat_ids not in the map are silently dropped (no reply, no session).
 // Exponential backoff on get_updates errors (CR-06).
-use crate::agent::handle::AgentHandle;
 use crate::channel::{Channel, OwnerMap};
+use bastion_runtime::agent::handle::AgentHandle;
 
 /// Telegram long-poll channel (CHAN-02).
 pub struct TelegramChannel {
@@ -144,8 +144,8 @@ async fn telegram_loop(
                             );
                             // M3: map error to friendly message — NEVER include e.to_string() (no stack
                             // trace or internal details to the user).
-                            match e.downcast_ref::<crate::types::BastionError>() {
-                            Some(crate::types::BastionError::PrivacyEgressBlocked) => {
+                            match e.downcast_ref::<bastion_types::BastionError>() {
+                            Some(bastion_types::BastionError::PrivacyEgressBlocked) => {
                                 "Não posso responder com este provider (restrição de privacidade)."
                                     .to_owned()
                             }
@@ -174,12 +174,12 @@ async fn telegram_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::handle;
     use crate::channel::OwnerMap;
+    use bastion_runtime::agent::handle;
     use tokio::sync::mpsc;
 
     /// Stub consumer: replies "echo:{text}".
-    fn stub_consumer(mut rx: mpsc::Receiver<crate::agent::handle::AgentRequest>) {
+    fn stub_consumer(mut rx: mpsc::Receiver<bastion_runtime::agent::handle::AgentRequest>) {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let _ = req.reply.send(Ok(format!("echo:{}", req.text)));
