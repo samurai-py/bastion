@@ -111,9 +111,9 @@ All 19 files above are slated for removal once M3-01 ("reduzir `pub` ao contrato
 
 Global rule enforced regardless of allowlist: no crate under `crates/*` may depend on the root package `bastion` (product → substrate is a one-way street).
 
-Ran against the current workspace: **PASS**, zero violations, zero discrepancies against the allowlist above (see §2's "Validation against the M2-08 allowlist").
+Ran against the current workspace: **PASS**, zero violations, zero discrepancies against the allowlist above (see §2's "Validation against the M2-08 allowlist"). Negative-path tested against a throwaway fixture workspace exercising all four violation classes (root-package dependency, crate missing from allowlist, disallowed edge, dependency cycle) — all four correctly detected and reported, non-zero exit.
 
-Wired into `.github/workflows/ci.yml` as a `crate-deps` job/step that runs before the build/test jobs (fast, no compilation needed).
+Wired into `.github/workflows/ci.yml` as a new `crate-deps` job (checkout + script, no Rust toolchain needed — runs in seconds) that the existing `rust` job (`fmt`/`clippy`/`test`) now depends on via `needs: crate-deps`, so it gates before the heavy build/test steps. No other part of the workflow was changed.
 
 ## 5. Final gates (M2 close)
 
