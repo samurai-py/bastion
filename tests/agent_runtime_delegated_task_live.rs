@@ -126,7 +126,7 @@ async fn make_loop(db_path: &str) -> AgentLoop {
 /// notification is the acceptance bar here, not merely "some message
 /// arrived").
 async fn recv_until_contains(
-    rx: &mut tokio::sync::mpsc::Receiver<String>,
+    rx: &mut tokio::sync::mpsc::Receiver<bastion_runtime::agent::loop_::PendingItem>,
     needle: &str,
     deadline: Duration,
 ) -> String {
@@ -137,7 +137,7 @@ async fn recv_until_contains(
             panic!("timed out waiting for a pending_tx message containing {needle:?}");
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(msg)) if msg.contains(needle) => return msg,
+            Ok(Some(item)) if item.text.contains(needle) => return item.text,
             Ok(Some(_other)) => continue, // some other task's notification — keep draining
             Ok(None) => panic!("pending_tx channel closed before {needle:?} arrived"),
             Err(_) => panic!("timed out waiting for a pending_tx message containing {needle:?}"),

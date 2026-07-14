@@ -363,21 +363,24 @@ async fn proactive_suppressed_during_active_session() {
     sm.init_schema().await.expect("init_schema");
 
     let engine = GoalEngine::new(&path, ScoringConfig::default());
-    let (tx, mut rx) = mpsc::channel::<String>(16);
+    let (tx, mut rx) = mpsc::channel::<bastion_runtime::agent::loop_::PendingItem>(16);
     let svc = CronService::new(tx, engine);
 
     // Simulate the active-session flag
     let session_active = Arc::new(AtomicBool::new(true));
 
     // Enqueue a proactive event (e.g., from CronService::on_event)
-    svc.on_event("proactive: your goal deadline is tomorrow".to_string())
-        .await;
+    svc.on_event(
+        "_local",
+        "proactive: your goal deadline is tomorrow".to_string(),
+    )
+    .await;
 
     // While session is active — consumer (simulated daemon) must NOT drain pending.
     // Consumer loop: only drain pending_rx when session_active == false.
     let session_flag = Arc::clone(&session_active);
     let consumer = tokio::spawn(async move {
-        let mut delivered: Vec<String> = Vec::new();
+        let mut delivered: Vec<bastion_runtime::agent::loop_::PendingItem> = Vec::new();
         loop {
             if !session_flag.load(Ordering::Acquire) {
                 // Session ended — drain pending
@@ -412,8 +415,14 @@ async fn proactive_suppressed_during_active_session() {
         delivered
     );
     assert!(
-        delivered[0].contains("proactive"),
+        delivered[0].text.contains("proactive"),
         "delivered message must be the enqueued proactive text; got: {:?}",
+        delivered[0]
+    );
+    assert_eq!(
+        delivered[0].owner.as_deref(),
+        Some("_local"),
+        "6d: delivered item must carry the owner it was raised for; got: {:?}",
         delivered[0]
     );
 }

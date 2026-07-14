@@ -24,6 +24,42 @@ const MAX_TOOL_ROUNDS: u32 = 10;
 const DEFAULT_SYSTEM_PROMPT: &str = "You are Bastion, a proactive personal AI assistant.";
 pub const DEFAULT_OWNER: &str = "_local";
 
+/// Loop 3-A (6d, `docs/revamp/C3-runtime-followups-design.md` §6d): one item
+/// queued on the [`AgentLoop::pending_tx`] proactive-message seam (PROACT-05).
+///
+/// Before this type, `pending_tx` carried a bare `String` and the daemon's
+/// consumer (`main.rs`'s `pending_rx` select arm) always replayed it as a
+/// turn for `DEFAULT_OWNER` — a single-owner-CLI-era assumption that no
+/// longer holds once a delegated task (`AgentLoop::delegate_task`) can be
+/// started for ANY owner: a result meant for owner B could surface as a
+/// proactive turn for a completely different owner. `owner` makes the
+/// producer's intended destination explicit so the consumer can route by
+/// identity (the same owner string channels already resolve destinations
+/// by), never by assuming a single fixed owner.
+#[derive(Debug, Clone)]
+pub struct PendingItem {
+    /// Owner this item is FOR. `None` only for a producer that genuinely has
+    /// no owner context (there are none left in this codebase after this
+    /// cycle — every current producer names one) — the consumer treats that
+    /// case as "route to `DEFAULT_OWNER`", the same fallback the whole
+    /// pre-6d codebase used unconditionally, never a silent guess at some
+    /// OTHER owner.
+    pub owner: Option<String>,
+    pub text: String,
+}
+
+impl PendingItem {
+    /// Construct an item explicitly addressed to `owner` — the path every
+    /// current producer (`CronService::run_heartbeat`/`on_event`,
+    /// `spawn_delegated_task_consumer`) uses.
+    pub fn for_owner(owner: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            owner: Some(owner.into()),
+            text: text.into(),
+        }
+    }
+}
+
 pub struct AgentLoop {
     pub provider: SharedProvider,
     pub session: SessionManager,
@@ -64,8 +100,10 @@ pub struct AgentLoop {
     pub context_providers: Vec<Box<dyn TurnContextProvider>>,
     /// Pending queue for proactive messages.
     /// Phase 2: consumed by daemon_loop select arm (PROACT-05).
-    pub pending_tx: mpsc::Sender<String>,
-    pub pending_rx: Option<mpsc::Receiver<String>>,
+    /// 6d: items carry an explicit owner ([`PendingItem`]) — the consumer
+    /// routes by that identity instead of always assuming `DEFAULT_OWNER`.
+    pub pending_tx: mpsc::Sender<PendingItem>,
+    pub pending_rx: Option<mpsc::Receiver<PendingItem>>,
     /// Forced persona for the next turn (set by /as command).
     pub forced_persona: Option<String>,
     /// D-11 (Plan 08-01) / SO-03 (Plan 08-08): ordered list of model-name strings tried,
@@ -1992,7 +2030,7 @@ fn spawn_delegated_task_consumer(
     task_id: bastion_agent_runtime::TaskId,
     session_manager: SessionManager,
     approval_gate: Arc<dyn ApprovalGate>,
-    pending_tx: mpsc::Sender<String>,
+    pending_tx: mpsc::Sender<PendingItem>,
     delegated_tasks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, mpsc::Sender<()>>>>,
     mut cancel_rx: mpsc::Receiver<()>,
 ) {
@@ -2128,7 +2166,10 @@ fn spawn_delegated_task_consumer(
         // PROACT-05 reuse (design doc §3: "resultado/artefatos voltam como
         // evento pro owner") — the SAME seam goal-drift nudges already feed;
         // `main.rs`'s daemon select! arm turns this into the next proactive
-        // turn for the owner.
+        // turn for the owner. 6d: tagged with `owner` explicitly (this
+        // function's own parameter, the SAME owner `delegate_task`/
+        // `resume_delegated_task` were called with) — never delivered as a
+        // different owner's proactive turn.
         let summary = match outcome {
             bastion_agent_runtime::TaskOutcome::Success => {
                 format!("[Tarefa delegada '{key}' concluída]\n{response_text}{artifact_summary}")
@@ -2143,7 +2184,9 @@ fn spawn_delegated_task_consumer(
                 format!("[Tarefa delegada '{key}' falhou: {reason}]{artifact_summary}")
             }
         };
-        let _ = pending_tx.send(summary).await;
+        let _ = pending_tx
+            .send(PendingItem::for_owner(owner, summary))
+            .await;
     });
 }
 
@@ -2924,5 +2967,209 @@ mod tests {
             "primary",
             "provider must NOT be swapped when the new provider fails egress"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // 6d (docs/revamp/C3-runtime-followups-design.md): owner-routed
+    // delegated-task delivery. Minimal in-process fake `AgentRuntime` — NOT
+    // the shared conformance `FakeRuntime` (that one is private to
+    // `tests/agent_runtime_conformance.rs`, a separate integration-test
+    // crate this kernel crate cannot depend on): completes a task with one
+    // `MessageDelta` then `Ended{Success}`, just enough to drive
+    // `AgentLoop::delegate_task` to a real `PendingItem`.
+    // ------------------------------------------------------------------
+
+    struct FakeDelegateRuntime;
+
+    struct FakeDelegateSession {
+        handle: bastion_agent_runtime::SessionHandle,
+        task_id: Option<bastion_agent_runtime::TaskId>,
+        step: u8,
+    }
+
+    #[async_trait]
+    impl bastion_agent_runtime::AgentRuntime for FakeDelegateRuntime {
+        fn descriptor(&self) -> bastion_agent_runtime::RuntimeDescriptor {
+            bastion_agent_runtime::RuntimeDescriptor {
+                id: "fake_delegate",
+                adapter_version: "0.0.0".to_string(),
+                target_version: "test".to_string(),
+                transport: bastion_agent_runtime::Transport::Embedded,
+                supports: bastion_agent_runtime::RuntimeSupports::default(),
+                policy_coverage: bastion_agent_runtime::PolicyCoverage {
+                    tool_visibility: bastion_agent_runtime::ToolVisibility::Full,
+                    approvals: bastion_agent_runtime::ApprovalCoverage::Bridged,
+                    egress: bastion_agent_runtime::EgressCoverage::InputFiltered,
+                    budget: bastion_agent_runtime::BudgetCoverage::Estimated,
+                    sandbox: bastion_agent_runtime::SandboxCoverage::Honored,
+                },
+            }
+        }
+
+        async fn health(
+            &self,
+        ) -> Result<bastion_agent_runtime::RuntimeHealth, bastion_agent_runtime::RuntimeError>
+        {
+            Ok(bastion_agent_runtime::RuntimeHealth {
+                detected_version: "0.0.0".to_string(),
+                ready: true,
+                detail: None,
+            })
+        }
+
+        async fn start(
+            &self,
+            spec: bastion_agent_runtime::SessionSpec,
+        ) -> Result<
+            Box<dyn bastion_agent_runtime::RuntimeSession>,
+            bastion_agent_runtime::RuntimeError,
+        > {
+            Ok(Box::new(FakeDelegateSession {
+                handle: bastion_agent_runtime::SessionHandle {
+                    runtime_id: "fake_delegate".to_string(),
+                    owner: spec.owner,
+                    external_ref: "fake-session".to_string(),
+                },
+                task_id: None,
+                step: 0,
+            }))
+        }
+
+        async fn resume(
+            &self,
+            _handle: &bastion_agent_runtime::SessionHandle,
+            _spec: bastion_agent_runtime::ResumeSpec,
+        ) -> Result<
+            Box<dyn bastion_agent_runtime::RuntimeSession>,
+            bastion_agent_runtime::RuntimeError,
+        > {
+            Err(bastion_agent_runtime::RuntimeError::NotResumable(
+                "fake: resume unimplemented".to_string(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl bastion_agent_runtime::RuntimeSession for FakeDelegateSession {
+        fn handle(&self) -> bastion_agent_runtime::SessionHandle {
+            self.handle.clone()
+        }
+
+        async fn submit(
+            &mut self,
+            _input: bastion_agent_runtime::TaskInput,
+        ) -> Result<bastion_agent_runtime::TaskId, bastion_agent_runtime::RuntimeError> {
+            let id = bastion_agent_runtime::TaskId(1);
+            self.task_id = Some(id);
+            Ok(id)
+        }
+
+        async fn next_event(&mut self) -> Option<bastion_agent_runtime::RuntimeEvent> {
+            let task = self.task_id?;
+            self.step += 1;
+            match self.step {
+                1 => Some(bastion_agent_runtime::RuntimeEvent::MessageDelta {
+                    task,
+                    text: "fake delegated response".to_string(),
+                }),
+                2 => Some(bastion_agent_runtime::RuntimeEvent::Ended {
+                    task,
+                    outcome: bastion_agent_runtime::TaskOutcome::Success,
+                }),
+                _ => None,
+            }
+        }
+
+        async fn steer(&mut self, _text: &str) -> Result<(), bastion_agent_runtime::RuntimeError> {
+            Ok(())
+        }
+
+        async fn cancel(
+            &mut self,
+            _mode: bastion_agent_runtime::CancelMode,
+        ) -> Result<(), bastion_agent_runtime::RuntimeError> {
+            Ok(())
+        }
+
+        async fn respond_permission(
+            &mut self,
+            _id: bastion_agent_runtime::PermissionRequestId,
+            _decision: bastion_agent_runtime::PermissionDecision,
+        ) -> Result<(), bastion_agent_runtime::RuntimeError> {
+            Ok(())
+        }
+
+        async fn status(
+            &self,
+        ) -> Result<bastion_agent_runtime::SessionStatus, bastion_agent_runtime::RuntimeError>
+        {
+            Ok(bastion_agent_runtime::SessionStatus::Idle)
+        }
+    }
+
+    /// 6d acceptance test (design doc §6d): two owners each delegate a task
+    /// on the SAME `AgentLoop` — the real daemon has exactly one, shared
+    /// across every channel/owner. The completion `PendingItem` for owner
+    /// "alice" must carry `owner: Some("alice")` and never surface tagged
+    /// for "bob" (or vice-versa). Before this cycle, `pending_tx` carried a
+    /// bare `String` with no owner field at all — this assertion would have
+    /// been unwritable, and the daemon's consumer unconditionally replayed
+    /// every item as a turn for `DEFAULT_OWNER` regardless of which owner's
+    /// task actually produced it (a real cross-owner delivery bug).
+    #[tokio::test]
+    async fn delegate_task_pending_item_never_crosses_owner_boundary() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap().to_owned();
+        let mut agent = make_loop(&path).await;
+
+        let mut registry = crate::agent::backend::RuntimeRegistry::new();
+        registry.register(Arc::new(FakeDelegateRuntime));
+        agent = agent
+            .with_backend_profile(crate::agent::backend::BackendProfile {
+                task_runtime: Some("fake_delegate".to_string()),
+                ..Default::default()
+            })
+            .with_runtime_registry(registry);
+
+        let mut pending_rx = agent.pending_rx.take().expect("pending_rx must be present");
+
+        let key_alice = agent
+            .delegate_task("alice", "task for alice".to_string())
+            .await
+            .expect("delegate_task for alice must succeed");
+        let key_bob = agent
+            .delegate_task("bob", "task for bob".to_string())
+            .await
+            .expect("delegate_task for bob must succeed");
+
+        let deadline = std::time::Duration::from_secs(5);
+        let item1 = tokio::time::timeout(deadline, pending_rx.recv())
+            .await
+            .expect("timed out waiting for the first pending item")
+            .expect("pending_tx closed before the first item arrived");
+        let item2 = tokio::time::timeout(deadline, pending_rx.recv())
+            .await
+            .expect("timed out waiting for the second pending item")
+            .expect("pending_tx closed before the second item arrived");
+
+        for item in [&item1, &item2] {
+            if item.text.contains(&key_alice) {
+                assert_eq!(
+                    item.owner.as_deref(),
+                    Some("alice"),
+                    "alice's delegated-task result must be owner-tagged 'alice', \
+                     never delivered as another owner's proactive turn; got {item:?}"
+                );
+            } else if item.text.contains(&key_bob) {
+                assert_eq!(
+                    item.owner.as_deref(),
+                    Some("bob"),
+                    "bob's delegated-task result must be owner-tagged 'bob', \
+                     never delivered as another owner's proactive turn; got {item:?}"
+                );
+            } else {
+                panic!("pending item matched neither delegated task's key: {item:?}");
+            }
+        }
     }
 }

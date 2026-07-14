@@ -1053,11 +1053,22 @@ async fn daemon_loop(
                 }
             }
             // PROACT-05: proactive messages delivered ONLY between turns.
-            Some(msg) = pending_rx.recv() => {
-                tracing::info!(event = "proactive_turn", msg_len = msg.len());
-                match agent.run_turn(&msg).await {
+            // 6d (docs/revamp/C3-runtime-followups-design.md): the queued item
+            // carries its own owner now — route the turn to THAT owner instead
+            // of always assuming DEFAULT_OWNER (a delegated task's or a
+            // goal-drift nudge's owner may be any owner, not just the local
+            // one). `None` (no producer left in this codebase sends that, but
+            // the type keeps the fallback honest) still degrades to the exact
+            // pre-6d behavior.
+            Some(item) = pending_rx.recv() => {
+                let owner = item
+                    .owner
+                    .as_deref()
+                    .unwrap_or(bastion_runtime::agent::loop_::DEFAULT_OWNER);
+                tracing::info!(event = "proactive_turn", msg_len = item.text.len(), owner = %owner);
+                match agent.run_turn_for(&item.text, owner).await {
                     Ok(r) => println!("{r}"),
-                    Err(e) => tracing::error!(event = "proactive_turn_error", error = %e),
+                    Err(e) => tracing::error!(event = "proactive_turn_error", owner = %owner, error = %e),
                 }
             }
             // CR-07: channel inbound arm — serializes Telegram/webhook turns through the SAME

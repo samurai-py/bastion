@@ -13,14 +13,20 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 
+use bastion_runtime::agent::loop_::PendingItem;
+
 use crate::goal::GoalEngine;
 
 /// Proactive message queue producer.
 ///
 /// Multiple methods can send messages into `pending_tx`; the daemon selects from
 /// `pending_rx` only between turns (PROACT-05 structural guarantee).
+///
+/// 6d (`docs/revamp/C3-runtime-followups-design.md`): every item is a
+/// [`PendingItem`] tagged with the owner it is FOR — the daemon's consumer
+/// routes by that identity instead of always assuming `DEFAULT_OWNER`.
 pub struct CronService {
-    pending_tx: mpsc::Sender<String>,
+    pending_tx: mpsc::Sender<PendingItem>,
     goals: GoalEngine,
 }
 
@@ -29,7 +35,7 @@ impl CronService {
     ///
     /// No background tasks are spawned here — callers decide when to activate each job.
     /// NO nested runtime (T-02-29): all methods are async and must be `.await`-ed.
-    pub fn new(pending_tx: mpsc::Sender<String>, goals: GoalEngine) -> Self {
+    pub fn new(pending_tx: mpsc::Sender<PendingItem>, goals: GoalEngine) -> Self {
         Self { pending_tx, goals }
     }
 
@@ -64,7 +70,12 @@ impl CronService {
             for goal in &goals {
                 match self.goals.drift_nudge(owner, goal.id).await {
                     Ok(Some(text)) => {
-                        if self.pending_tx.send(text).await.is_err() {
+                        if self
+                            .pending_tx
+                            .send(PendingItem::for_owner(owner, text))
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!(event = "heartbeat_pending_tx_closed");
                             return; // channel closed → daemon is shutting down
                         }
@@ -80,10 +91,16 @@ impl CronService {
 
     /// PROACT-03: on-demand event trigger.
     ///
-    /// Enqueues a proactive message for an external event (e.g. webhook/calendar payload).
+    /// Enqueues a proactive message for an external event (e.g. webhook/calendar payload),
+    /// addressed to `owner` (6d: explicit — never delivered to a different owner's turn).
     /// Fire-and-forget: if `pending_tx` is closed the error is silently swallowed.
-    pub async fn on_event(&self, event_text: String) {
-        if self.pending_tx.send(event_text).await.is_err() {
+    pub async fn on_event(&self, owner: &str, event_text: String) {
+        if self
+            .pending_tx
+            .send(PendingItem::for_owner(owner, event_text))
+            .await
+            .is_err()
+        {
             tracing::warn!(event = "on_event_pending_tx_closed");
         }
     }
@@ -254,7 +271,7 @@ mod tests {
         let sid = sm.create_session_for("_local").await.expect("session");
         insert_raw_message(&path, &sid, "I exercise every day").await;
 
-        let (tx, mut rx) = mpsc::channel::<String>(16);
+        let (tx, mut rx) = mpsc::channel::<PendingItem>(16);
         let svc = CronService::new(tx, engine);
 
         // Spawn heartbeat with a very short interval (10ms)
@@ -263,7 +280,7 @@ mod tests {
         });
 
         // Wait up to 500ms to receive at least one message
-        let msg = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        let item = tokio::time::timeout(Duration::from_millis(500), rx.recv())
             .await
             .expect("timeout waiting for heartbeat message")
             .expect("channel closed");
@@ -271,8 +288,13 @@ mod tests {
         handle.abort();
 
         assert!(
-            !msg.is_empty(),
-            "heartbeat message must not be empty; got: {msg:?}"
+            !item.text.is_empty(),
+            "heartbeat message must not be empty; got: {item:?}"
+        );
+        assert_eq!(
+            item.owner.as_deref(),
+            Some("_local"),
+            "6d: heartbeat item must be tagged with the owner it ran for; got: {item:?}"
         );
     }
 
@@ -287,14 +309,19 @@ mod tests {
         setup_db(&path).await;
 
         let engine = GoalEngine::new(&path, ScoringConfig::default());
-        let (tx, mut rx) = mpsc::channel::<String>(16);
+        let (tx, mut rx) = mpsc::channel::<PendingItem>(16);
         let svc = CronService::new(tx, engine);
 
-        svc.on_event("calendar: meeting in 10 minutes".to_string())
+        svc.on_event("_local", "calendar: meeting in 10 minutes".to_string())
             .await;
 
-        let msg = rx.recv().await.expect("message expected");
-        assert_eq!(msg, "calendar: meeting in 10 minutes");
+        let item = rx.recv().await.expect("message expected");
+        assert_eq!(item.text, "calendar: meeting in 10 minutes");
+        assert_eq!(
+            item.owner.as_deref(),
+            Some("_local"),
+            "6d: on_event item must be tagged with the owner it was raised for"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -312,7 +339,7 @@ mod tests {
         ));
 
         let engine = GoalEngine::new(&path, ScoringConfig::default());
-        let (tx, _rx) = mpsc::channel::<String>(16);
+        let (tx, _rx) = mpsc::channel::<PendingItem>(16);
         let svc = CronService::new(tx, engine);
 
         let dream = MockDream {
@@ -403,7 +430,7 @@ mod tests {
         };
 
         let engine = GoalEngine::new(&path, ScoringConfig::default());
-        let (tx, _rx) = mpsc::channel::<String>(16);
+        let (tx, _rx) = mpsc::channel::<PendingItem>(16);
         let svc = CronService::new(tx, engine);
 
         let dream = MockDream {
@@ -465,7 +492,7 @@ mod tests {
         ));
 
         let engine = GoalEngine::new(&path, ScoringConfig::default());
-        let (tx, _rx) = mpsc::channel::<String>(16);
+        let (tx, _rx) = mpsc::channel::<PendingItem>(16);
         let svc = CronService::new(tx, engine);
 
         let dream = MockDream {
