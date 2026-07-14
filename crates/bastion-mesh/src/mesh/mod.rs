@@ -65,7 +65,7 @@ impl MeshPeerMap {
     }
 
     /// Return all registered peer owner_ids (for iteration in scheduler).
-    pub fn all_peer_owner_ids(&self) -> Vec<String> {
+    pub(crate) fn all_peer_owner_ids(&self) -> Vec<String> {
         self.peers.keys().cloned().collect()
     }
 }

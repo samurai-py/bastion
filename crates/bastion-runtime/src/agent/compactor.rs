@@ -33,7 +33,7 @@ impl AutoCompact {
     }
 
     /// Estimate token count from message content (fallback when no API usage data yet).
-    pub fn estimate_tokens(messages: &[Message]) -> u32 {
+    pub(crate) fn estimate_tokens(messages: &[Message]) -> u32 {
         messages
             .iter()
             .map(|m| {

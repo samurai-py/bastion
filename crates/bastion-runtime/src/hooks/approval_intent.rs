@@ -67,7 +67,7 @@ fn contains_word_boundary(text: &str, phrase: &str) -> bool {
 
 /// Returns `true` when `text` contains a natural-language approval phrase at
 /// a word boundary (case-insensitive).
-pub fn detect_approval_intent(text: &str) -> bool {
+pub(crate) fn detect_approval_intent(text: &str) -> bool {
     let lower = text.to_lowercase();
     APPROVAL_PHRASES
         .iter()
@@ -76,7 +76,7 @@ pub fn detect_approval_intent(text: &str) -> bool {
 
 /// Returns `true` when `text` contains a natural-language rejection phrase at
 /// a word boundary (case-insensitive). Same idiom as [`detect_approval_intent`].
-pub fn detect_rejection_intent(text: &str) -> bool {
+pub(crate) fn detect_rejection_intent(text: &str) -> bool {
     let lower = text.to_lowercase();
     REJECTION_PHRASES
         .iter()

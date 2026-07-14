@@ -29,7 +29,7 @@ fn apply_message_start_usage(usage: &mut TokenUsage, event: &Value) {
     }
 }
 
-pub struct AnthropicProvider {
+pub(crate) struct AnthropicProvider {
     client: reqwest::Client,
     api_key: String,
     model: String,

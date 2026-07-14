@@ -104,7 +104,7 @@ impl Channel for EmailChannel {
 /// `"addr@x.com"` form of the `From:` header, and the plain-text body (mailparse
 /// decodes quoted-printable/base64 transfer encodings automatically). Bails if the
 /// `From:` header is absent.
-pub fn parse_email_message(raw: &[u8]) -> anyhow::Result<(String, String)> {
+pub(crate) fn parse_email_message(raw: &[u8]) -> anyhow::Result<(String, String)> {
     use mailparse::MailHeaderMap;
 
     let mail = mailparse::parse_mail(raw)?;

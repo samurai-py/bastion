@@ -108,7 +108,10 @@ impl AcpxAgentRuntime {
 
     /// Same as [`Self::new`] but with an explicit path to the `acpx`
     /// binary/script (useful in tests or non-standard installs).
-    pub fn with_binary(acpx_bin: PathBuf, agent: impl Into<String>) -> Result<Self, RuntimeError> {
+    pub(crate) fn with_binary(
+        acpx_bin: PathBuf,
+        agent: impl Into<String>,
+    ) -> Result<Self, RuntimeError> {
         let interpreter = resolve_shebang_interpreter(&acpx_bin)?;
         Ok(Self {
             acpx_bin,
@@ -348,7 +351,7 @@ struct ActiveChild {
     cancel_requested: Arc<AtomicBool>,
 }
 
-pub struct AcpxSession {
+pub(crate) struct AcpxSession {
     acpx_bin: PathBuf,
     interpreter: Option<PathBuf>,
     agent: String,

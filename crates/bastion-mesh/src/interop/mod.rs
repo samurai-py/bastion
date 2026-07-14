@@ -75,7 +75,7 @@ pub struct SkillEntry {
     pub path: String,
 }
 
-pub fn check_version(v: u32) -> anyhow::Result<()> {
+pub(crate) fn check_version(v: u32) -> anyhow::Result<()> {
     if v != AF_VERSION {
         anyhow::bail!(
             "Unsupported .af version {}. This Bastion supports version {}.",

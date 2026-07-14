@@ -15,7 +15,7 @@ use crate::types::{
     ToolChoice,
 };
 
-pub struct OpenAIProvider {
+pub(crate) struct OpenAIProvider {
     client: Client<OpenAIConfig>,
     model: String,
 }

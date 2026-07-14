@@ -120,7 +120,7 @@ impl SkillsLoader {
     /// Called by AgentLoop after a `skill_reloaded` signal from skill-writer (D-06).
     /// Extracts `<name>` and `<description>` XML-like tags. If `<name>` is absent,
     /// falls back to the parent directory name (the skill directory name convention).
-    pub fn rescan(skill_path: &str) -> anyhow::Result<SkillMetadata> {
+    pub(crate) fn rescan(skill_path: &str) -> anyhow::Result<SkillMetadata> {
         let content = std::fs::read_to_string(std::path::Path::new(skill_path))
             .map_err(|e| anyhow::anyhow!("skills rescan: cannot read {}: {}", skill_path, e))?;
 

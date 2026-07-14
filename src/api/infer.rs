@@ -30,7 +30,7 @@ struct InferResponse {
 }
 
 #[derive(Clone)]
-pub struct InferState {
+pub(crate) struct InferState {
     pub provider: SharedProvider,
     /// Shared secret required as `Authorization: Bearer <token>`. When `None`,
     /// auth is disabled (loopback-only dev mode — main.rs refuses non-loopback

@@ -153,7 +153,7 @@ impl SqliteApprovalGate {
     /// key (D-03). Not part of the `ApprovalGate` port — a SQLite-specific
     /// idempotency-key helper, not something a different gate implementation
     /// need share.
-    pub fn compute_hash(capability_name: &str, args: &Value, owner: &str) -> String {
+    pub(crate) fn compute_hash(capability_name: &str, args: &Value, owner: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(capability_name.as_bytes());
         hasher.update(b"\0");

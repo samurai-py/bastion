@@ -134,7 +134,7 @@ impl NlCommandAdapter {
     }
 
     /// The prefixed registry key for a bare command name: "cmd:model", "cmd:stop", etc.
-    pub fn registry_key(bare_name: &str) -> String {
+    pub(crate) fn registry_key(bare_name: &str) -> String {
         format!("cmd:{}", bare_name)
     }
 }

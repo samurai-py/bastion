@@ -901,7 +901,7 @@ async fn send_thread_start(
 // Session
 // ---------------------------------------------------------------------
 
-pub struct CodexSession {
+pub(crate) struct CodexSession {
     shared: Arc<Shared>,
     handle: SessionHandle,
     thread_id: String,

@@ -339,7 +339,7 @@ impl bastion_runtime::agent::ports::GoalPort for GoalEngine {
 // ---------------------------------------------------------------------------
 
 /// Builds a confirmation nudge: user may have progressed toward the goal.
-pub fn build_confirm_nudge(goal: &Goal) -> String {
+pub(crate) fn build_confirm_nudge(goal: &Goal) -> String {
     format!(
         "Parece que você avançou em \"{}\" — confirma?",
         goal.description
@@ -347,7 +347,7 @@ pub fn build_confirm_nudge(goal: &Goal) -> String {
 }
 
 /// Builds a drift signal: user hasn't progressed in the window and deadline is near.
-pub fn build_drift_nudge(goal: &Goal) -> String {
+pub(crate) fn build_drift_nudge(goal: &Goal) -> String {
     format!(
         "Parece que você não avançou em \"{}\" essa semana. Quer retomar?",
         goal.description

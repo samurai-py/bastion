@@ -116,7 +116,7 @@ impl AgeIdentity {
 
     /// Return Ed25519 secret key as base64url-encoded bytes (no padding).
     /// SECURITY: only call during --with-identity export; never log.
-    pub fn ed25519_secret_base64(&self) -> String {
+    pub(crate) fn ed25519_secret_base64(&self) -> String {
         let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         engine.encode(self.signing_key.to_bytes())
     }

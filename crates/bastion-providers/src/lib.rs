@@ -216,7 +216,7 @@ pub use bastion_runtime::provider::{
 /// `failed to deserialize api response: invalid type: integer 401, expected a string`
 /// that bury the real cause. This pulls the API's human-readable `"message"` out of the
 /// blob so callers and logs show e.g. `openrouter API error: User not found.` instead.
-pub fn clarify_openai_error(provider: &str, err: impl std::fmt::Display) -> anyhow::Error {
+pub(crate) fn clarify_openai_error(provider: &str, err: impl std::fmt::Display) -> anyhow::Error {
     let raw = err.to_string();
     match extract_api_message(&raw) {
         Some(msg) => anyhow::anyhow!("{provider} API error: {msg}"),

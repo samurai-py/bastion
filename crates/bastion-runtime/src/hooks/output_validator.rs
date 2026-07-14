@@ -62,7 +62,7 @@ const CONTESTATION_PHRASES: &[&str] = &[
 ///
 /// Matching is case-insensitive and substring-based. Diacritic-stripped variants
 /// are also included in [`CONTESTATION_PHRASES`] so ASCII-normalised input matches.
-pub fn detect_contestation(text: &str) -> bool {
+pub(crate) fn detect_contestation(text: &str) -> bool {
     let lower = text.to_lowercase();
     CONTESTATION_PHRASES
         .iter()

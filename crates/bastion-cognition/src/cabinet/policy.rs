@@ -23,7 +23,7 @@ use crate::memory::PrivacyTier;
 /// # Scoping (D-02)
 /// This function does not mutate any persona state. The returned tier is used only
 /// for the duration of the current deliberation round.
-pub fn table_tier(tiers: &[PrivacyTier]) -> PrivacyTier {
+pub(crate) fn table_tier(tiers: &[PrivacyTier]) -> PrivacyTier {
     if tiers.is_empty() || tiers.contains(&PrivacyTier::LocalOnly) {
         PrivacyTier::LocalOnly
     } else {

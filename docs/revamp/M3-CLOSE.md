@@ -108,9 +108,123 @@ was 24.345.624 bytes — the flags added no overhead to the default build
 | `bash scripts/check-crate-deps.sh` | PASS |
 | `cargo run -p minimal-agent` / `-p embedded-host` | exit 0, offline |
 
-## 6. Not covered here (remaining M3)
+## 6. Not covered here (remaining M3, at the time of the static pass above)
 
 M3-01 (reduce `pub` to the contract + shim removal), M3-03 (compat tests /
 API-breaking CI), M3-06 (semver/MSRV/license policy), M3-07..11
 (extension protocol, conformance, manifests, auth, ContextRevision) — all
 untouched by this static pass.
+
+## 7. Ciclo 2.3 — M3-01: shim removal + public-surface tightening (2026-07-14)
+
+### 7.1 Shim removal
+
+All 19 M2 re-export shims (`// TEMPORARY re-export shim (M2)` marker) are
+gone. Every consumer in `src/`, `tests/`, `src/main.rs` now names the real
+crate directly (`bastion_runtime`, `bastion_memory`, `bastion_types`,
+`bastion_cognition`, `bastion_mesh`, `bastion_personas`, `bastion_providers`,
+`bastion_mcp`, `bastion_agent_runtime`). Mechanical import-path rewrite only
+— no logic, assertion, or signature change.
+
+- **17 whole-file/dir shims deleted outright**: `agent_runtime.rs`,
+  `cabinet.rs`, `capability/` (dir), `eval.rs`, `goal.rs`, `hooks.rs`,
+  `identity.rs`, `interop.rs`, `learn.rs`, `memory/` (dir), `mesh.rs`,
+  `persona.rs`, `proactive.rs`, `provider/` (dir), `scheduler.rs`,
+  `session.rs`, `types.rs`.
+- **2 partial shims rewritten in place**: `agent/mod.rs` (keeps the real
+  `command`/`skills` submodules and `default_context_providers`; the
+  re-exported kernel/cognition submodules now resolve straight to
+  `bastion_runtime::agent::*` / `bastion_cognition::agent::*`) and
+  `mcp/mod.rs` (keeps the real, feature-gated `server` submodule; the
+  client-side re-exports now resolve straight to `bastion_mcp::*`).
+- `src/lib.rs` shrinks to the 5 real app modules: `agent`, `api`, `channel`,
+  `config`, `mcp`.
+- **No exceptions**: no shim had a legitimate external consumer that
+  couldn't be migrated — all 19 came out clean.
+
+### 7.2 Public-surface tightening (mechanical pass)
+
+Method: every `pub fn|struct|enum|trait` declaration was treated as a
+downgrade candidate if its identifier had **zero textual occurrences**
+anywhere in the workspace outside its own crate (app: outside `src/main.rs`,
+`src/bin/*`, `tests/**`, `examples/**`; library crates: outside
+`crates/<name>/src/**`, which correctly still counts that crate's *own*
+`tests/` dir — e.g. `bastion-agent-runtime/tests/` — as external). Candidates
+were downgraded to `pub(crate)`, then verified against the compiler
+(`cargo check --workspace --all-targets --all-features`): any
+`private_interfaces`/`private-type-leak` error or newly-exposed
+`dead_code` warning was treated as proof the item **is** part of the
+public contract (leaked through a still-`pub` fn/field/trait method, or a
+deliberate null-object like `NoObserver`/`NoDream`) and reverted to `pub`.
+No signature was changed, no code moved, no item renamed — visibility only.
+
+Of 365 `pub fn|struct|enum|trait` items workspace-wide, 74 were zero-external
+-reference candidates; 48 were reverted after compiler feedback (leaked
+through a public signature, or dead-code-only once privatized); **26 net
+items** ended up `pub(crate)`.
+
+**Pub item counts (`pub fn|struct|enum|trait`, before → after):**
+
+| Crate | Before | After | Downgraded |
+|---|---:|---:|---:|
+| `bastion` (app, `src/`) | 73 | 69 | 4 |
+| `bastion-types` | 33 | 33 | 0 |
+| `bastion-runtime` | 67 | 62 | 5 |
+| `bastion-memory` | 2 | 2 | 0 |
+| `bastion-providers` | 19 | 14 | 5 |
+| `bastion-mcp` | 26 | 25 | 1 |
+| `bastion-agent-runtime` | 54 | 51 | 3 |
+| `bastion-cognition` | 43 | 38 | 5 |
+| `bastion-personas` | 11 | 11 | 0 |
+| `bastion-mesh` | 37 | 34 | 3 |
+| **Total** | **365** | **339** | **26** |
+
+**Candidates found but NOT touched (reverted to `pub` after compiler
+feedback — genuinely part of the public contract despite zero current
+textual reference elsewhere)**, grouped by why:
+
+- *Leaked through a still-`pub` fn return / field / trait method* (the
+  bulk): `CheckResult` (bastion-agent-runtime, 16 call sites), `McpBridgeSpec`,
+  `UsageDelta`, `InputGuardrail`, `EgressHook`, `RegressionCase`,
+  `VerifierResult`, `ProgressScore`, `ReplanResult`, `Reflection`, `Dream`
+  (trait), `ConsolidationPlan`, `IdentityBlock`, `MemoryEntry`,
+  `PersonaEntry`, `GoalEntry`, `SkillEntry`, `AgentConfigExport`,
+  `MeshTransport` (trait, plus its `SelectiveSlice` param type),
+  `SkillMetadata`, and the whole `BastionConfig` sub-struct tree
+  (`MeshPeerConfig`, `MeshConfig`, `IdentityEntry`, `IdentityConfig`,
+  `SessionConfig`, `LoggingConfig`, `McpConfig`, `McpServerTokenConfig`,
+  `McpServerConfig`, `ChannelsConfig`, `ChannelConfig` ×2 distinct types in
+  `src/config.rs` and `src/channel/mod.rs`, `VoiceChannelConfig`).
+- *Dead-code-only once privatized* (no external ref, but also apparently
+  unconstructed/uncalled even intra-crate — reverted rather than deleted,
+  since deleting code was out of scope): `to_sql_str`, `list_names`, `Hook`
+  (trait), `Observer` (trait), `NoObserver`, `LifeLog`, `with_binary`
+  (codex.rs only — the acpx.rs `with_binary` of the same name stayed
+  `pub(crate)`, it has an intra-crate caller), `NoDream`, `NoOpGenerator`,
+  `resolve_provider_kind`, `WhatsAppChannel`.
+- *Re-exported at crate root through a different file* (E0364/E0365 hard
+  errors, not warnings): `parse_soul`, `BastionBlock`, `PersonaFront`
+  (`bastion-personas`) — declared `pub(crate)` in `persona/soul.rs` but
+  re-exported `pub use soul::{...}` from `persona/mod.rs`; the re-export
+  itself needs the source item to be `pub`.
+
+No further candidates are proposed at this time — everything with a
+plausible external reach ended up `pub` after the compiler check; the
+remaining 26 are true crate-internal-only items.
+
+### 7.3 Gates (this close)
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --check` | PASS |
+| `cargo clippy --all-targets --all-features -- -D warnings` | PASS (only the pre-existing `proc-macro-error2` future-incompat notice) |
+| `cargo test --workspace` | PASS — **570 passed, 5 ignored** (42 suites), unchanged from before this cycle |
+| `bash scripts/check-crate-deps.sh` | PASS |
+
+## 8. Not covered here (remaining M3, after Ciclo 2.3)
+
+M3-03 (compat tests / API-breaking CI — now backed by the versioning policy
+and public-API baseline in `docs/VERSIONING.md` / `scripts/dump-public-api.sh`),
+M3-06 (semver/MSRV/license policy — see `docs/VERSIONING.md`), M3-07..11
+(extension protocol, conformance, manifests, auth, ContextRevision) —
+untouched by this cycle.

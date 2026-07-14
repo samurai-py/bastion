@@ -103,7 +103,7 @@ impl WhatsAppSender {
     /// Verify Meta's `X-Hub-Signature-256` header over the raw request body.
     /// Comparison is constant-time via `Hmac::verify_slice` — NEVER a manual `==`
     /// byte comparison (10-RESEARCH.md Don't-Hand-Roll; T-10-04-01).
-    pub fn verify_signature(&self, body: &[u8], signature_header: &str) -> bool {
+    pub(crate) fn verify_signature(&self, body: &[u8], signature_header: &str) -> bool {
         let Some(hex_sig) = signature_header.strip_prefix("sha256=") else {
             return false;
         };

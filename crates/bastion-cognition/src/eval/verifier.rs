@@ -57,7 +57,7 @@ pub fn assert_egress_case(
 }
 
 /// Whole-matrix convenience used by `verify_delta`'s structural gate.
-pub fn assert_egress_matrix() -> VerifierResult {
+pub(crate) fn assert_egress_matrix() -> VerifierResult {
     let mut failed = vec![];
     for (tier, provider, expected_ok) in EGRESS_CASES {
         let r = assert_egress_case(*tier, provider, *expected_ok);

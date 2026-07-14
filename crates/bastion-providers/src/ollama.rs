@@ -11,7 +11,7 @@ use crate::types::{
     ToolCall,
 };
 
-pub struct OllamaProvider {
+pub(crate) struct OllamaProvider {
     /// Serves the existing, working non-structured path unchanged (`/v1/chat/completions`,
     /// OpenAI-compat shim).
     client: Client<OpenAIConfig>,

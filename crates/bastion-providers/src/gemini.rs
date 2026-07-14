@@ -16,7 +16,7 @@ use crate::types::{
 /// OpenAI-compatible provider for Google Gemini via the official compatibility
 /// endpoint (https://generativelanguage.googleapis.com/v1beta/openai).
 /// Routed when the model name starts with `gemini` (e.g. `gemini-2.0-flash`).
-pub struct GeminiProvider {
+pub(crate) struct GeminiProvider {
     client: Client<OpenAIConfig>,
     /// Raw client for the tool-use round-trip path (SO-05) — only exercised when
     /// tools are in play and no response_format is requested. See `complete_tool_use`.

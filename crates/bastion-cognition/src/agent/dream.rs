@@ -80,7 +80,7 @@ impl Dream for NoDream {
 ///
 /// This is the Phase-2 "scripted" implementation. A real LLM-backed variant can be
 /// swapped in by implementing the Dream trait with an LLM call.
-pub struct HeuristicDream;
+pub(crate) struct HeuristicDream;
 
 #[async_trait::async_trait]
 impl Dream for HeuristicDream {
