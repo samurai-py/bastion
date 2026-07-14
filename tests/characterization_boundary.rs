@@ -46,8 +46,8 @@
 use async_trait::async_trait;
 use bastion::agent::context::{ContextBlock, TurnContextProvider};
 use bastion::agent::loop_::{AgentLoop, DEFAULT_OWNER};
-use bastion::agent::ports::ToolSource;
-use bastion::capability::approval::ApprovalQueue;
+use bastion::agent::ports::{ApprovalGate, ToolSource};
+use bastion::capability::approval::SqliteApprovalGate;
 use bastion::capability::{Capability, CapabilityRegistry, InvokeCtx};
 use bastion::goal::{GoalEngine, ScoringConfig};
 use bastion::mcp::McpClient;
@@ -114,16 +114,16 @@ fn ctx(owner: &str, tier: Option<PrivacyTier>) -> InvokeCtx {
     }
 }
 
-async fn make_registry_with_wired_queue() -> (NamedTempFile, CapabilityRegistry, Arc<ApprovalQueue>)
-{
+async fn make_registry_with_wired_queue(
+) -> (NamedTempFile, CapabilityRegistry, Arc<SqliteApprovalGate>) {
     let f = NamedTempFile::new().expect("tempfile");
     let path = f.path().to_str().unwrap().to_owned();
     SessionManager::new(&path)
         .init_schema()
         .await
         .expect("init_schema");
-    let queue = Arc::new(ApprovalQueue::new(path));
-    let registry = CapabilityRegistry::new().with_approval_queue(queue.clone());
+    let queue = Arc::new(SqliteApprovalGate::new(path));
+    let registry = CapabilityRegistry::new().with_approval_gate(queue.clone());
     (f, registry, queue)
 }
 
@@ -387,7 +387,7 @@ async fn make_agent(db_path: &str) -> AgentLoop {
         memory.clone(),
         Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],
-        db_path,
+        Arc::new(SqliteApprovalGate::new(db_path)),
         Arc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
         Arc::new(bastion::provider::registry::RegistryProviderResolver),

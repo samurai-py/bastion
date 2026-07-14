@@ -869,6 +869,7 @@ async fn channel_typed_error_reaches_webhook_error_status() {
 #[tokio::test]
 async fn cli_session_deterministic_across_turns() {
     use bastion::agent::loop_::AgentLoop;
+    use bastion::capability::approval::SqliteApprovalGate;
     use bastion::goal::{GoalEngine, ScoringConfig};
     use bastion::mcp::McpClient;
     use bastion::memory::sqlite::SqliteMemory;
@@ -966,7 +967,7 @@ async fn cli_session_deterministic_across_turns() {
         memory.clone(),
         Some(SArc::new(GoalEngine::new(&path, ScoringConfig::default()))),
         vec![],
-        &path,
+        SArc::new(SqliteApprovalGate::new(path.clone())),
         SArc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
         SArc::new(bastion::provider::registry::RegistryProviderResolver),

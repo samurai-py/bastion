@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use bastion::agent::loop_::{AgentLoop, DEFAULT_OWNER};
+use bastion::capability::approval::SqliteApprovalGate;
 use bastion::goal::{GoalEngine, ScoringConfig};
 use bastion::memory::sqlite::SqliteMemory;
 use bastion::memory::{PrivacyTier, SharedMemory};
@@ -102,7 +103,7 @@ async fn make_loop(db_path: &str) -> AgentLoop {
         memory.clone(),
         Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],
-        db_path,
+        Arc::new(SqliteApprovalGate::new(db_path)),
         Arc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
         Arc::new(bastion::provider::registry::RegistryProviderResolver),
@@ -234,7 +235,7 @@ async fn approval_resolution_approves_and_dispatches_on_sim() {
         "the LLM mock must never be invoked for an approval-resolution turn; got: {resp:?}"
     );
 
-    let queue = agent.capability_registry.approval_queue().unwrap();
+    let queue = agent.capability_registry.approval_gate();
     assert!(
         queue
             .pending_for_owner("alice")
@@ -273,7 +274,7 @@ async fn approval_resolution_skipped_when_turn_is_untrusted() {
         "an untrusted turn must never produce an approval confirmation; got: {resp:?}"
     );
 
-    let queue = agent.capability_registry.approval_queue().unwrap();
+    let queue = agent.capability_registry.approval_gate();
     assert_eq!(
         queue
             .pending_for_owner("alice")
@@ -309,7 +310,7 @@ async fn approval_resolution_rejects_and_never_dispatches_on_nao() {
         "got: {resp:?}"
     );
 
-    let queue = agent.capability_registry.approval_queue().unwrap();
+    let queue = agent.capability_registry.approval_gate();
     let pending = queue
         .pending_for_owner("alice")
         .await
@@ -345,7 +346,7 @@ async fn approval_resolution_falls_through_on_unrelated_message() {
         "an unrelated message must never dispatch the pending capability"
     );
 
-    let queue = agent.capability_registry.approval_queue().unwrap();
+    let queue = agent.capability_registry.approval_gate();
     let pending = queue
         .pending_for_owner("alice")
         .await
@@ -388,7 +389,7 @@ async fn approval_resolution_resolves_oldest_pending_row_only() {
         "action_b (newer) must remain untouched"
     );
 
-    let queue = agent.capability_registry.approval_queue().unwrap();
+    let queue = agent.capability_registry.approval_gate();
     let pending = queue
         .pending_for_owner("alice")
         .await
@@ -557,7 +558,7 @@ async fn cloud_ok_persona_tool_loop_passes_egress_gate() {
         memory.clone(),
         Some(Arc::new(GoalEngine::new(&path, ScoringConfig::default()))),
         vec![],
-        &path,
+        Arc::new(SqliteApprovalGate::new(path.clone())),
         Arc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
         Arc::new(bastion::provider::registry::RegistryProviderResolver),

@@ -1,8 +1,8 @@
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::ports::{
-    CommandHandler, CommandResult, FailureSink, GoalPort, PreCompactionFlush, ProviderResolver,
-    Responder, ToolResultObserver, ToolSource, TurnContext, TurnKernel,
+    ApprovalGate, CommandHandler, CommandResult, FailureSink, GoalPort, PreCompactionFlush,
+    ProviderResolver, Responder, ToolResultObserver, ToolSource, TurnContext, TurnKernel,
 };
 use crate::hooks::egress::EgressHook;
 use crate::hooks::guardrails::InputGuardrail;
@@ -107,6 +107,15 @@ impl AgentLoop {
     // tools is MCP logic and moved VERBATIM to
     // `mcp::registry_setup::register_mcp_tools`, called by the composition root
     // (`main.rs`) right after this constructor, against the same registry.
+    //
+    // Ciclo 2.1 (`docs/revamp/C2-approval-port-design.md` §1): the constructor
+    // no longer hardwires its own `ApprovalQueue` from a `db_path: &str`
+    // parameter — it receives the already-built `Arc<dyn ApprovalGate>`
+    // (production: `main.rs` builds `SqliteApprovalGate::new(db_path)`; a
+    // second consumer injects its own policy). This closes the M3-CLOSE §3
+    // gap (finding #1/#2, `docs/revamp/LOOP-REPORT.md` #3): there is now a
+    // real constructor lever to opt out of a persistent queue or inject an
+    // alternative decision mechanism.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: SharedProvider,
@@ -118,7 +127,7 @@ impl AgentLoop {
         memory: SharedMemory,
         goals: Option<Arc<dyn GoalPort>>,
         fallback_models: Vec<String>,
-        db_path: &str,
+        approval_gate: Arc<dyn ApprovalGate>,
         failure_sink: Arc<dyn FailureSink>,
         context_providers: Vec<Box<dyn TurnContextProvider>>,
         provider_resolver: Arc<dyn ProviderResolver>,
@@ -139,12 +148,11 @@ impl AgentLoop {
             input_guard: InputGuardrail::default(),
             output_validator: OutputValidator::new(failure_sink.clone()),
             egress_hook: EgressHook,
-            // SEC-01: the real ApprovalQueue is wired against the SAME db_path as
-            // session/memory — a needs_approval()==true capability is never
-            // unusable-but-should-work; it always has a queue behind it.
-            capability_registry: crate::capability::CapabilityRegistry::new().with_approval_queue(
-                Arc::new(crate::capability::approval::ApprovalQueue::new(db_path)),
-            ),
+            // SEC-01: the injected gate — a needs_approval()==true capability
+            // is never unusable-but-should-work; it always has a gate behind
+            // it (fail-closed `NullApprovalGate` if the caller injects one).
+            capability_registry: crate::capability::CapabilityRegistry::new()
+                .with_approval_gate(approval_gate),
             context_providers,
             pending_tx,
             pending_rx: Some(pending_rx),
@@ -341,15 +349,16 @@ impl AgentLoop {
     /// single entry point every channel funnels through — same early-exit
     /// shape as `cockpit_command` immediately above.
     ///
-    /// Returns `None` (falls through to a normal turn, untouched) when: no
-    /// `ApprovalQueue` is wired, the owner has zero pending rows, or `input`
-    /// matches neither an approval nor a rejection phrase.
+    /// Returns `None` (falls through to a normal turn, untouched) when: the
+    /// wired `ApprovalGate` reports zero pending rows for this owner (the
+    /// fail-closed `NullApprovalGate` always does), or `input` matches
+    /// neither an approval nor a rejection phrase.
     async fn approval_resolution(
         &self,
         input: &str,
         owner: &str,
     ) -> Option<anyhow::Result<String>> {
-        let queue = self.capability_registry.approval_queue()?.clone();
+        let queue = self.capability_registry.approval_gate().clone();
 
         let pending = match queue.pending_for_owner(owner).await {
             Ok(rows) => rows,
@@ -1589,7 +1598,7 @@ mod tests {
     // cannot live in an integration-test binary. Their fixture uses these
     // doubles instead of product types (PersonaResponder / SqliteMemory /
     // GoalEngine / McpToolSource / EvalFailureSink) — the kernel crate cannot
-    // depend on the app. `ApprovalQueue`/`SessionManager`/`CapabilityRegistry`
+    // depend on the app. `SqliteApprovalGate`/`SessionManager`/`CapabilityRegistry`
     // are kernel and stay real. Asserts are untouched; only setup changed.
     // The public-API tests that used the old product-backed fixture moved
     // VERBATIM to `tests/agent_loop_public.rs` in the app crate.
@@ -1774,7 +1783,9 @@ mod tests {
             memory,
             None,
             vec![],
-            db_path,
+            Arc::new(crate::capability::approval::SqliteApprovalGate::new(
+                db_path,
+            )),
             Arc::new(NoopFailureSink),
             vec![],
             Arc::new(UnreachableResolver),

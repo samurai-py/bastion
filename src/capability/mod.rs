@@ -13,7 +13,8 @@ pub use bastion_runtime::capability::{approval, registry, structured_output};
 
 pub use bastion_mcp::adapters;
 pub use bastion_mcp::adapters::{DirectFnAdapter, McpToolAdapter, NlCommandAdapter};
+pub use bastion_runtime::agent::ports::ApprovalGate;
 pub use bastion_runtime::capability::{
-    ApprovalOutcome, ApprovalQueue, ApprovalRow, ApprovalStatus, Capability, CapabilityRegistry,
-    InvokeCtx, TurnCapabilityScope,
+    ApprovalOutcome, ApprovalRow, ApprovalStatus, Capability, CapabilityRegistry, InvokeCtx,
+    NullApprovalGate, SqliteApprovalGate, TurnCapabilityScope,
 };

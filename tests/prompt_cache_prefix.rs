@@ -20,6 +20,7 @@
 
 use async_trait::async_trait;
 use bastion::agent::loop_::{AgentLoop, DEFAULT_OWNER};
+use bastion::capability::approval::SqliteApprovalGate;
 use bastion::goal::{GoalEngine, ScoringConfig};
 use bastion::mcp::McpClient;
 use bastion::memory::sqlite::SqliteMemory;
@@ -114,7 +115,7 @@ async fn make_agent(db_path: &str) -> (AgentLoop, SharedMemory) {
         memory.clone(),
         Some(Arc::new(GoalEngine::new(db_path, ScoringConfig::default()))),
         vec![],
-        db_path,
+        Arc::new(SqliteApprovalGate::new(db_path)),
         Arc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
         Arc::new(bastion::provider::registry::RegistryProviderResolver),

@@ -1,6 +1,8 @@
-use crate::capability::approval::{ApprovalOutcome, ApprovalQueue};
+use crate::agent::ports::ApprovalGate;
+use crate::capability::approval::NullApprovalGate;
 use crate::memory::PrivacyTier;
 use async_trait::async_trait;
+use bastion_types::ApprovalOutcome;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -88,35 +90,41 @@ pub struct TaggedValue {
 #[derive(Clone)]
 pub struct CapabilityRegistry {
     inner: HashMap<String, Arc<dyn Capability>>,
-    /// The real SEC-01 approval gate backing store. `None` means no queue is
-    /// wired — see `invoke()`'s Policy 2 for why that is a fail-closed deny,
-    /// never a silent allow, for any capability with `needs_approval()==true`.
-    approval_queue: Option<Arc<ApprovalQueue>>,
+    /// SEC-01 approval gate (Ciclo 2.1, `docs/revamp/C2-approval-port-design.md`
+    /// §1: `ApprovalGate` port, not a concrete `Option<Arc<ApprovalQueue>>`).
+    /// NEVER `Option` — approval is mandatory. `CapabilityRegistry::new()`
+    /// wires the explicit fail-closed `NullApprovalGate` by default (see
+    /// `invoke()`'s Policy 2 for why that denies fail-closed, never silently
+    /// allows, any capability with `needs_approval()==true`); a caller that
+    /// wants a real queue calls `.with_approval_gate(...)`.
+    approval_gate: Arc<dyn ApprovalGate>,
 }
 
 impl CapabilityRegistry {
     pub fn new() -> Self {
         Self {
             inner: HashMap::new(),
-            approval_queue: None,
+            approval_gate: Arc::new(NullApprovalGate),
         }
     }
 
-    /// Wire a real `ApprovalQueue` so Policy 2 can actually queue/idempotent-resume
-    /// instead of fail-closed-denying every `needs_approval()==true` capability.
-    pub fn with_approval_queue(mut self, queue: Arc<ApprovalQueue>) -> Self {
-        self.approval_queue = Some(queue);
+    /// Wire a real `ApprovalGate` (e.g. `SqliteApprovalGate`) so Policy 2 can
+    /// actually queue/idempotent-resume instead of fail-closed-denying every
+    /// `needs_approval()==true` capability.
+    pub fn with_approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.approval_gate = gate;
         self
     }
 
-    /// Plan 11-04: read access to the wired `ApprovalQueue` (if any) — lets
+    /// Plan 11-04: read access to the wired `ApprovalGate` — lets
     /// `AgentLoop::run_turn_for`'s pre-LLM approval-resolution intercept check
     /// `pending_for_owner`/`approve`/`reject` WITHOUT going through `invoke()`
     /// (there is no capability to invoke yet at that point — resolution decides
-    /// whether to dispatch one). Returns `None` when no queue is wired, exactly
-    /// mirroring Policy 2's own fail-closed treatment of an unwired registry.
-    pub fn approval_queue(&self) -> Option<&Arc<ApprovalQueue>> {
-        self.approval_queue.as_ref()
+    /// whether to dispatch one). Never `None` (Ciclo 2.1) — an unwired registry
+    /// carries the explicit fail-closed `NullApprovalGate`, whose
+    /// `pending_for_owner` always reports empty so callers degrade gracefully.
+    pub fn approval_gate(&self) -> &Arc<dyn ApprovalGate> {
+        &self.approval_gate
     }
 
     /// Register a capability under its `name()`.
@@ -249,53 +257,46 @@ impl CapabilityRegistry {
         // flag (T-11-02-01: the removed `InvokeCtx.needs_approval` was exactly that
         // kind of unwired, trust-me flag, and is gone, not left dead alongside this).
         if cap.needs_approval() {
-            return match &self.approval_queue {
-                // No queue wired: preserve the ORIGINAL fail-closed behavior. A
-                // capability requiring approval is unusable (denied) until a queue
-                // is attached — never silently allowed just because the gate isn't
-                // wired (T-11-02-04, e.g. the Reflector's minimal registry).
-                None => {
-                    anyhow::bail!(
-                        "capability '{}' requires approval but no approval queue is wired — denying fail-closed",
-                        name
-                    );
-                }
-                Some(queue) => {
-                    let outcome = queue.enqueue_or_reuse(&ctx.owner, name, &args).await?;
-                    match outcome {
-                        // D-03 idempotent-resume: already ran to completion — return the
-                        // cached result, never re-dispatch.
-                        ApprovalOutcome::AlreadyExecuted(cached) => Ok(TaggedValue {
-                            data: cached,
-                            source: name.to_owned(),
-                            trusted: cap.is_trusted(),
+            // Ciclo 2.1: the gate is always wired (NEVER `Option`) — an
+            // unattached registry carries `NullApprovalGate`, whose
+            // `enqueue_or_reuse` fails closed exactly like the old `None`
+            // branch (T-11-02-04, e.g. the Reflector's minimal registry).
+            let outcome = self
+                .approval_gate
+                .enqueue_or_reuse(&ctx.owner, name, &args)
+                .await?;
+            return match outcome {
+                // D-03 idempotent-resume: already ran to completion — return the
+                // cached result, never re-dispatch.
+                ApprovalOutcome::AlreadyExecuted(cached) => Ok(TaggedValue {
+                    data: cached,
+                    source: name.to_owned(),
+                    trusted: cap.is_trusted(),
+                }),
+                // Not yet approved (freshly queued or still pending): the
+                // capability has NOT run — Dispatch below is structurally
+                // unreachable from this branch (T-11-02-02).
+                ApprovalOutcome::AlreadyPending | ApprovalOutcome::NewlyQueued(_) => {
+                    Ok(TaggedValue {
+                        data: serde_json::json!({
+                            "awaiting_approval": true,
+                            "capability": name,
                         }),
-                        // Not yet approved (freshly queued or still pending): the
-                        // capability has NOT run — Dispatch below is structurally
-                        // unreachable from this branch (T-11-02-02).
-                        ApprovalOutcome::AlreadyPending | ApprovalOutcome::NewlyQueued(_) => {
-                            Ok(TaggedValue {
-                                data: serde_json::json!({
-                                    "awaiting_approval": true,
-                                    "capability": name,
-                                }),
-                                source: name.to_owned(),
-                                trusted: cap.is_trusted(),
-                            })
-                        }
-                        // Approved but not yet executed: this invoke() call IS the
-                        // resolution (triggered by Plan 11-04's NL intercept) — dispatch
-                        // now and record the result for future idempotent-resume.
-                        ApprovalOutcome::ApprovedPendingExecution(id) => {
-                            let result = cap.invoke(args, ctx).await?;
-                            queue.record_executed(id, &result).await?;
-                            Ok(TaggedValue {
-                                data: result,
-                                source: name.to_owned(),
-                                trusted: cap.is_trusted(),
-                            })
-                        }
-                    }
+                        source: name.to_owned(),
+                        trusted: cap.is_trusted(),
+                    })
+                }
+                // Approved but not yet executed: this invoke() call IS the
+                // resolution (triggered by Plan 11-04's NL intercept) — dispatch
+                // now and record the result for future idempotent-resume.
+                ApprovalOutcome::ApprovedPendingExecution(id) => {
+                    let result = cap.invoke(args, ctx).await?;
+                    self.approval_gate.record_executed(id, &result).await?;
+                    Ok(TaggedValue {
+                        data: result,
+                        source: name.to_owned(),
+                        trusted: cap.is_trusted(),
+                    })
                 }
             };
         }
@@ -402,6 +403,7 @@ impl<'a> std::ops::Deref for TurnCapabilityScope<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::approval::SqliteApprovalGate;
 
     struct StubCap {
         name: String,
@@ -512,12 +514,12 @@ mod tests {
         }
     }
 
-    /// Registry wired with a real ApprovalQueue (temp sqlite db) plus one
+    /// Registry wired with a real SqliteApprovalGate (temp sqlite db) plus one
     /// `needs_approval()==true` capability registered under "dangerous_action".
     async fn make_queue_registry() -> (
         tempfile::NamedTempFile,
         CapabilityRegistry,
-        Arc<ApprovalQueue>,
+        Arc<SqliteApprovalGate>,
         Arc<AtomicUsize>,
     ) {
         let f = tempfile::NamedTempFile::new().unwrap();
@@ -526,9 +528,9 @@ mod tests {
             .init_schema()
             .await
             .expect("init_schema");
-        let queue = Arc::new(ApprovalQueue::new(path));
+        let queue = Arc::new(SqliteApprovalGate::new(path));
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut registry = CapabilityRegistry::new().with_approval_queue(queue.clone());
+        let mut registry = CapabilityRegistry::new().with_approval_gate(queue.clone());
         registry
             .register(Arc::new(ApprovalStubCap {
                 name: "dangerous_action".to_string(),

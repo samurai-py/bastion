@@ -31,6 +31,7 @@ use bastion_runtime::agent::loop_::{AgentLoop, DEFAULT_OWNER};
 use bastion_runtime::agent::ports::{
     FailureSink, ProviderResolver, RespondOutcome, Responder, ToolSource, TurnContext,
 };
+use bastion_runtime::capability::approval::SqliteApprovalGate;
 use bastion_runtime::capability::{Capability, InvokeCtx};
 use bastion_runtime::memory::PrivacyTier;
 use bastion_runtime::provider::{Provider, SharedProvider};
@@ -280,11 +281,7 @@ async fn demonstrate_denied_capability(agent: &mut AgentLoop) {
     // The host's authorization policy decides to DENY this specific action
     // (e.g. "amount over threshold") via the only lever available: reject
     // the now-pending row on the queue `AgentLoop` already wired.
-    let queue = agent
-        .capability_registry
-        .approval_queue()
-        .expect("AgentLoop always wires one")
-        .clone();
+    let queue = agent.capability_registry.approval_gate().clone();
     let pending = queue
         .pending_for_owner(DEFAULT_OWNER)
         .await
@@ -350,7 +347,7 @@ async fn main() -> anyhow::Result<()> {
         memory,
         None,
         vec![],
-        &db_path,
+        Arc::new(SqliteApprovalGate::new(db_path.clone())),
         Arc::new(NoopFailureSink),
         // The seam a second consumer uses to inject its own authoritative
         // context — no patch to the kernel, just a `Box<dyn TurnContextProvider>`.

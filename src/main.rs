@@ -250,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
         memory.clone(),
         Some(std::sync::Arc::new(goals)),
         cfg.agent.fallback_models.clone(),
-        &db_path,
+        std::sync::Arc::new(bastion::capability::SqliteApprovalGate::new(&db_path)),
         std::sync::Arc::new(bastion::eval::failure_sink::EvalFailureSink),
         bastion::agent::default_context_providers(&memory),
         // A3 `ProviderResolver`: registry-backed fallback-ladder resolution.
@@ -904,9 +904,10 @@ async fn daemon_loop(
                 // today's exact behavior unchanged.
                 is_local_override: false,
                 // memory_embed is a read-only embedding lookup, not destructive —
-                // and this minimal reflector registry has no ApprovalQueue wired
-                // anyway, so needs_approval:true here would fail-closed-deny it
-                // outright (Plan 11-04).
+                // and this minimal reflector registry has no real ApprovalGate
+                // wired anyway (bare `CapabilityRegistry::new()` defaults to the
+                // fail-closed `NullApprovalGate`), so needs_approval:true here
+                // would fail-closed-deny it outright (Plan 11-04).
                 needs_approval_override: false,
                 trusted_override: false,
             },

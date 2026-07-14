@@ -6,7 +6,7 @@
 //! loop is wired to depend on them, but no file moves crate yet — that is a
 //! separate step (3b). Behavior is unchanged; only the seam is added.
 
-use bastion_types::{FailureKind, Goal, PrivacyTier};
+use bastion_types::{ApprovalOutcome, ApprovalRow, FailureKind, Goal, PrivacyTier};
 
 use crate::capability::CapabilityRegistry;
 use crate::provider::{Provider, SharedProvider};
@@ -79,6 +79,54 @@ pub trait ToolSource: Send + Sync {
         owner: &str,
         resolved_tier: Option<PrivacyTier>,
     ) -> anyhow::Result<serde_json::Value>;
+}
+
+/// SEC-01 — owner-scoped, idempotent approval gate port (Ciclo 2.1,
+/// `docs/revamp/C2-approval-port-design.md` §1).
+///
+/// Absorbs `ApprovalQueue` as a trait: the EXACT surface
+/// `CapabilityRegistry::invoke` (Policy 2) and `AgentLoop::approval_resolution`
+/// consume from the concrete SQLite-backed queue today — enqueue/idempotent-resume,
+/// pending listing, owner-scoped approve/reject, and post-dispatch result
+/// caching. `SqliteApprovalGate` (`capability/approval.rs`) is the production
+/// implementation — same logic as the pre-port `ApprovalQueue`, now behind
+/// this port.
+///
+/// Approval is NOT optional at the `CapabilityRegistry` construction boundary
+/// (no `Option<Arc<dyn ApprovalGate>>` field) — a caller that wants a
+/// fail-closed "no persistent queue" policy injects `NullApprovalGate`
+/// (`capability/approval.rs`) explicitly, which reproduces the exact
+/// fail-closed semantics the old `None` branch of `CapabilityRegistry`'s
+/// approval field used to encode.
+#[async_trait::async_trait]
+pub trait ApprovalGate: Send + Sync {
+    /// Enqueue a new approval row for (owner_id, capability_name, args), or
+    /// report the disposition of the existing row for this exact triple —
+    /// idempotent-resume (D-03). Deterministic hashing over the triple is an
+    /// implementation detail of the concrete gate, not part of this contract.
+    async fn enqueue_or_reuse(
+        &self,
+        owner_id: &str,
+        capability_name: &str,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<ApprovalOutcome>;
+
+    /// All not-yet-resolved rows for this owner. Empty vec when none exist —
+    /// never an error for the "no rows" case.
+    async fn pending_for_owner(&self, owner_id: &str) -> anyhow::Result<Vec<ApprovalRow>>;
+
+    /// Approve a pending row. Owner-scoped (IDOR guard) — errors when the
+    /// given `owner_id` does not own `id`, rather than silently no-opping.
+    async fn approve(&self, owner_id: &str, id: i64) -> anyhow::Result<ApprovalRow>;
+
+    /// Reject a pending row. Owner-scoped (IDOR guard), same discipline as
+    /// `approve`.
+    async fn reject(&self, owner_id: &str, id: i64) -> anyhow::Result<()>;
+
+    /// Record that an approved row has now executed, caching its result for
+    /// idempotent-resume (D-03) — a later `enqueue_or_reuse` for the same
+    /// triple returns `AlreadyExecuted(result)` instead of re-dispatching.
+    async fn record_executed(&self, id: i64, result: &serde_json::Value) -> anyhow::Result<()>;
 }
 
 /// P4 — optional goal-engine port.

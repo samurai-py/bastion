@@ -22,6 +22,7 @@ use bastion_runtime::agent::loop_::{AgentLoop, DEFAULT_OWNER};
 use bastion_runtime::agent::ports::{
     FailureSink, ProviderResolver, RespondOutcome, Responder, ToolSource, TurnContext,
 };
+use bastion_runtime::capability::approval::SqliteApprovalGate;
 use bastion_runtime::memory::PrivacyTier;
 use bastion_runtime::provider::{Provider, SharedProvider};
 use bastion_runtime::session::SessionManager;
@@ -160,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         memory,
         None,   // no goal engine
         vec![], // no fallback models
-        &db_path,
+        Arc::new(SqliteApprovalGate::new(db_path.clone())),
         Arc::new(NoopFailureSink),
         vec![], // no injected context blocks
         Arc::new(UnusedResolver),

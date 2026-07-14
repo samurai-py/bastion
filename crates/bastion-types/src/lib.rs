@@ -444,6 +444,81 @@ pub struct McpServerEntry {
     pub trusted: bool,
 }
 
+/// Status of a queued approval row (SEC-01). Moved here from
+/// `bastion-runtime`'s `capability/approval.rs` (Ciclo 2.1,
+/// `docs/revamp/C2-approval-port-design.md` §1) — pure vocabulary shared by
+/// the `ApprovalGate` port and any future consumer/adapter. TEXT-encoded in
+/// sqlite (app-layer enum, mirrors `Belief`'s `kind`/`tier` TEXT-enum
+/// convention rather than a SQL CHECK constraint); the encode/decode helpers
+/// below are pure string mapping, not SQLite logic — the actual
+/// `rusqlite::Connection` I/O stays in `SqliteApprovalGate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+}
+
+impl ApprovalStatus {
+    pub fn to_sql_str(self) -> &'static str {
+        match self {
+            ApprovalStatus::Pending => "pending",
+            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Rejected => "rejected",
+            ApprovalStatus::Expired => "expired",
+        }
+    }
+
+    pub fn from_sql_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "pending" => Ok(ApprovalStatus::Pending),
+            "approved" => Ok(ApprovalStatus::Approved),
+            "rejected" => Ok(ApprovalStatus::Rejected),
+            "expired" => Ok(ApprovalStatus::Expired),
+            other => anyhow::bail!("unknown approval_queue.status value: {other}"),
+        }
+    }
+}
+
+/// A single row of the `approval_queue` table (schema from Plan 11-01).
+/// Moved here from `bastion-runtime`'s `capability/approval.rs` (Ciclo 2.1) —
+/// same rationale as [`ApprovalStatus`].
+#[derive(Debug, Clone)]
+pub struct ApprovalRow {
+    pub id: i64,
+    pub owner_id: String,
+    pub capability_name: String,
+    pub args_json: String,
+    pub idempotency_hash: String,
+    pub status: ApprovalStatus,
+    pub result_json: Option<String>,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+    pub executed_at: Option<i64>,
+}
+
+/// Disposition returned by an [`ApprovalGate`](../../bastion_runtime/agent/ports/trait.ApprovalGate.html)'s
+/// `enqueue_or_reuse` — always the full state, never a bare bool, so
+/// `CapabilityRegistry::invoke()` knows exactly what to do next. Moved here
+/// from `bastion-runtime`'s `capability/approval.rs` (Ciclo 2.1) — same
+/// rationale as [`ApprovalStatus`].
+#[derive(Debug, Clone)]
+pub enum ApprovalOutcome {
+    /// A prior call already ran this exact (owner, capability, args) to
+    /// completion. Return this cached result — never re-dispatch (D-03
+    /// idempotent-resume).
+    AlreadyExecuted(serde_json::Value),
+    /// A row is already queued for this exact (owner, capability, args) and is
+    /// not yet resolved. Do not insert a second row, do not dispatch.
+    AlreadyPending,
+    /// The row has been approved by the owner but has not executed yet — the
+    /// caller must dispatch NOW and then call `record_executed(id, ...)`.
+    ApprovedPendingExecution(i64),
+    /// A brand-new row was inserted. Do not dispatch — awaiting owner approval.
+    NewlyQueued(i64),
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BastionError {
