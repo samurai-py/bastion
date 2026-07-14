@@ -45,3 +45,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/dump-public-api.sh --check
+
+  # Loop 3-D (docs/revamp/C3-cloud-ready-design.md, acceptance criterion 5 +
+  # decision #18): the kernel/product code must never gain a billing/
+  # marketplace/tenancy/control-plane SYMBOL, and no tracked file may
+  # reintroduce a scrubbed corporate name. Cheap (no toolchain needed).
+  scope-and-scrub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-scope-and-scrub.sh

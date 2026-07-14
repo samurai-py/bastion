@@ -78,6 +78,18 @@ EXPOSE 3000
 # empty; the first write by the configured UID creates correct ownership — zero
 # manual chmod needed.
 
+# Loop 3-D (docs/revamp/C3-cloud-ready-design.md): this SAME image runs
+# local (bastion.toml's shipped paths) and hosted-like (paths/secrets
+# injected via env — BASTION__SESSION__DB_PATH, BASTION__LOGGING__LOG_PATH,
+# BASTION_SECRETS_DIR, ...) without a rebuild; nothing in this Dockerfile
+# bakes in a path or secret value. /healthz and /readyz are served on the
+# SAME webhook port as /webhook (BASTION_WEBHOOK_ADDR, default 8080 in
+# docker-compose.yml) — a k8s liveness/readinessProbe (httpGet, executed by
+# the kubelet OUTSIDE the container) can use them directly. A Docker/Compose
+# HEALTHCHECK cannot: that instruction execs a command INSIDE the container,
+# and this scratch image deliberately has no shell/curl (PKG-01/PKG-03) —
+# accepted trade-off, unchanged by this loop.
+
 ENTRYPOINT ["/bastion"]
 # Default: daemon mode (long-running with channels active).
 CMD ["daemon"]
