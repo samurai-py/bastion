@@ -1857,6 +1857,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-host-slice"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bastion-memory",
+ "bastion-personas",
+ "bastion-runtime",
+ "bastion-types",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
