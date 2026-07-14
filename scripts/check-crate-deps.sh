@@ -39,6 +39,11 @@ ALLOWED_DEPS[bastion-agent-runtime]="bastion-types"
 ALLOWED_DEPS[bastion-cognition]="bastion-types bastion-runtime bastion-memory"
 ALLOWED_DEPS[bastion-personas]="bastion-types bastion-runtime bastion-memory bastion-cognition"
 ALLOWED_DEPS[bastion-mesh]="bastion-types bastion-runtime bastion-memory bastion-cognition bastion-personas"
+# Loop 3-C (docs/revamp/C3-extension-protocol-design.md §1): contracts-only
+# crate for the extension protocol (ExtensionManifest/PackManifest/
+# PermissionSet/trust tiers). Depends only on bastion-types — zero product
+# I/O, no other substrate/extension crate needed.
+ALLOWED_DEPS[bastion-extension-protocol]="bastion-types"
 
 # --- Allowlist: [dev-dependencies] only (test-only edges, never production) -
 declare -A ALLOWED_DEV_DEPS
@@ -51,6 +56,7 @@ ALLOWED_DEV_DEPS[bastion-agent-runtime]=""
 ALLOWED_DEV_DEPS[bastion-cognition]="bastion-mcp"
 ALLOWED_DEV_DEPS[bastion-personas]=""
 ALLOWED_DEV_DEPS[bastion-mesh]=""
+ALLOWED_DEV_DEPS[bastion-extension-protocol]=""
 
 contains_word() {
   local needle="$1"
