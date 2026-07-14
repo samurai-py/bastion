@@ -10,72 +10,63 @@
 //! cargo test -p bastion-agent-runtime --test acpx_live_opencode -- --ignored --nocapture
 //! ```
 //!
-//! # Result: blocked by an adapter-level `--auth-policy fail` mismatch, not
-//! by missing host auth
+//! # Result: unblocked (fix(c3): configurable `--auth-policy`)
 //!
-//! `opencode auth login` was completed on this host (`opencode auth list`
-//! shows `OpenCode Go`/`OpenAI`/`OpenCode Zen` credentials) and the
-//! underlying transport genuinely works: a raw, manual
-//! `acpx --format json --cwd <tmp> opencode prompt -s <name> "..."` (built-in
-//! default flags, no `--auth-policy` override) completes a full turn —
-//! `session/resume` → `session/prompt` → `agent_message_chunk` → `Ended`
-//! with a real reply, using the host's already-persisted opencode
-//! credentials.
-//!
-//! But [`AcpxAgentRuntime::build_prompt_command`] (`src/acpx.rs`)
-//! unconditionally appends `--auth-policy fail` for every wrapped agent.
-//! `opencode`'s native ACP server (`opencode acp`, invoked by acpx as
-//! `npx -y opencode-ai acp`) advertises ACP `authMethods: [{"id":
-//! "opencode-login", ...}]` on `initialize` — acpx tries to match that
+//! This cell used to be blocked by an *adapter*-level mismatch, not by
+//! missing host auth: `opencode auth login` was already done on this host
+//! (`opencode auth list` shows `OpenCode Go`/`OpenAI`/`OpenCode Zen`
+//! credentials), and the underlying transport genuinely worked — a raw,
+//! manual `acpx --format json --cwd <tmp> opencode prompt -s <name> "..."`
+//! with `--auth-policy skip` (or no override, acpx's own CLI default)
+//! completed a full turn using those credentials. But
+//! [`AcpxAgentRuntime`] used to hardcode `--auth-policy fail` for every
+//! wrapped agent. `opencode`'s native ACP server (`opencode acp`, invoked by
+//! acpx as `npx -y opencode-ai acp`) advertises ACP `authMethods: [{"id":
+//! "opencode-login", ...}]` on `initialize`; acpx tried to match that
 //! against its **own** credential store (used for agents whose auth it can
-//! broker directly), finds nothing (opencode manages its own
-//! `~/.local/share/opencode/auth.json`, a store acpx's matcher does not
-//! know about), and with `--auth-policy fail` aborts the whole invocation
-//! with a top-level JSON-RPC error before `session/prompt` is ever sent:
+//! broker directly), found nothing (opencode manages its own
+//! `~/.local/share/opencode/auth.json`, a store acpx's matcher doesn't know
+//! about), and with `--auth-policy fail` aborted the whole invocation before
+//! `session/prompt` was ever sent. Full mechanism documented in
+//! `docs/revamp/A-05-conformance-matrix.md` §2A.
 //!
-//! ```text
-//! {"jsonrpc":"2.0","id":null,"error":{"code":-32603,
-//!  "message":"agent advertised auth methods [opencode-login] but no
-//!  matching credentials found",
-//!  "data":{"acpxCode":"RUNTIME","detailCode":"AUTH_REQUIRED","origin":"acp", ...}}}
-//! ```
+//! The fix (this cycle): `--auth-policy` is now a per-agent field on
+//! [`AcpxAgentRuntime`] (see `src/acpx.rs` module docs and
+//! `default_auth_policy_for`) — `"skip"` for `"opencode"`, `"fail"` (the
+//! prior, unconditional behavior) for every other agent, including
+//! `"claude"` (which is unaffected either way — it never advertises ACP
+//! `authMethods` in the first place). No change to `--non-interactive-permissions`
+//! or the permission-flag mapping: this is exclusively about which stored
+//! credential set acpx is allowed to trust for the ACP handshake, not about
+//! loosening what the wrapped agent may do without asking.
 //!
-//! Re-running the exact same invocation with `--auth-policy skip` (or no
-//! `--auth-policy` flag at all — the CLI default) instead of `fail`
-//! completes normally. `claude` is unaffected because acpx spawns it via a
-//! **built-in agent bridge**
-//! (`@agentclientprotocol/claude-agent-acp`) that does not advertise ACP
-//! `authMethods` at all, so the credential-matching/abort branch never
-//! triggers for that agent — this is an acpx-side, per-wrapped-agent
-//! inconsistency, not something `AcpxAgentRuntime` controls once it has
-//! chosen to hardcode `fail`.
+//! The test below now runs the real, unmodified-by-this-file
+//! `AcpxAgentRuntime::new("opencode")` (which picks up the new `"skip"`
+//! default). Reproduced live (2026-07-14, `opencode 1.17.15`): **8 passed,
+//! 5 skipped, 1 failed** — `happy_path` now genuinely `Pass`es (the whole
+//! point of this fix), along with `resume`/`steer`/`cancel_graceful`/
+//! `cancel_kill`/`timeout`/`queue_or_reject`/`event_ordering_terminal`; the
+//! 5 skips are the same agent-independent
+//! HarnessOwned/fault-injection-unimplemented set as the `claude` cell.
 //!
-//! Because the abort happens as an unsolicited top-level frame (`"id":
-//! null`, no `"method"`) rather than a response correlated to our
-//! `session/prompt` request, [`crate` `FrameInterpreter`] (private to
-//! `src/acpx.rs`) does not recognize it as anything actionable — it silently
-//! ignores the frame (no method, no matching id), the acpx process then
-//! exits, stdout hits EOF, and `run_prompt_reader` reports the generic
-//! `TaskOutcome::Failed { reason: "acpx process ended without a terminal
-//! frame (crash or premature exit)" }`, not a `RuntimeError::Unavailable`/auth-
-//! specific reason. This is a genuine, reproducible finding, not a fluke —
-//! **not fixed here** (out of scope: doing so would mean either making
-//! `--auth-policy` configurable per-agent in `AcpxAgentRuntime` or teaching
-//! `FrameInterpreter` to recognize this frame shape, both real code changes
-//! requiring their own impact analysis/review, not a one-off conformance
-//! smoke).
-//!
-//! The test below runs the real, unmodified `AcpxAgentRuntime` against
-//! `opencode` and asserts the *current* documented failure mode, so it acts
-//! as a regression lock: if a future change to `--auth-policy` handling (or
-//! to acpx itself) makes this start passing, this assertion breaks loudly
-//! and A-05 needs updating.
+//! `artifact_digest` still `Fail`s — but with a DIFFERENT, unrelated reason
+//! (`"no Artifact event observed before Ended"`), not the auth-policy abort
+//! this fix targeted. `FrameInterpreter`'s tool-call/artifact-candidate
+//! joining (`src/acpx.rs`) was written against `claude`'s observed
+//! `tool_call`/`tool_call_update` frame shape (`rawInput.file_path`, a
+//! `content: [{"type":"diff", ...}]` array on the terminal `status:
+//! "completed"` update); `opencode`'s ACP server apparently shapes the
+//! equivalent frames differently, so no `Diff`/artifact-candidate ever gets
+//! set for its file-write tool call. This is a genuine, newly-discovered
+//! adapter-vs-wrapped-agent difference, NOT fixed here (this cycle's scope
+//! was narrowly the `--auth-policy` mismatch) — recorded as its own finding
+//! in `docs/revamp/A-05-conformance-matrix.md` §2A for a future cycle.
 //!
 //! # Cost note
 //!
-//! Because the abort happens before `session/prompt` is ever sent, **no
-//! model/LLM tokens are spent** by any check in this file — the whole
-//! 14-check sweep is a free, deterministic transport-level failure.
+//! Small/cheap prompts by design (A-01 §"parsimony"): a handful of few-token
+//! turns, using whatever model acpx/opencode picks by default (never an
+//! explicit expensive-model override).
 
 use bastion_agent_runtime::acpx::AcpxAgentRuntime;
 use bastion_agent_runtime::conformance::{self, ConformanceScenarios};
@@ -137,20 +128,13 @@ fn make_scenarios() -> ConformanceScenarios {
             attachments: Vec::new(),
             expected: TaskExpectation::CodeChange,
         },
-        // Generous even though the current blocker aborts before any real
-        // network/model latency is incurred (see module docs) — kept
-        // consistent with the claude live suite in case the block is lifted.
+        // Same rationale as the claude live suite (A-05 §5.1): a live
+        // cloud-backed harness makes 14 genuine cold `start()` calls in one
+        // `run_all` sweep; 5s is too tight for real handshake/network
+        // latency.
         watchdog: Duration::from_secs(30),
     }
 }
-
-/// Reason substring `run_prompt_reader` emits for the current, documented
-/// A-05 opencode-via-acpx block: acpx's own `--auth-policy fail` aborts the
-/// invocation with a top-level, uncorrelated JSON-RPC error before
-/// `session/prompt` is sent, `FrameInterpreter` doesn't recognize that frame
-/// shape, and the acpx process exit reads back as a generic premature-exit
-/// failure (see module docs for the full mechanism and the raw acpx error).
-const EXPECTED_BLOCK_REASON: &str = "acpx process ended without a terminal frame";
 
 #[tokio::test]
 #[ignore = "spawns real acpx+opencode subprocesses; run manually with --ignored"]
@@ -168,58 +152,64 @@ async fn acpx_opencode_conformance_live() {
     let report = conformance::format_report(&results);
     eprintln!("{report}");
 
-    // Documenting assertion, not a "must all pass" gate (unlike the claude
-    // suite): happy_path is the clearest, cheapest signal of the known A-05
-    // block. If this ever starts passing, the acpx-side auth-policy
-    // mismatch (or this adapter's hardcoded `--auth-policy fail`) has
-    // changed and A-05 needs updating, not this assertion.
-    let happy_path = results
-        .iter()
-        .find(|(name, _)| *name == "happy_path")
-        .map(|(_, r)| r.clone())
-        .expect("happy_path present in run_all output");
-
-    match &happy_path {
-        conformance::CheckResult::Fail(detail) => {
-            assert!(
-                detail.contains(EXPECTED_BLOCK_REASON),
-                "happy_path failed, but not with the documented A-05 opencode block \
-                 reason (acpx --auth-policy fail vs opencode's advertised authMethods) \
-                 -- got: {detail}"
-            );
-        }
-        other => panic!(
-            "expected happy_path to Fail with the documented A-05 opencode-via-acpx \
-             auth-policy block, got {other:?} instead -- if this is now Pass, the block \
-             has been lifted (acpx or adapter change) and A-05 §opencode needs updating"
-        ),
-    }
-
-    // Checks that assert exact-content outcomes (`Ended{Success}` with
-    // specific evidence) hit the same transport-level abort and Fail with
-    // the same reason. Empirically NOT in this group: `resume`/`steer`
-    // (agent-independent, rooted in `descriptor()`, identical to the claude
-    // cell), the permission-bridge/fault-injection Skips, and — measured
-    // live, not assumed — `cancel_graceful`/`cancel_kill`/`timeout`, which
-    // tolerate the task ending in *any* terminal state (their contract is
-    // "cancel/timeout doesn't hang", not "the content is Success"), so an
-    // immediate `Failed` from the auth-policy abort still satisfies them.
-    let live_submit_checks = [
-        "happy_path",
-        "queue_or_reject",
-        "event_ordering_terminal",
-        "artifact_digest",
-    ];
-    for name in live_submit_checks {
-        let result = results
+    // Real conformance now (A-05 §2A unblocked by the `--auth-policy` fix),
+    // not a documented-block regression lock. `happy_path` is the direct
+    // proof this fix targeted: it MUST Pass now. `artifact_digest` is a
+    // separate, pre-existing gap in how `FrameInterpreter` joins opencode's
+    // tool-call frames (module docs) — asserted explicitly as the one known
+    // Fail, not swept into a blanket "no Fail" check that would either mask
+    // a real regression or force a dishonest Pass.
+    let result_for = |name: &str| {
+        results
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, r)| r.clone())
-            .unwrap_or_else(|| panic!("{name} present in run_all output"));
+            .unwrap_or_else(|| panic!("{name} present in run_all output"))
+    };
+
+    let must_pass = [
+        "happy_path",
+        "resume",
+        "steer",
+        "cancel_graceful",
+        "cancel_kill",
+        "timeout",
+        "queue_or_reject",
+        "event_ordering_terminal",
+    ];
+    for name in must_pass {
+        let result = result_for(name);
         assert!(
-            result.is_fail(),
-            "{name}: expected Fail (A-05 opencode block propagates to every live-submit \
-             check), got {result:?}"
+            result.is_pass(),
+            "{name}: expected Pass now that --auth-policy is configurable per-agent \
+             (A-05 §2A fix) -- got: {result:?}\nfull report:\n{report}"
+        );
+    }
+
+    // Known, separate gap (module docs) — documented here so a future fix
+    // (or an unexpected regression to a DIFFERENT failure mode) is caught
+    // loudly instead of silently re-labeled.
+    let artifact_digest = result_for("artifact_digest");
+    assert!(
+        artifact_digest.is_fail(),
+        "artifact_digest: expected the known, documented Fail (opencode's tool-call frame \
+         shape isn't joined by FrameInterpreter the way claude's is) -- if this now Passes, \
+         the gap has closed and this assertion (and the module docs) should be updated to \
+         Pass instead -- got: {artifact_digest:?}"
+    );
+
+    for name in [
+        "permission_bridge_allow",
+        "permission_bridge_deny",
+        "crash_isolation",
+        "auth_typed",
+        "protocol_garbage",
+    ] {
+        let result = result_for(name);
+        assert!(
+            result.is_skip(),
+            "{name}: expected Skip (agent-independent, HarnessOwned/fault-injection \
+             unimplemented, same as the claude cell) -- got: {result:?}"
         );
     }
 }

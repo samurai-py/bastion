@@ -22,7 +22,7 @@
 |---|---|
 | `claude` via `acpx` (A-04) | **Done** — full run, see §2 |
 | `codex` native app-server (A-03) | **Done** — full run, see §3 |
-| `opencode` via `acpx` (A-04 smoke) | **Blocked** — `opencode auth login` is now done on this host, and the underlying transport genuinely works (proven with a raw manual `acpx opencode prompt` call), but the *adapter's* hardcoded `--auth-policy fail` collides with how acpx brokers opencode's auth, so every real live run through `AcpxAgentRuntime` still fails — see §2A. Not the same blocker as before (that was host auth; this is an acpx/adapter interaction), and not a code defect in `opencode` or in acpx's core transport. |
+| `opencode` via `acpx` (A-04 smoke) | **Done (mostly)** — `fix(c3): configurable acpx --auth-policy` (Loop 3-B) made `--auth-policy` a per-agent adapter field (`"skip"` for `opencode`, `"fail"` everywhere else, unchanged for `claude`), closing the adapter-level mismatch documented below. Real live re-run: **8 passed, 5 skipped, 1 failed** — `happy_path` genuinely `Pass`es now; one unrelated, newly-discovered gap (`artifact_digest`) remains — see §2A. |
 | `codex` via `acpx` (would complete the 3-way matrix) | **Unavailable** — see §4. `acpx codex ...` genuinely reaches the codex ACP bridge, but every prompt fails with `The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account` (verified with the default model and every explicit `gpt-5.3-codex[*]` variant the bridge advertises) — a login-mode mismatch in the bridge itself, not something a prompt/config change on our side fixes. |
 
 The three-way "same suite, three transports" comparison from A-01 §5.14
@@ -67,12 +67,14 @@ sandbox:         None
 
 `supports`: `resume=false, steer=false, usage_reporting=true, diff_events=true, permission_bridge=false, concurrent_sessions=true`.
 
-## 2A. `AcpxAgentRuntime` × `opencode` — live scorecard (blocked)
+## 2A. `AcpxAgentRuntime` × `opencode` — live scorecard
 
 Command: `cargo test -p bastion-agent-runtime --test acpx_live_opencode -- --ignored --nocapture`
-(new test added this cycle; runs the real, unmodified `AcpxAgentRuntime`
-against a real `opencode` process — no mocks, no code changes to the
-adapter).
+
+> **Status: unblocked (Loop 3-B, `fix(c3): configurable acpx --auth-policy`).**
+> The history below (adapter-level `--auth-policy fail` mismatch) is kept
+> verbatim as the record of what was found and why; §2A.1 below it has the
+> fix and the real, current scorecard.
 
 `opencode auth login` is done on this host (`opencode auth list` shows
 `OpenCode Go`/`OpenAI`/`OpenCode Zen` credentials), which resolves the
@@ -121,11 +123,9 @@ only reacts to `session/update` and to responses/errors correlated by id);
 it's silently ignored, the acpx child process then exits, stdout hits EOF,
 and `run_prompt_reader` reports the generic
 `TaskOutcome::Failed { reason: "acpx process ended without a terminal
-frame (crash or premature exit)" }` — never anything auth-specific. **Not
-fixed here** — fixing it means either making `--auth-policy` configurable
-per-agent in `AcpxAgentRuntime`, or teaching `FrameInterpreter` to recognize
-this frame shape, both real adapter changes needing their own impact
-analysis/review, out of scope for filling a conformance-matrix cell.
+frame (crash or premature exit)" }` — never anything auth-specific.
+
+**Historical (pre-fix) scorecard, kept for the record:**
 
 | Check | Result |
 |---|---|
@@ -144,13 +144,66 @@ analysis/review, out of scope for filling a conformance-matrix cell.
 | auth_typed | SKIP — `FaultInjection::induce_auth_failure` unimplemented |
 | protocol_garbage | SKIP — `FaultInjection::feed_garbage_frame` unimplemented |
 
-**5 passed, 5 skipped, 4 failed** — reproduced clean; the test file
-(`crates/bastion-agent-runtime/tests/acpx_live_opencode.rs`) asserts on
-this exact result set as a regression lock, so a future fix to the
-`--auth-policy` handling (in either acpx or the adapter) will make the
-assertions fail loudly, signaling that this section needs updating.
-**Zero LLM tokens spent** — the abort happens before `session/prompt` is
-sent, so the whole sweep is a free, deterministic transport-level failure.
+5 passed, 5 skipped, 4 failed — reproduced clean at the time. **Zero LLM
+tokens spent** on that run — the abort happened before `session/prompt` was
+sent, so the whole sweep was a free, deterministic transport-level failure.
+
+### 2A.1 Fix + re-run (Loop 3-B, `fix(c3): configurable acpx --auth-policy`)
+
+`--auth-policy` is now a field on `AcpxAgentRuntime`
+(`default_auth_policy_for`, `src/acpx.rs`), not a crate-wide hardcoded
+constant: `"skip"` for `"opencode"` (the one agent whose ACP server
+advertises `authMethods` acpx's own matcher can't resolve — see history
+above), `"fail"` (the prior, unconditional behavior) for every other agent,
+including `"claude"` (unaffected either way — it never advertises
+`authMethods`). `AcpxAgentRuntime::with_auth_policy` lets a caller override
+either default explicitly. This closes the gap **without** touching
+`FrameInterpreter`'s frame recognition, and without any change to the
+permission-flag mapping (`permission_flags`) — exclusively about which
+stored credential set acpx trusts for the ACP handshake.
+
+Re-run live (2026-07-14, `opencode 1.17.15`, real `acpx opencode prompt`
+subprocesses, real tokens against whatever model acpx/opencode picked by
+default — no override):
+
+| Check | Result |
+|---|---|
+| happy_path | **PASS** — the direct proof of this fix |
+| resume | PASS (typed `NotResumable` — agent-independent, same as claude) |
+| steer | PASS (typed `Protocol` — agent-independent, same as claude) |
+| cancel_graceful | PASS |
+| cancel_kill | PASS |
+| timeout | PASS |
+| queue_or_reject | PASS |
+| event_ordering_terminal | PASS |
+| artifact_digest | **FAIL** — `"no Artifact event observed before Ended"` — see below, a DIFFERENT, newly-discovered gap |
+| permission_bridge_allow | SKIP — `policy_coverage.approvals == HarnessOwned` |
+| permission_bridge_deny | SKIP — `policy_coverage.approvals == HarnessOwned` |
+| crash_isolation | SKIP — `FaultInjection::induce_crash` unimplemented |
+| auth_typed | SKIP — `FaultInjection::induce_auth_failure` unimplemented |
+| protocol_garbage | SKIP — `FaultInjection::feed_garbage_frame` unimplemented |
+
+**8 passed, 5 skipped, 1 failed** — reproduced clean
+(`crates/bastion-agent-runtime/tests/acpx_live_opencode.rs` asserts this
+exact shape: the 8 `must_pass` checks explicitly, the one known
+`artifact_digest` Fail explicitly, the 5 Skips explicitly — no blanket
+"no Fail" assertion, so a regression to a DIFFERENT failure mode, or an
+unexpected Pass, both fail loudly instead of being silently absorbed).
+
+**New finding, not fixed here:** `artifact_digest`'s Fail is unrelated to
+the auth-policy mismatch — `FrameInterpreter`'s tool-call/artifact-candidate
+joining (`remember_file_path`/the `toolCallId`-keyed `tool_file_paths` map
+in `src/acpx.rs`) was written against `claude`'s observed frame shape
+(`rawInput.file_path` on the `tool_call` frame, a `content: [{"type":
+"diff", ...}]` array on the terminal `tool_call_update`). `opencode`'s ACP
+server apparently shapes the equivalent frames differently, so no
+`Diff`/artifact-candidate is ever produced for its file-write tool call —
+genuine, reproducible, a real adapter-vs-wrapped-agent difference (same
+category as the codex-native sandbox-degradation finding in §5.2), not a
+regression of this fix. Fixing it would mean teaching `FrameInterpreter` a
+second, opencode-specific frame shape — a real adapter change needing its
+own impact analysis, out of scope for this cycle (which was narrowly the
+`--auth-policy` mismatch). Left for a future cycle.
 
 ### `PolicyCoverage` declared
 

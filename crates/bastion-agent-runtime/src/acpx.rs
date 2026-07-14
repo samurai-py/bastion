@@ -65,6 +65,31 @@
 //! [`crate::EnvPolicy::allow`] or session creation fails with
 //! [`RuntimeError::Unavailable`]. `HOME` is not a credential; this is a
 //! functional requirement, not a security bypass.
+//!
+//! # `--auth-policy` is per-agent, not a crate-wide constant (A-05 §2A fix)
+//!
+//! acpx's own `--auth-policy` flag controls how it reacts when the wrapped
+//! agent's ACP `initialize` advertises `authMethods` acpx doesn't recognize
+//! in its own credential store: `fail` aborts the whole invocation before
+//! `session/prompt` is ever sent, `skip` proceeds and lets the wrapped
+//! agent's own already-persisted credentials answer the ACP handshake
+//! itself. This adapter used to hardcode `fail` for every wrapped agent.
+//! That is the right, fail-closed default for an agent whose credential
+//! posture is unknown (or, like `claude`, spawned through a built-in acpx
+//! bridge — [`@agentclientprotocol/claude-agent-acp`] — that never
+//! advertises `authMethods` in the first place, so the flag is inert either
+//! way). It actively breaks `opencode`: its native ACP server (`opencode
+//! acp`) DOES advertise `authMethods: [{"id": "opencode-login", ...}]`, acpx
+//! tries to match that against its own store, finds nothing (opencode keeps
+//! a separate `~/.local/share/opencode/auth.json` acpx's matcher doesn't
+//! know about), and `fail` aborts before the real, working, host-persisted
+//! opencode credentials ever get a chance to answer — verified live
+//! (`docs/revamp/A-05-conformance-matrix.md` §2A): the identical invocation
+//! with `--auth-policy skip` completes a full turn using those same
+//! credentials. [`default_auth_policy_for`] picks `"skip"` for `"opencode"`
+//! and `"fail"` for everything else (never a security relaxation for an
+//! agent that didn't ask for it); [`AcpxAgentRuntime::with_auth_policy`]
+//! lets a caller override either way for a specific deployment.
 
 use crate::conformance::FaultInjection;
 use crate::util::{
@@ -87,6 +112,20 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 /// `acpx --version` output against this pin (A-01 T9).
 const ACPX_VERSION_REQ: &str = ">=0.12.0, <0.13.0";
 
+/// Per-agent default for acpx's `--auth-policy` flag (module docs —
+/// "`--auth-policy` is per-agent"). `"fail"` stays the fail-closed default
+/// for every agent whose credential-matching posture with acpx is unknown;
+/// `"opencode"` is the one documented exception (A-05 §2A) — its native ACP
+/// server advertises `authMethods` acpx cannot match against its own store,
+/// so `fail` aborts before its real, working, host-persisted credentials
+/// ever get a chance to answer.
+fn default_auth_policy_for(agent: &str) -> &'static str {
+    match agent {
+        "opencode" => "skip",
+        _ => "fail",
+    }
+}
+
 /// Adapter for one ACP agent wrapped by `acpx` (e.g. `"claude"`,
 /// `"opencode"`). Stateless/`Clone`-free factory; sessions are independent
 /// [`AcpxSession`] instances.
@@ -97,6 +136,10 @@ pub struct AcpxAgentRuntime {
     /// child never needs `PATH` to find its own interpreter.
     interpreter: Option<PathBuf>,
     agent: String,
+    /// `acpx --auth-policy` value threaded into every `prompt` invocation
+    /// this adapter spawns (module docs). Defaults per
+    /// [`default_auth_policy_for`]; override with [`Self::with_auth_policy`].
+    auth_policy: &'static str,
 }
 
 impl AcpxAgentRuntime {
@@ -113,11 +156,25 @@ impl AcpxAgentRuntime {
         agent: impl Into<String>,
     ) -> Result<Self, RuntimeError> {
         let interpreter = resolve_shebang_interpreter(&acpx_bin)?;
+        let agent = agent.into();
+        let auth_policy = default_auth_policy_for(&agent);
         Ok(Self {
             acpx_bin,
             interpreter,
-            agent: agent.into(),
+            agent,
+            auth_policy,
         })
+    }
+
+    /// Overrides the `--auth-policy` value this adapter passes to every
+    /// spawned `acpx prompt` invocation, replacing whatever
+    /// [`default_auth_policy_for`] picked. For a deployment that needs a
+    /// different posture than the built-in per-agent default (e.g. a new
+    /// acpx-wrapped agent this adapter doesn't special-case yet) — never
+    /// required for `"claude"`/`"opencode"` in their default configuration.
+    pub fn with_auth_policy(mut self, policy: &'static str) -> Self {
+        self.auth_policy = policy;
+        self
     }
 
     fn descriptor_id(&self) -> &'static str {
@@ -266,6 +323,7 @@ impl AgentRuntime for AcpxAgentRuntime {
             acpx_bin: self.acpx_bin.clone(),
             interpreter: self.interpreter.clone(),
             agent: self.agent.clone(),
+            auth_policy: self.auth_policy,
             handle,
             session_name,
             workspace_root: spec.workspace.root.clone(),
@@ -355,6 +413,9 @@ pub(crate) struct AcpxSession {
     acpx_bin: PathBuf,
     interpreter: Option<PathBuf>,
     agent: String,
+    /// Copied from [`AcpxAgentRuntime::auth_policy`] at [`AcpxAgentRuntime::start`]
+    /// time — see the module docs for why this is per-agent, not hardcoded.
+    auth_policy: &'static str,
     handle: SessionHandle,
     session_name: String,
     workspace_root: PathBuf,
@@ -397,7 +458,7 @@ impl AcpxSession {
             .arg("--cwd")
             .arg(&self.workspace_root)
             .arg("--auth-policy")
-            .arg("fail")
+            .arg(self.auth_policy)
             .arg("--non-interactive-permissions")
             .arg("deny");
         for flag in permission_flags(&self.permissions) {
@@ -1176,6 +1237,38 @@ mod tests {
         assert_eq!(rt.descriptor_id(), "acpx_opencode");
         let rt = AcpxAgentRuntime::with_binary(tmp.clone(), "mystery").expect("construct");
         assert_eq!(rt.descriptor_id(), "acpx_client");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A-05 §2A fix: `--auth-policy` defaults to `"fail"` (fail-closed) for
+    /// every agent except `opencode`, which defaults to `"skip"` — never the
+    /// other way around, and never a blanket relaxation for agents that
+    /// didn't ask for it.
+    #[test]
+    fn auth_policy_defaults_are_per_agent_fail_closed() {
+        let tmp = std::env::temp_dir().join("not-a-real-acpx-binary-marker-auth-policy");
+        let _ = std::fs::write(&tmp, b"not a script");
+
+        let rt = AcpxAgentRuntime::with_binary(tmp.clone(), "claude").expect("construct");
+        assert_eq!(rt.auth_policy, "fail");
+        let rt = AcpxAgentRuntime::with_binary(tmp.clone(), "opencode").expect("construct");
+        assert_eq!(rt.auth_policy, "skip");
+        let rt = AcpxAgentRuntime::with_binary(tmp.clone(), "mystery").expect("construct");
+        assert_eq!(
+            rt.auth_policy, "fail",
+            "an unknown agent must default to the fail-closed policy, not opencode's exception"
+        );
+
+        // Explicit override wins over the per-agent default either way.
+        let rt = AcpxAgentRuntime::with_binary(tmp.clone(), "claude")
+            .expect("construct")
+            .with_auth_policy("skip");
+        assert_eq!(rt.auth_policy, "skip");
+        let rt = AcpxAgentRuntime::with_binary(tmp.clone(), "opencode")
+            .expect("construct")
+            .with_auth_policy("fail");
+        assert_eq!(rt.auth_policy, "fail");
+
         let _ = std::fs::remove_file(&tmp);
     }
 }

@@ -1,5 +1,6 @@
 struct acpx.rs:AcpxAgentRuntime
 fn acpx.rs:new
+fn acpx.rs:with_auth_policy
 struct codex.rs:CodexAppServerRuntime
 fn codex.rs:new
 fn codex.rs:with_binary
