@@ -1,4 +1,4 @@
-use crate::agent::backend::{BackendProfile, RuntimeRegistry};
+use crate::agent::backend::{BackendProfile, ConversationBackend, RuntimeRegistry};
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::ports::{
@@ -267,6 +267,29 @@ impl AgentLoop {
         persona: Option<&str>,
     ) -> Vec<String> {
         let provider_name = self.provider.read().await.name().to_owned();
+        self.build_context_parts_for_destination(owner, turn_msg, persona, &provider_name)
+            .await
+    }
+
+    /// Ciclo 2.4: same per-block egress-checked context assembly as
+    /// [`AgentLoop::build_system_prompt_parts`], but for a caller whose
+    /// destination ISN'T `self.provider` (the runtime-backed path, §3 mode
+    /// 2) — takes the egress-check destination name explicitly instead of
+    /// reading the active Model provider's name, so a `LocalOnly` block is
+    /// judged against the ACTUAL destination (the external harness id), not
+    /// whatever Model provider happens to be configured (which could be
+    /// `"ollama"`/local while the harness is a cloud backend — using the
+    /// Model provider's name there would wrongly let LocalOnly content
+    /// through). `build_system_prompt_parts` is unchanged and delegates to
+    /// this with `self.provider`'s name, preserving its public signature
+    /// (the `tests/prompt_cache_prefix.rs` D-14b contract) byte-for-byte.
+    async fn build_context_parts_for_destination(
+        &self,
+        owner: &str,
+        turn_msg: &str,
+        persona: Option<&str>,
+        egress_destination_name: &str,
+    ) -> Vec<String> {
         let mut parts: Vec<String> = vec![DEFAULT_SYSTEM_PROMPT.to_owned()];
 
         for provider in &self.context_providers {
@@ -275,13 +298,14 @@ impl AgentLoop {
                 // SECURITY: verificar egress pelo tier do BLOCO, não da persona.
                 // check_egress(Some(LocalOnly), "openrouter") → Err → não injeta.
                 // check_egress(Some(CloudOk), "openrouter") → Ok → injeta.
-                if crate::hooks::egress::check_egress(Some(block.max_tier), &provider_name).is_ok()
+                if crate::hooks::egress::check_egress(Some(block.max_tier), egress_destination_name)
+                    .is_ok()
                 {
                     parts.push(block.content);
                 } else {
                     tracing::debug!(
                         event = "context_block_skipped_egress",
-                        provider = %provider_name,
+                        provider = %egress_destination_name,
                         tier = ?block.max_tier,
                     );
                 }
@@ -289,6 +313,235 @@ impl AgentLoop {
         }
 
         parts
+    }
+
+    /// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §3, mode 2):
+    /// runtime-backed primary conversation — the harness owns this turn's
+    /// tool-loop; Bastion stays owner of identity/memory/channels/supervision
+    /// (the caller appends the returned text to the session; this function
+    /// only produces it) and of OTel correlation (the existing `invoke_agent`
+    /// root span already wraps this whole call — no additional harness-side
+    /// trace-context handoff is attempted this cycle, since neither shipped
+    /// adapter's protocol has a slot for one).
+    ///
+    /// Permission requests from the harness bridge into the SAME
+    /// `ApprovalGate` the Model path's tool-loop uses (Ciclo 2.1) for audit —
+    /// but this function runs synchronously inside ONE turn (the daemon
+    /// serializes through a single `&mut agent`, AGENTS.md architecture law),
+    /// so it cannot block waiting for a LATER turn's plain-language
+    /// "sim"/"não" to resolve a freshly-raised request. A request that isn't
+    /// already resolved gets `PermissionDecision::Deny { scope:
+    /// DenyScope::Turn }` — fail-closed, the same Turn-scoped-denial
+    /// semantics the Model path's own `dispatch_tool_loop` already applies.
+    /// The enqueue still happens (audited), so a differently-scoped
+    /// `PermissionProfile` — or a richer cross-turn approval UX, explicitly
+    /// M4-pleno scope per the design doc §6 — is how an owner avoids hitting
+    /// this on a task that genuinely needs a tool call answered.
+    async fn run_runtime_backed_turn(
+        &mut self,
+        runtime_id: &str,
+        user_input: &str,
+        owner: &str,
+        session_id: &str,
+    ) -> anyhow::Result<String> {
+        let runtime = self
+            .runtime_registry
+            .resolve(runtime_id)
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
+        // §3 mode 2: egress-filtered context, judged against the ACTUAL
+        // destination (the harness id) — REUSE of the same mechanism/tier
+        // rules the Model path's system prompt uses, via
+        // `build_context_parts_for_destination` (not a new check).
+        let context_parts = self
+            .build_context_parts_for_destination(owner, user_input, None, runtime_id)
+            .await;
+        let mut prompt = context_parts.join("\n\n");
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(user_input);
+
+        let workspace_root = runtime_workspace_root(owner);
+        let _ = tokio::fs::create_dir_all(&workspace_root).await;
+
+        let mut env_allow = std::collections::BTreeMap::new();
+        for var in ["HOME", "PATH"] {
+            if let Ok(v) = std::env::var(var) {
+                env_allow.insert(var.to_string(), v);
+            }
+        }
+
+        let timeout = bastion_agent_runtime::TimeoutPolicy {
+            per_task: std::time::Duration::from_secs(120),
+            idle: std::time::Duration::from_secs(300),
+        };
+        // Conservative default (design doc §6 scope: declarative config, not
+        // rich permission UX yet) — empty `allow` maps to the most
+        // restrictive posture each adapter has (acpx: `--deny-all`; codex:
+        // `on-request`, bridged to the ApprovalGate below).
+        let permissions = bastion_agent_runtime::PermissionProfile::default();
+        let env = bastion_agent_runtime::EnvPolicy { allow: env_allow };
+        let spec = bastion_agent_runtime::SessionSpec {
+            owner: owner.to_string(),
+            workspace: bastion_agent_runtime::WorkspacePolicy {
+                root: workspace_root,
+                read_only: false,
+                deny: Vec::new(),
+            },
+            sandbox: bastion_agent_runtime::SandboxProfile::WorkspaceNet,
+            permissions: permissions.clone(),
+            auth: self.backend_profile.auth.clone().unwrap_or_else(|| {
+                bastion_agent_runtime::AuthProfileRef("host-cli-login".to_string())
+            }),
+            runtime_id: runtime_id.to_string(),
+            timeout,
+            env: env.clone(),
+            mcp_bridge: None,
+            otel: bastion_agent_runtime::OtelContext::default(),
+        };
+
+        // Restart recovery (design doc §3 mode 2): reuse a persisted handle
+        // for this Bastion session if the adapter can genuinely reattach.
+        // A resume failure (no handle, NotResumable, dead process) is not
+        // fatal to the turn — it just means a fresh harness-side session
+        // begins; logged, never silent.
+        let persisted = self.session.load_runtime_handle(session_id).await?;
+        let mut session = match persisted {
+            Some(handle) if handle.runtime_id == runtime.descriptor().id => {
+                let resume_spec = bastion_agent_runtime::ResumeSpec {
+                    timeout,
+                    permissions,
+                    env,
+                };
+                match runtime.resume(&handle, resume_spec).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::info!(
+                            event = "agent_runtime_resume_failed_starting_fresh",
+                            runtime_id = %runtime_id,
+                            session_id = %session_id,
+                            error = %e,
+                        );
+                        runtime.start(spec).await.map_err(|e| {
+                            anyhow::Error::new(BastionError::BackendUnavailable(e.to_string()))
+                        })?
+                    }
+                }
+            }
+            _ => runtime
+                .start(spec)
+                .await
+                .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?,
+        };
+
+        // Persist the (possibly new) handle immediately — a crash between
+        // here and task completion still leaves a reattachable handle.
+        let handle = session.handle();
+        self.session
+            .save_runtime_handle(session_id, &handle)
+            .await?;
+
+        let task = session
+            .submit(bastion_agent_runtime::TaskInput {
+                prompt,
+                attachments: Vec::new(),
+                expected: bastion_agent_runtime::TaskExpectation::Conversation,
+            })
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
+        let mut response_text = String::new();
+        let outcome = loop {
+            let Some(event) = session.next_event().await else {
+                anyhow::bail!(BastionError::BackendUnavailable(
+                    "runtime session event stream closed before the task ended".to_string()
+                ));
+            };
+            match event {
+                bastion_agent_runtime::RuntimeEvent::MessageDelta { task: t, text }
+                    if t == task =>
+                {
+                    response_text.push_str(&text);
+                }
+                bastion_agent_runtime::RuntimeEvent::PermissionRequest {
+                    task: t,
+                    id,
+                    action,
+                    detail,
+                } if t == task => {
+                    let capability_name = format!("agent_runtime:{runtime_id}:{action:?}");
+                    let args = serde_json::json!({ "detail": detail, "runtime_id": runtime_id });
+                    // Audited regardless of what happens next — enqueue_or_reuse
+                    // never auto-approves. See this function's rustdoc for why a
+                    // freshly-raised request can't be approved synchronously
+                    // within one turn.
+                    if let Err(e) = self
+                        .capability_registry
+                        .approval_gate()
+                        .enqueue_or_reuse(owner, &capability_name, &args)
+                        .await
+                    {
+                        tracing::warn!(event = "agent_runtime_permission_audit_failed", error = %e);
+                    }
+                    if let Err(e) = session
+                        .respond_permission(
+                            id,
+                            bastion_agent_runtime::PermissionDecision::Deny {
+                                scope: bastion_agent_runtime::DenyScope::Turn,
+                            },
+                        )
+                        .await
+                    {
+                        tracing::warn!(event = "agent_runtime_respond_permission_failed", error = %e);
+                    }
+                }
+                bastion_agent_runtime::RuntimeEvent::Usage { task: t, delta } if t == task => {
+                    tracing::debug!(
+                        event = "agent_runtime_usage",
+                        runtime_id = %runtime_id,
+                        input_tokens = delta.input_tokens,
+                        output_tokens = delta.output_tokens,
+                    );
+                }
+                bastion_agent_runtime::RuntimeEvent::Warning { code, detail, .. } => {
+                    tracing::warn!(
+                        event = "agent_runtime_warning",
+                        runtime_id = %runtime_id,
+                        ?code,
+                        detail = %detail,
+                    );
+                }
+                bastion_agent_runtime::RuntimeEvent::Ended { task: t, outcome } if t == task => {
+                    break outcome;
+                }
+                // Started/ToolCall/ToolResult/Diff/Artifact/Thinking, and any
+                // event for a DIFFERENT task on this session (shouldn't occur
+                // — one task at a time on this path): observability-only this
+                // cycle (A-06 scope is the conversation proof); no product
+                // surface consumes tool telemetry or artifacts from a
+                // runtime-backed conversation turn yet.
+                _ => {}
+            }
+        };
+
+        match outcome {
+            bastion_agent_runtime::TaskOutcome::Success => Ok(response_text),
+            bastion_agent_runtime::TaskOutcome::Cancelled => {
+                anyhow::bail!(BastionError::BackendUnavailable(
+                    "runtime task was cancelled before completion".to_string()
+                ))
+            }
+            bastion_agent_runtime::TaskOutcome::TimedOut => {
+                anyhow::bail!(BastionError::BackendUnavailable(
+                    "runtime task timed out".to_string()
+                ))
+            }
+            bastion_agent_runtime::TaskOutcome::Failed { reason } => {
+                anyhow::bail!(BastionError::BackendUnavailable(reason))
+            }
+        }
     }
 
     /// Execute one full agent turn for the default local owner.
@@ -599,67 +852,94 @@ impl AgentLoop {
             drop(provider_ref);
         }
 
-        // 4./5. Route + dispatch (persona router → single/parallel/Cabinet) is the
-        // P1 `Responder` port (M2) — hides RouterDecision/ResponseMode/RunnerOutput/
-        // CabinetVerdict from the kernel entirely. `forced_persona` is taken here
-        // (kernel-side `/as` state) and handed over by value; the provider is
-        // cloned (cheap Arc) so the Responder doesn't need a borrow of `self`
-        // alongside the `kernel` handle below.
-        let forced_persona = self.forced_persona.take();
-        let provider = self.provider.clone();
-        let responder = self.responder.clone();
-        let outcome = responder
-            .respond(TurnContext {
-                provider,
-                kernel: &mut *self,
-                history: &mut history,
-                session_id: &session_id,
-                owner,
-                user_input,
-                untrusted,
-                forced_persona,
-                turn_span: &mut turn_span,
-            })
-            .await?;
-        let route_text = outcome.text;
-        let turn_tier = outcome.turn_tier;
-
-        // 6. Graceful degradation: if route_text is empty (no persona matched, or Cabinet
-        //    produced no output), fall back to plain tool-loop provider.
-        //    The Single/Parallel path now persists assistant response inline in step 5.
-        //    The Cabinet path also produces its own text.
-        //    Only the truly empty case (no persona matched) reaches run_provider_fallback.
-        let final_text = if route_text.is_empty() {
-            match self
-                .run_provider_fallback(
-                    &mut history,
+        // Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §3, mode 2):
+        // a runtime-backed conversation backend takes over the WHOLE
+        // route+dispatch section below — the harness owns this turn's
+        // tool-loop, Bastion does not also run persona routing/Cabinet on
+        // top of it. `Model` (the default) falls through to the `else`
+        // branch unchanged.
+        let final_text = if let ConversationBackend::Runtime(runtime_id) =
+            self.backend_profile.conversation.clone()
+        {
+            let text = self
+                .run_runtime_backed_turn(&runtime_id, user_input, owner, &session_id)
+                .await?;
+            // Bastion stays owner of the conversation record even though the
+            // harness owned this turn's tool-loop (design doc §3).
+            self.session
+                .append(
                     &session_id,
+                    Message {
+                        role: Role::Assistant,
+                        content: MessageContent::Text(text.clone()),
+                    },
+                    None,
+                )
+                .await?;
+            text
+        } else {
+            // 4./5. Route + dispatch (persona router → single/parallel/Cabinet) is the
+            // P1 `Responder` port (M2) — hides RouterDecision/ResponseMode/RunnerOutput/
+            // CabinetVerdict from the kernel entirely. `forced_persona` is taken here
+            // (kernel-side `/as` state) and handed over by value; the provider is
+            // cloned (cheap Arc) so the Responder doesn't need a borrow of `self`
+            // alongside the `kernel` handle below.
+            let forced_persona = self.forced_persona.take();
+            let provider = self.provider.clone();
+            let responder = self.responder.clone();
+            let outcome = responder
+                .respond(TurnContext {
+                    provider,
+                    kernel: &mut *self,
+                    history: &mut history,
+                    session_id: &session_id,
                     owner,
                     user_input,
-                    turn_tier,
-                    outcome.attribution.first().map(|s| s.as_str()),
-                )
-                .await
-            {
-                Ok(text) => text,
-                Err(e) => {
-                    // EVAL-01: grow the regression set from a concrete production
-                    // failure signal (egress rejection) — tier-gated, structural-only.
-                    if matches!(
-                        e.downcast_ref::<BastionError>(),
-                        Some(BastionError::PrivacyEgressBlocked)
-                    ) {
-                        self.failure_sink.record_failure(
-                            bastion_types::FailureKind::EgressReject,
-                            turn_tier,
-                            "localonly_belief_blocked_from_cloud_provider",
-                        );
+                    untrusted,
+                    forced_persona,
+                    turn_span: &mut turn_span,
+                })
+                .await?;
+            let route_text = outcome.text;
+            let turn_tier = outcome.turn_tier;
+
+            // 6. Graceful degradation: if route_text is empty (no persona matched, or Cabinet
+            //    produced no output), fall back to plain tool-loop provider.
+            //    The Single/Parallel path now persists assistant response inline in step 5.
+            //    The Cabinet path also produces its own text.
+            //    Only the truly empty case (no persona matched) reaches run_provider_fallback.
+            if route_text.is_empty() {
+                match self
+                    .run_provider_fallback(
+                        &mut history,
+                        &session_id,
+                        owner,
+                        user_input,
+                        turn_tier,
+                        outcome.attribution.first().map(|s| s.as_str()),
+                    )
+                    .await
+                {
+                    Ok(text) => text,
+                    Err(e) => {
+                        // EVAL-01: grow the regression set from a concrete production
+                        // failure signal (egress rejection) — tier-gated, structural-only.
+                        if matches!(
+                            e.downcast_ref::<BastionError>(),
+                            Some(BastionError::PrivacyEgressBlocked)
+                        ) {
+                            self.failure_sink.record_failure(
+                                bastion_types::FailureKind::EgressReject,
+                                turn_tier,
+                                "localonly_belief_blocked_from_cloud_provider",
+                            );
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
                 }
+            } else {
+                route_text
             }
-        } else {
-            route_text
         };
 
         // HOOK-03: output-validator — NL contestation detection → belief revocation (D-13).
@@ -1469,6 +1749,25 @@ impl TurnKernel for AgentLoop {
 /// `CapabilityRegistry::invoke`'s own errors); any other dispatch error stays
 /// untrusted (fail-closed default — an external tool's error text may itself
 /// carry attacker-influenced content, e.g. an echoed argument).
+/// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §3): filesystem
+/// confinement root for a runtime-backed session/task, one directory per
+/// owner. A minimal, deliberately simple default for this cycle (declarative
+/// config, not rich per-deployment workspace policy yet — M4 pleno scope);
+/// operators who need a different root can point `TMPDIR`/`HOME` elsewhere.
+fn runtime_workspace_root(owner: &str) -> std::path::PathBuf {
+    let sanitized: String = owner
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    std::env::temp_dir()
+        .join("bastion-agent-runtime-workspaces")
+        .join(if sanitized.is_empty() {
+            "_owner".to_string()
+        } else {
+            sanitized
+        })
+}
+
 fn tag_bypass_result(
     source: &str,
     outcome: anyhow::Result<serde_json::Value>,

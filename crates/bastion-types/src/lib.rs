@@ -582,6 +582,16 @@ pub enum BastionError {
     /// Identity error — Agent Card sign/verify failures (SEC-06).
     #[error("Identity error: {0}")]
     IdentityError(String),
+    /// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §3/§5.6):
+    /// a runtime-backed turn (`ConversationBackend::Runtime(id)`) could not
+    /// be served — `id` unregistered/unhealthy at turn start
+    /// (`RuntimeRegistry::resolve`), the adapter's `start`/`resume`/`submit`
+    /// failed, or the harness task itself ended in `Cancelled`/`TimedOut`/
+    /// `Failed`. Always a typed, surfaced error — never a silent fallback to
+    /// `Model` (that would hide a real loss of policy coverage from the
+    /// owner).
+    #[error("Agent runtime backend unavailable: {0}")]
+    BackendUnavailable(String),
 }
 
 /// Strip `<think>...</think>` blocks from LLM output (CORE-09).

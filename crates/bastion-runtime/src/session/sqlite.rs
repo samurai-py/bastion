@@ -139,6 +139,20 @@ impl SessionManager {
                     toolkit    TEXT    NOT NULL,
                     expires_at INTEGER NOT NULL
                 );
+
+                -- Ciclo 2.4 (docs/revamp/C2-backend-profile-design.md §3):
+                -- persisted AgentRuntime SessionHandle for restart recovery.
+                -- `key` is caller-chosen: the Bastion session_id for a
+                -- runtime-backed conversation (mode 2), or a per-task key for
+                -- a delegated task (mode 3) -- this table has no opinion on
+                -- what a \"session\" vs \"task\" is.
+                CREATE TABLE IF NOT EXISTS runtime_sessions (
+                    key          TEXT    PRIMARY KEY,
+                    runtime_id   TEXT    NOT NULL,
+                    owner_id     TEXT    NOT NULL,
+                    external_ref TEXT    NOT NULL,
+                    updated_at   INTEGER NOT NULL
+                );
             ",
             )?;
             // Additive migration for pre-existing single-user DBs (idempotent —
@@ -415,6 +429,84 @@ impl SessionManager {
             } else {
                 Ok(true) // no spend today
             }
+        })
+        .await?
+    }
+
+    /// Ciclo 2.4 (`docs/revamp/C2-backend-profile-design.md` §3): persists an
+    /// `AgentRuntime::SessionHandle` under a caller-chosen `key`, upserting on
+    /// a re-save (e.g. a re-issued handle after `resume`). `key` is the
+    /// Bastion session_id for a runtime-backed conversation (mode 2), or a
+    /// per-task key for a delegated task (mode 3).
+    pub async fn save_runtime_handle(
+        &self,
+        key: &str,
+        handle: &bastion_agent_runtime::SessionHandle,
+    ) -> anyhow::Result<()> {
+        let path = self.db_path.clone();
+        let key = key.to_owned();
+        let runtime_id = handle.runtime_id.clone();
+        let owner = handle.owner.clone();
+        let external_ref = handle.external_ref.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&path)?;
+            let now = now_nanos();
+            conn.execute(
+                "INSERT INTO runtime_sessions(key, runtime_id, owner_id, external_ref, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(key) DO UPDATE SET \
+                    runtime_id = excluded.runtime_id, \
+                    owner_id = excluded.owner_id, \
+                    external_ref = excluded.external_ref, \
+                    updated_at = excluded.updated_at",
+                rusqlite::params![key, runtime_id, owner, external_ref, now],
+            )?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
+    }
+
+    /// Loads a previously persisted handle for `key`, if any — `None` when
+    /// nothing was ever saved under it (a fresh conversation/task, not an
+    /// error).
+    pub async fn load_runtime_handle(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<Option<bastion_agent_runtime::SessionHandle>> {
+        let path = self.db_path.clone();
+        let key = key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&path)?;
+            let mut stmt = conn.prepare(
+                "SELECT runtime_id, owner_id, external_ref FROM runtime_sessions WHERE key = ?1",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![key])?;
+            if let Some(row) = rows.next()? {
+                Ok::<_, anyhow::Error>(Some(bastion_agent_runtime::SessionHandle {
+                    runtime_id: row.get(0)?,
+                    owner: row.get(1)?,
+                    external_ref: row.get(2)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await?
+    }
+
+    /// Removes a persisted handle — the session/task is over (ended,
+    /// cancelled) and no longer resumable/needed. Idempotent: deleting an
+    /// already-absent key is not an error.
+    pub async fn delete_runtime_handle(&self, key: &str) -> anyhow::Result<()> {
+        let path = self.db_path.clone();
+        let key = key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&path)?;
+            conn.execute(
+                "DELETE FROM runtime_sessions WHERE key = ?1",
+                rusqlite::params![key],
+            )?;
+            Ok::<_, anyhow::Error>(())
         })
         .await?
     }
@@ -702,5 +794,113 @@ mod tests {
         assert_eq!(valid_until, None);
         assert_eq!(superseded_by, None);
         assert_eq!(supersedes_at, None);
+    }
+
+    // ── Ciclo 2.4 — runtime_sessions (SessionHandle persistence) ─────────────
+
+    fn sample_handle(external_ref: &str) -> bastion_agent_runtime::SessionHandle {
+        bastion_agent_runtime::SessionHandle {
+            runtime_id: "codex_app_server".to_string(),
+            owner: "alice".to_string(),
+            external_ref: external_ref.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_runtime_handle_returns_none_when_never_saved() {
+        let (_f, sm) = make_db().await;
+        assert!(sm
+            .load_runtime_handle("sess-1")
+            .await
+            .expect("load must not error")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_save_then_load_runtime_handle_round_trips() {
+        let (_f, sm) = make_db().await;
+        let handle = sample_handle("thread-abc");
+        sm.save_runtime_handle("sess-1", &handle)
+            .await
+            .expect("save");
+        let loaded = sm
+            .load_runtime_handle("sess-1")
+            .await
+            .expect("load")
+            .expect("must be present after save");
+        assert_eq!(loaded.runtime_id, handle.runtime_id);
+        assert_eq!(loaded.owner, handle.owner);
+        assert_eq!(loaded.external_ref, handle.external_ref);
+    }
+
+    /// Re-saving under the same key upserts (e.g. a re-issued handle after a
+    /// `resume`) rather than erroring on the PRIMARY KEY conflict.
+    #[tokio::test]
+    async fn test_save_runtime_handle_upserts_on_same_key() {
+        let (_f, sm) = make_db().await;
+        sm.save_runtime_handle("sess-1", &sample_handle("thread-old"))
+            .await
+            .expect("first save");
+        sm.save_runtime_handle("sess-1", &sample_handle("thread-new"))
+            .await
+            .expect("second save must upsert, not error");
+        let loaded = sm
+            .load_runtime_handle("sess-1")
+            .await
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.external_ref, "thread-new");
+    }
+
+    /// Two different keys (e.g. a conversation session + a delegated task)
+    /// persist independently.
+    #[tokio::test]
+    async fn test_runtime_handles_are_isolated_per_key() {
+        let (_f, sm) = make_db().await;
+        sm.save_runtime_handle("sess-1", &sample_handle("thread-conversation"))
+            .await
+            .expect("save conversation handle");
+        sm.save_runtime_handle("task-42", &sample_handle("thread-task"))
+            .await
+            .expect("save task handle");
+        assert_eq!(
+            sm.load_runtime_handle("sess-1")
+                .await
+                .expect("load")
+                .expect("present")
+                .external_ref,
+            "thread-conversation"
+        );
+        assert_eq!(
+            sm.load_runtime_handle("task-42")
+                .await
+                .expect("load")
+                .expect("present")
+                .external_ref,
+            "thread-task"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_runtime_handle_removes_it() {
+        let (_f, sm) = make_db().await;
+        sm.save_runtime_handle("sess-1", &sample_handle("thread-abc"))
+            .await
+            .expect("save");
+        sm.delete_runtime_handle("sess-1").await.expect("delete");
+        assert!(sm
+            .load_runtime_handle("sess-1")
+            .await
+            .expect("load must not error")
+            .is_none());
+    }
+
+    /// Deleting a key that was never saved is not an error (idempotent).
+    #[tokio::test]
+    async fn test_delete_runtime_handle_on_absent_key_is_not_an_error() {
+        let (_f, sm) = make_db().await;
+        sm.delete_runtime_handle("never-existed")
+            .await
+            .expect("delete of absent key must not error");
     }
 }
