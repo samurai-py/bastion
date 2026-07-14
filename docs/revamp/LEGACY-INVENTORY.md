@@ -39,7 +39,7 @@
 | `config/`, `bastion.toml`, `.env.example`, `.mcp.json` | move | `bastion-agent`; revisar defaults |
 | `bastion-a.toml`, `bastion-b.toml` | delete-later | fixtures do mesh E2E — mover pra `tests/` ou apagar `?` |
 | `bastion.local.toml`, `.bastion/` | delete-later `?` | estado/config local commitado por engano? conferir conteúdo antes |
-| `bastion/` (diretório tracked) | `?` | conteúdo desconhecido — inspecionar antes de classificar |
+| `bastion/mobile-connect/` (Node/TS OTC) | **move** | NÃO é legado — é o app de conexão do celular do owner (JWT + pareamento OTC). Preservar; refatorar depois. Vai pro `bastion-agent` (produto) no M6. |
 | `SOUL.md`, `personas/` (untracked) | move | conteúdo pessoal do owner — sair do repo público, virar dado local/exemplo |
 | `benchmark.py`, `conftest.py`, `pyproject.toml` | delete-later | resíduo Python do v2/experimentos; MCP servers Python reais moram em `skills/` |
 | `STRATEGY.md` | keep `?` | doc vivo público — decidir se sobrevive ao split ou vai pro privado |

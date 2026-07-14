@@ -18,7 +18,7 @@ services:
     ports:
       - "18081:8080"
     volumes:
-      - ${BASTION_A_CONFIG:-./bastion-a.toml}:/bastion.toml:ro
+      - ${BASTION_A_CONFIG:-./tests/fixtures/mesh/bastion-a.toml}:/bastion.toml:ro
       - bastion-a-data:/data
     networks:
       - mesh-net
@@ -40,7 +40,7 @@ services:
     ports:
       - "18082:8080"
     volumes:
-      - ${BASTION_B_CONFIG:-./bastion-b.toml}:/bastion.toml:ro
+      - ${BASTION_B_CONFIG:-./tests/fixtures/mesh/bastion-b.toml}:/bastion.toml:ro
       - bastion-b-data:/data
     networks:
       - mesh-net
