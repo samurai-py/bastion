@@ -1,16 +1,20 @@
 //! [`ToolSource`] port implementation wrapping the concrete [`McpClient`].
 //!
-//! Both methods are moved verbatim from `agent/loop_.rs` (M2 P3): `tool_defs`
-//! is the tool-definition-building block from `run_provider_fallback`, and
-//! `call_tool_with_timeout` is a direct passthrough to
-//! `McpClient::call_tool_with_timeout` — no logic changes, only the call
-//! site's dependency shifts from a concrete `Arc<McpClient>` field to this
-//! trait object.
+//! `tool_defs` is moved verbatim from `agent/loop_.rs` (M2 P3): the
+//! tool-definition-building block from `run_provider_fallback`.
+//! `call_tool_with_timeout` was originally a direct passthrough to
+//! `McpClient::call_tool_with_timeout`; M3 hardening (LOOP-REPORT.md finding
+//! F1) moved the egress gate INSIDE this method — it now runs
+//! `bastion_runtime::hooks::egress::check_egress` on the caller-supplied
+//! `resolved_tier` before dispatching, instead of relying on both loop call
+//! sites to remember to gate before calling in.
 
 use std::sync::Arc;
 
 use crate::client::McpClient;
 use bastion_runtime::agent::ports::ToolSource;
+use bastion_runtime::hooks::egress::check_egress;
+use bastion_types::PrivacyTier;
 
 /// The production [`ToolSource`]: sources tool defs and dispatches
 /// registry-bypass tool calls straight from the connected MCP servers.
@@ -60,7 +64,14 @@ impl ToolSource for McpToolSource {
         name: &str,
         args: serde_json::Value,
         owner: &str,
+        resolved_tier: Option<PrivacyTier>,
     ) -> anyhow::Result<serde_json::Value> {
+        // M3/F1: gate BEFORE dispatch, inside the port implementation — the
+        // same check (WR-02/D-13) both loop call sites used to apply
+        // manually, now unforgettable by construction. Mirrors the
+        // destination classification `CapabilityRegistry::invoke` uses for a
+        // non-local capability: registry-bypass MCP tools are "external".
+        check_egress(resolved_tier, "external")?;
         self.mcp.call_tool_with_timeout(name, args, owner).await
     }
 }

@@ -30,10 +30,23 @@
 //!    (src/agent/loop_.rs) proves the per-block EGRESS gate, but no test proved the
 //!    core passes a block's `content` through byte-identical, without interpreting or
 //!    stripping anything that looks like embedded instructions/markup.
+//! 4. M3 hardening of LOOP-REPORT.md finding F1 — `ToolSource::call_tool_with_timeout`
+//!    used to document "callers apply their own egress gate" without the type system
+//!    enforcing it; the gate now lives INSIDE the method (`docs/revamp/M1-07-characterization-map.md`
+//!    row 3/F1). `tool_source_gate_blocks_dispatch_on_local_only_tier` proves — via a
+//!    fake `ToolSource` that only flips a "dispatched" flag AFTER its own internal gate
+//!    passes — that a `LocalOnly` tier against a non-local destination returns `Err`
+//!    with dispatch never reached, while `CloudOk` reaches dispatch.
+//!    `mcp_tool_source_gates_egress_before_attempting_dispatch` re-proves the same
+//!    thing against the REAL production `bastion::mcp::McpToolSource`: a `LocalOnly`
+//!    tier fails with the egress error BEFORE the (nonexistent) tool is even looked
+//!    up, distinguishable from the "tool not found" error a `CloudOk` tier gets
+//!    once the gate lets it through to the empty MCP client.
 
 use async_trait::async_trait;
 use bastion::agent::context::{ContextBlock, TurnContextProvider};
 use bastion::agent::loop_::{AgentLoop, DEFAULT_OWNER};
+use bastion::agent::ports::ToolSource;
 use bastion::capability::approval::ApprovalQueue;
 use bastion::capability::{Capability, CapabilityRegistry, InvokeCtx};
 use bastion::goal::{GoalEngine, ScoringConfig};
@@ -480,5 +493,134 @@ async fn context_block_local_only_dropped_under_cloud_provider_public_api() {
     assert!(
         !full_prompt.contains("local-only-secret-belief"),
         "a LocalOnly-tiered block must never reach a cloud provider's system prompt"
+    );
+}
+
+// ===========================================================================
+// M3 hardening — LOOP-REPORT.md finding F1: the `ToolSource` egress gate is
+// now INSIDE `call_tool_with_timeout` (M1-07-characterization-map.md row
+// "F1"), not something every call site must remember to apply beforehand.
+// ===========================================================================
+
+/// A `ToolSource` that mirrors the production gate contract exactly: it only
+/// flips `dispatched` to `true` AFTER running the same egress check the real
+/// `McpToolSource` runs internally. If a future refactor accidentally moved
+/// the gate back out to the call site (or dropped it), this fake would start
+/// recording a dispatch even under a denied tier — which the assertions below
+/// would catch.
+struct GateRecordingToolSource {
+    dispatched: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl ToolSource for GateRecordingToolSource {
+    async fn tool_defs(&self) -> anyhow::Result<Vec<Value>> {
+        Ok(vec![])
+    }
+
+    async fn call_tool_with_timeout(
+        &self,
+        _name: &str,
+        _args: Value,
+        _owner: &str,
+        resolved_tier: Option<PrivacyTier>,
+    ) -> anyhow::Result<Value> {
+        // Same chokepoint McpToolSource uses (crates/bastion-mcp/src/tool_source.rs):
+        // gate BEFORE marking dispatch as having happened.
+        bastion::hooks::egress::check_egress(resolved_tier, "external")?;
+        self.dispatched
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(serde_json::json!({"ok": true}))
+    }
+}
+
+/// `LocalOnly` (denied for a non-ollama/"external" destination) must return
+/// `Err` with dispatch never reached; `CloudOk` must reach dispatch.
+#[tokio::test]
+async fn tool_source_gate_blocks_dispatch_on_local_only_tier() {
+    let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let source = GateRecordingToolSource {
+        dispatched: dispatched.clone(),
+    };
+
+    let blocked = source
+        .call_tool_with_timeout(
+            "any_tool",
+            serde_json::json!({}),
+            "owner",
+            Some(PrivacyTier::LocalOnly),
+        )
+        .await;
+    assert!(
+        blocked.is_err(),
+        "LocalOnly tier against a non-local destination must be denied"
+    );
+    assert!(
+        !dispatched.load(std::sync::atomic::Ordering::SeqCst),
+        "dispatch must NEVER be reached when the gate denies — proves the gate \
+         runs BEFORE dispatch, not merely somewhere in the caller's control flow"
+    );
+
+    let allowed = source
+        .call_tool_with_timeout(
+            "any_tool",
+            serde_json::json!({}),
+            "owner",
+            Some(PrivacyTier::CloudOk),
+        )
+        .await;
+    assert!(allowed.is_ok(), "CloudOk tier must be allowed through");
+    assert!(
+        dispatched.load(std::sync::atomic::Ordering::SeqCst),
+        "dispatch must be reached once the gate allows it"
+    );
+}
+
+/// Same invariant, against the REAL production `ToolSource`
+/// (`bastion::mcp::McpToolSource`), not a fake: a `LocalOnly` tier must fail
+/// with the egress error BEFORE the (nonexistent) tool name is even looked up
+/// in the (empty) MCP registry — distinguishable from the "tool not found"
+/// error a `CloudOk` tier gets once the gate lets it through to dispatch.
+#[tokio::test]
+async fn mcp_tool_source_gates_egress_before_attempting_dispatch() {
+    // connect_all against a non-existent path returns an empty (zero-tool)
+    // client — no network I/O (same convention as `make_agent` above and
+    // tests/prompt_cache_prefix.rs).
+    let mcp = std::sync::Arc::new(
+        McpClient::connect_all("nonexistent_mcp.json")
+            .await
+            .expect("connect_all empty"),
+    );
+    let source = bastion::mcp::McpToolSource::new(mcp);
+
+    let blocked = source
+        .call_tool_with_timeout(
+            "definitely_not_a_real_tool",
+            serde_json::json!({}),
+            "owner",
+            Some(PrivacyTier::LocalOnly),
+        )
+        .await
+        .expect_err("LocalOnly against an external MCP tool must be denied by egress");
+    assert!(
+        blocked.to_string().contains("Privacy egress blocked"),
+        "expected the egress error, not a dispatch error — the gate must fire \
+         BEFORE the tool lookup; got: {blocked}"
+    );
+
+    let dispatched = source
+        .call_tool_with_timeout(
+            "definitely_not_a_real_tool",
+            serde_json::json!({}),
+            "owner",
+            Some(PrivacyTier::CloudOk),
+        )
+        .await
+        .expect_err("the tool genuinely does not exist on the empty client");
+    assert!(
+        dispatched.to_string().contains("not found"),
+        "expected a dispatch-attempted error (tool not found) once egress lets \
+         CloudOk through — proves the gate does not block traffic it shouldn't; \
+         got: {dispatched}"
     );
 }

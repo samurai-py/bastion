@@ -756,34 +756,37 @@ impl AgentLoop {
                         {
                             // Fallback: if no capabilities registered, try MCP directly.
                             // WR-02 (review #2): even this registry-bypass path must honor egress
-                            // (D-13). Mirror the policy registry.invoke applies to a non-local MCP
-                            // capability — gate the turn tier against "external" before dispatch,
-                            // so a hallucinated/injected tool call can't execute ungated.
-                            match crate::hooks::egress::check_egress(resolved_tier, "external") {
+                            // (D-13) — mirrors the policy registry.invoke applies to a non-local
+                            // MCP capability, so a hallucinated/injected tool call can't execute
+                            // ungated. M3/F1: the gate now lives INSIDE `call_tool_with_timeout`
+                            // (`ToolSource` port contract) — this call site only passes
+                            // `resolved_tier` through, it no longer calls `check_egress` itself.
+                            match self
+                                .tool_source
+                                .call_tool_with_timeout(
+                                    &tc.name,
+                                    tc.arguments.clone(),
+                                    owner,
+                                    resolved_tier,
+                                )
+                                .await
+                            {
                                 Err(e) => {
+                                    // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
                                     tool_span
                                         .set_attribute(KeyValue::new("error.type", e.to_string()));
-                                    (serde_json::json!({"error": e.to_string()}), true)
+                                    // Preserve the pre-M3 trust split: an egress denial is an
+                                    // internally-generated safe message (trusted, same as
+                                    // before it moved inside `call_tool_with_timeout`); any
+                                    // other dispatch error keeps the fail-closed `false` the
+                                    // Ok(()) branch always used.
+                                    let egress_blocked = matches!(
+                                        e.downcast_ref::<BastionError>(),
+                                        Some(BastionError::PrivacyEgressBlocked)
+                                    );
+                                    (serde_json::json!({"error": e.to_string()}), egress_blocked)
                                 }
-                                Ok(()) => {
-                                    let value = self
-                                        .tool_source
-                                        .call_tool_with_timeout(
-                                            &tc.name,
-                                            tc.arguments.clone(),
-                                            owner,
-                                        )
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            // SEAM #4: record error type (CRITICAL: no content/payload — T-05-05-02)
-                                            tool_span.set_attribute(KeyValue::new(
-                                                "error.type",
-                                                e.to_string(),
-                                            ));
-                                            serde_json::json!({"error": e.to_string()})
-                                        });
-                                    (value, false)
-                                }
+                                Ok(value) => (value, false),
                             }
                         } else {
                             match self
@@ -1192,21 +1195,21 @@ impl AgentLoop {
                         tracing::debug!(event = "tool_dispatch", tool = %tc.name);
                         // WR-02 (review #2): the fallback dispatches MCP tools directly (registry
                         // bypass), so it must apply the same egress policy registry.invoke applies
-                        // to a non-local (MCP) capability — gate the turn tier against "external"
-                        // before dispatch (D-13). On block, return an error result and keep the
-                        // loop going (parity with registry.invoke's caught-error behavior), rather
-                        // than executing the tool ungated.
-                        let result =
-                            match crate::hooks::egress::check_egress(resolved_tier, "external") {
-                                Err(e) => serde_json::json!({ "error": e.to_string() }),
-                                Ok(()) => self
-                                    .tool_source
-                                    .call_tool_with_timeout(&tc.name, tc.arguments.clone(), owner)
-                                    .await
-                                    .unwrap_or_else(
-                                        |e| serde_json::json!({ "error": e.to_string() }),
-                                    ),
-                            };
+                        // to a non-local (MCP) capability (D-13). On block, return an error result
+                        // and keep the loop going (parity with registry.invoke's caught-error
+                        // behavior), rather than executing the tool ungated. M3/F1: the gate now
+                        // lives INSIDE `call_tool_with_timeout` (`ToolSource` port contract) —
+                        // this call site only passes `resolved_tier` through.
+                        let result = self
+                            .tool_source
+                            .call_tool_with_timeout(
+                                &tc.name,
+                                tc.arguments.clone(),
+                                owner,
+                                resolved_tier,
+                            )
+                            .await
+                            .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
 
                         // D-06: handle skill_reloaded signal from skill-writer container
                         // (A2 `ToolResultObserver` port — also consulted by
@@ -1726,6 +1729,7 @@ mod tests {
             name: &str,
             _args: serde_json::Value,
             _owner: &str,
+            _resolved_tier: Option<PrivacyTier>,
         ) -> anyhow::Result<serde_json::Value> {
             anyhow::bail!("EmptyToolSource has no tool '{name}'")
         }

@@ -45,6 +45,18 @@ pub trait FailureSink: Send + Sync {
 /// the struct entirely (as the design calls for) without changing that
 /// behavior, this trait's surface is widened to also cover invocation — a
 /// documented divergence from the minimal sketch, not a silent one.
+///
+/// M3 hardening (LOOP-REPORT.md finding F1): `call_tool_with_timeout` used to
+/// document "callers apply their own egress gate" — true today, but nothing
+/// in the type system stopped a future call site from forgetting to. The gate
+/// is now part of the method's OWN contract: implementations MUST call
+/// `bastion_runtime::hooks::egress::check_egress(resolved_tier, "external")`
+/// (or the equivalent classification for their destination) BEFORE
+/// dispatching, and return its `Err` unchanged on failure. The method **gates
+/// internally; callers must pass the resolved tier** — there is no longer a
+/// way to reach dispatch without it flowing through the check. Same
+/// enforcement point as before (WR-02/D-13), same error type
+/// (`BastionError::PrivacyEgressBlocked`), just unforgettable by construction.
 #[async_trait::async_trait]
 pub trait ToolSource: Send + Sync {
     /// Anthropic-format tool definitions to offer the model this turn, built
@@ -54,14 +66,18 @@ pub trait ToolSource: Send + Sync {
     async fn tool_defs(&self) -> anyhow::Result<Vec<serde_json::Value>>;
 
     /// Registry-bypass tool invocation — mirrors `McpClient::call_tool_with_timeout`
-    /// exactly (timeout, Composio bounded retry). Callers apply their own
-    /// egress gate (`hooks::egress::check_egress`) before invoking; this trait
-    /// does not gate anything itself.
+    /// exactly (timeout, Composio bounded retry), but gates internally on
+    /// `resolved_tier` before dispatching: the implementation must run the
+    /// egress check first and short-circuit with its `Err` on denial. Callers
+    /// pass the turn's resolved `PrivacyTier` (fail-closed on `None`, same as
+    /// `check_egress`'s deny-on-ambiguity rule) — they no longer call
+    /// `check_egress` themselves.
     async fn call_tool_with_timeout(
         &self,
         name: &str,
         args: serde_json::Value,
         owner: &str,
+        resolved_tier: Option<PrivacyTier>,
     ) -> anyhow::Result<serde_json::Value>;
 }
 
