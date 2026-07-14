@@ -4,6 +4,15 @@
 //! tool-loop, so Bastion's egress gate / approval do NOT wrap its tool-use. Opt-in,
 //! per-deployment (cloud personal use with unlimited CC). NOT the OSS default.
 //! ponytail: justified by the unlimited-CC constraint; see decisions/structured-output-strategy.md.
+//!
+//! **DEPRECATED (A-09, `docs/revamp/BACKLOG.md`):** superseded by `AgentRuntime`
+//! (`bastion-agent-runtime`'s `CodexAppServerRuntime`/`AcpxAgentRuntime`, A-03/A-04) — a
+//! proven substitute with structured sessions/events, real tool-call surfacing, and no
+//! egress/approval/budget bypass. This module now only compiles behind the
+//! `legacy-terminal-agent` Cargo feature (OFF by default) — see the feature doc comment in
+//! `Cargo.toml`. Kept for one deprecation window (A-09 gate: feature flag first, removal
+//! only after A-08 + this feature verified green and a tested rollback path), never deleted
+//! outright.
 
 use super::Provider;
 use crate::types::{CallConfig, LlmResponse, Message, MessageContent, Role};

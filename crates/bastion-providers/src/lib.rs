@@ -5,6 +5,10 @@ pub mod ollama;
 pub mod openai;
 pub mod openrouter;
 pub mod registry;
+// A-09: legacy terminal-agent bridge, feature-gated off by default — see the
+// `legacy-terminal-agent` feature doc comment in Cargo.toml. Not removed, not linked into a
+// default build.
+#[cfg(feature = "legacy-terminal-agent")]
 pub mod terminal_agent;
 
 /// Internal alias so the files moved verbatim from the monolith keep their

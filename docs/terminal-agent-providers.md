@@ -1,5 +1,13 @@
 # Terminal-agent providers (Claude Code / opencode)
 
+> **DEPRECADO (A-09, `docs/revamp/BACKLOG.md`):** substituído por `AgentRuntime`
+> (`bastion-agent-runtime`'s `CodexAppServerRuntime`/`AcpxAgentRuntime`, A-03/A-04) —
+> sessão estruturada, eventos reais, sem bypass de egress/approval/budget. Este provider
+> agora só compila com a Cargo feature `legacy-terminal-agent` (**OFF por default** —
+> `cargo build --features legacy-terminal-agent`, ou no crate isolado
+> `cargo build -p bastion-providers --features legacy-terminal-agent`). Mantido por uma
+> janela de depreciação (código não removido), não é mais linkado num build padrão.
+
 Rode o Bastion **em cima de um agente de terminal** (`claude` ou `opencode` em modo headless) como
 executor do turn, em vez de chamar uma API de LLM. Útil quando você tem acesso ilimitado ao Claude Code:
 o Bastion vira o cérebro (roteamento, personas, memória, hooks) e o CC faz a execução — incluindo
@@ -11,6 +19,7 @@ Telegram e mobile, já que o CC roda no host do daemon e o canal é só front-en
 ## Ligar
 
 ```bash
+cargo build --features legacy-terminal-agent
 BASTION__AGENT__DEFAULT_MODEL=claude_code  bastion daemon   # ou =opencode
 ```
 
