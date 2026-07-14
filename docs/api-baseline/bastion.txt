@@ -133,8 +133,11 @@ use extension/mod.rs:Loadout
 mod extension/mod.rs:declarative
 mod extension/mod.rs:facade
 mod extension/mod.rs:host
+mod extension/mod.rs:review
 mod extension/mod.rs:subprocess
 mod extension/mod.rs:wasm
+fn extension/review.rs:permission_summary
+fn extension/review.rs:trust_tier_of
 struct extension/subprocess.rs:SubprocessCapability
 type extension/subprocess.rs:SubprocessEntry
 struct extension/subprocess.rs:SubprocessExtension

@@ -23,10 +23,13 @@
 //!   §2). The wasm runtime dependency (`wasmi`) itself lives in the isolated
 //!   `bastion-extension-wasm` crate (§8.7) — this module only wraps it into
 //!   an `ExtensionInstance`/`Capability`.
+//! - [`review`] — `permission_summary`, the owner-facing text an install flow
+//!   shows before committing (M4-09).
 
 pub mod declarative;
 pub mod facade;
 pub mod host;
+pub mod review;
 pub mod subprocess;
 pub mod wasm;
 
