@@ -15,6 +15,8 @@ fn agent_runtime_registry.rs:build_runtime_registry
 fn api/infer.rs:router
 mod api/mod.rs:infer
 use api/mod.rs:router
+struct auth_profile_registry.rs:AuthProfileRegistry
+fn auth_profile_registry.rs:build
 struct channel/discord.rs:DiscordChannel
 fn channel/discord.rs:from_env
 fn channel/discord.rs:handle_discord_message
@@ -68,6 +70,8 @@ fn channel/whatsapp.rs:handle_whatsapp_message
 fn channel/whatsapp.rs:new
 fn channel/whatsapp.rs:send_text
 use config.rs:AgentConfig
+struct config.rs:AuthConfig
+enum config.rs:AuthProfileEntry
 struct config.rs:BackendConfig
 struct config.rs:BastionConfig
 struct config.rs:ChannelConfig
@@ -97,6 +101,7 @@ fn config.rs:owner_map_for_whatsapp
 mod lib.rs:agent
 mod lib.rs:agent_runtime_registry
 mod lib.rs:api
+mod lib.rs:auth_profile_registry
 mod lib.rs:channel
 mod lib.rs:config
 mod lib.rs:mcp

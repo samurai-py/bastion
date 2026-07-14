@@ -73,6 +73,43 @@ pub struct BastionConfig {
     /// pre-Ciclo-2.4 behavior for any deployment that doesn't add this section.
     #[serde(default)]
     pub backend: BackendConfig,
+    /// M4-07 (`docs/revamp/BACKLOG.md`): optional `[auth.<profile>]` tables —
+    /// named credential/entitlement REFERENCES (never a token/secret value)
+    /// that `[backend] auth = "<profile>"` (or a future per-owner override)
+    /// points at by id. Absent entirely = `#[serde(default)]` empty
+    /// `AuthConfig` — byte-identical to every pre-M4-07 deployment (an
+    /// `AuthProfileRef` that names a profile nobody configured simply fails
+    /// to resolve once a real `AuthResolver` is wired; with none wired,
+    /// `NullAuthResolver` keeps resolving everything `Ok`, unchanged).
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+/// M4-07: one configured `[auth.<profile>]` entry — a REFERENCE to a
+/// credential/entitlement, never the credential itself (D-09: secrets never
+/// in bastion.toml). `HostCli` names a CLI whose OWN subscription-login flow
+/// (`claude auth login`, `codex login`, `opencode auth login`) is assumed
+/// already done on the host — Bastion never performs that login itself,
+/// only checks (by reference, via the CLI's own read-only status surface)
+/// that it's already in effect. `ApiKey` is the traditional path: the actual
+/// key lives in the named env var, never in this file — orthogonal to
+/// subscription backends, never a requirement (M4-07 acceptance criterion).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum AuthProfileEntry {
+    HostCli { cli: String },
+    ApiKey { env_var: String },
+}
+
+/// Flat map of `[auth.<profile>]` tables, keyed by profile id — the exact
+/// string a `[backend] auth = "<profile>"`/`AuthProfileRef` names.
+/// `#[serde(default)]` (via the `#[serde(default)]` on `BastionConfig.auth`
+/// above) so bastion.toml files with zero `[auth.*]` sections (every
+/// deployment before M4-07) keep parsing unchanged.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuthConfig {
+    #[serde(flatten)]
+    pub profiles: HashMap<String, AuthProfileEntry>,
 }
 
 /// Ciclo 2.4 declarative config for the kernel's `BackendProfile` (M4 scope

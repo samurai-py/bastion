@@ -216,6 +216,45 @@ pub trait PermissionGate: Send + Sync {
     ) -> anyhow::Result<PendingPermission>;
 }
 
+/// M4-07 (`docs/revamp/A-01-agentruntime-contract.md` §5 req 11 — "AuthProfileRef
+/// inválido → Auth tipado sem vazamento de secret"): verifies a
+/// [`bastion_agent_runtime::AuthProfileRef`] resolves to something usable
+/// BEFORE a runtime-backed session is started.
+///
+/// Neither shipped `AgentRuntime` adapter (`acpx`, `codex_app_server`) reads
+/// `SessionSpec::auth` at all — both are host-CLI wrappers that rely on
+/// ambient host login (`claude`/`codex`/`opencode` already authenticated on
+/// the machine), so the contract's own "invalid auth → typed error"
+/// requirement had no discharge point. This port IS that discharge point,
+/// injected ABOVE the adapter: only the app layer knows what a configured
+/// `[auth.<profile>]` id is supposed to map to (a host-CLI kind, an
+/// env-var-backed API key, ...) — the kernel never learns config format or
+/// names a concrete CLI (same law as `BackendConfig`/`RuntimeRegistry`).
+///
+/// Never receives or returns secret material: a conforming implementation
+/// checks login/presence state only (e.g. spawn the CLI's own read-only
+/// status command — `claude auth status`, `codex login status`, `opencode
+/// auth list` — or confirm an env var is SET) and must never read, log, or
+/// propagate token/credential bytes.
+///
+/// `AgentLoop` defaults to [`crate::capability::NullAuthResolver`] (always
+/// `Ok` — byte-identical to every pre-M4-07 deployment, since no check of
+/// any kind existed before this port); a real resolver is injected via
+/// `AgentLoop::with_auth_resolver` only once `[auth.*]` profiles are
+/// actually configured (`main.rs` wires the config-driven
+/// `AuthProfileRegistry`, app-level).
+#[async_trait::async_trait]
+pub trait AuthResolver: Send + Sync {
+    /// `Ok(())` when `auth` currently resolves to something usable;
+    /// otherwise a typed [`bastion_agent_runtime::RuntimeError::Auth`] (never
+    /// containing secret material — same discipline the adapter contract
+    /// itself requires of this error variant).
+    async fn resolve(
+        &self,
+        auth: &bastion_agent_runtime::AuthProfileRef,
+    ) -> Result<(), bastion_agent_runtime::RuntimeError>;
+}
+
 /// P4 — optional goal-engine port.
 ///
 /// `GoalEngine` becomes a trait object injected as `Option<Arc<dyn GoalPort>>`

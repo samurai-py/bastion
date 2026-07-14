@@ -35,6 +35,7 @@ fn agent/loop_.rs:resume_delegated_task
 fn agent/loop_.rs:run_turn
 fn agent/loop_.rs:run_turn_for
 fn agent/loop_.rs:run_turn_for_with_trust
+fn agent/loop_.rs:with_auth_resolver
 fn agent/loop_.rs:with_backend_profile
 fn agent/loop_.rs:with_permission_gate
 fn agent/loop_.rs:with_permission_timeout
@@ -46,6 +47,7 @@ mod agent/mod.rs:handle
 mod agent/mod.rs:loop_
 mod agent/mod.rs:ports
 trait agent/ports.rs:ApprovalGate
+trait agent/ports.rs:AuthResolver
 trait agent/ports.rs:CommandHandler
 enum agent/ports.rs:CommandResult
 trait agent/ports.rs:FailureSink
@@ -67,6 +69,7 @@ use capability/approval.rs:DenyScope
 struct capability/approval.rs:NullApprovalGate
 struct capability/approval.rs:SqliteApprovalGate
 fn capability/approval.rs:new
+struct capability/auth_resolver.rs:NullAuthResolver
 use capability/mod.rs:ApprovalOutcome
 use capability/mod.rs:ApprovalRow
 use capability/mod.rs:ApprovalStatus
@@ -74,12 +77,14 @@ use capability/mod.rs:Capability
 use capability/mod.rs:CapabilityRegistry
 use capability/mod.rs:InvokeCtx
 use capability/mod.rs:NullApprovalGate
+use capability/mod.rs:NullAuthResolver
 use capability/mod.rs:NullPermissionGate
 use capability/mod.rs:SqliteApprovalGate
 use capability/mod.rs:SqlitePermissionGate
 use capability/mod.rs:TaggedValue
 use capability/mod.rs:TurnCapabilityScope
 mod capability/mod.rs:approval
+mod capability/mod.rs:auth_resolver
 mod capability/mod.rs:permission_queue
 mod capability/mod.rs:registry
 mod capability/mod.rs:structured_output

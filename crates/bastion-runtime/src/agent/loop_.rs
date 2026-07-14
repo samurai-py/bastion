@@ -2,9 +2,9 @@ use crate::agent::backend::{BackendProfile, ConversationBackend, RuntimeRegistry
 use crate::agent::compactor::AutoCompact;
 use crate::agent::context::TurnContextProvider;
 use crate::agent::ports::{
-    ApprovalGate, CommandHandler, CommandResult, FailureSink, GoalPort, PermissionGate,
-    PreCompactionFlush, ProviderResolver, Responder, ToolResultObserver, ToolSource, TurnContext,
-    TurnKernel,
+    ApprovalGate, AuthResolver, CommandHandler, CommandResult, FailureSink, GoalPort,
+    PermissionGate, PreCompactionFlush, ProviderResolver, Responder, ToolResultObserver,
+    ToolSource, TurnContext, TurnKernel,
 };
 use crate::hooks::egress::EgressHook;
 use crate::hooks::guardrails::InputGuardrail;
@@ -186,6 +186,14 @@ pub struct AgentLoop {
     /// [`AgentLoop::with_permission_timeout`] so the timeout path doesn't
     /// need a slow real-time wait to exercise.
     pub permission_timeout: std::time::Duration,
+    /// M4-07: verifies a runtime-backed session's `AuthProfileRef` resolves
+    /// to something usable before `start`/`resume` is attempted (see
+    /// [`AuthResolver`]'s rustdoc for why this discharge point sits here,
+    /// above the adapter). Defaults to [`crate::capability::NullAuthResolver`]
+    /// (always `Ok`) — byte-identical to every pre-M4-07 deployment. Set
+    /// post-construction via [`AgentLoop::with_auth_resolver`], same
+    /// discipline as `backend_profile`/`runtime_registry`/`permission_gate`.
+    pub auth_resolver: Arc<dyn AuthResolver>,
 }
 
 impl AgentLoop {
@@ -270,6 +278,13 @@ impl AgentLoop {
                 std::collections::HashMap::new(),
             )),
             permission_timeout: std::time::Duration::from_secs(600),
+            // M4-07: no check at all is the pre-existing behavior — same
+            // "no Option, explicit fail-closed-when-opted-in default"
+            // discipline as `permission_gate` above, but this default
+            // itself is a no-op (`NullAuthResolver`), not fail-closed,
+            // because unlike permission requests there was never a prior
+            // check to preserve the failure mode of.
+            auth_resolver: Arc::new(crate::capability::NullAuthResolver),
         }
     }
 
@@ -307,6 +322,15 @@ impl AgentLoop {
     /// tests use this to shrink the wait to milliseconds.
     pub fn with_permission_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.permission_timeout = timeout;
+        self
+    }
+
+    /// M4-07: opt into a real [`AuthResolver`] — e.g. `main.rs` injecting the
+    /// config-driven `AuthProfileRegistry`. Without this call, `AgentLoop`
+    /// keeps the no-op `NullAuthResolver` default: every `AuthProfileRef`
+    /// resolves `Ok`, byte-identical to pre-M4-07 behavior.
+    pub fn with_auth_resolver(mut self, resolver: Arc<dyn AuthResolver>) -> Self {
+        self.auth_resolver = resolver;
         self
     }
 
@@ -477,6 +501,14 @@ impl AgentLoop {
         let _ = tokio::fs::create_dir_all(runtime_workspace_root(owner)).await;
         let (spec, timeout, permissions, env) =
             build_runtime_session_spec(owner, runtime_id, &self.backend_profile);
+
+        // M4-07: verify the resolved AuthProfileRef is actually usable
+        // BEFORE attempting start/resume — typed, fail-closed, no secret
+        // material ever crosses this boundary (see AuthResolver's rustdoc).
+        self.auth_resolver
+            .resolve(&spec.auth)
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
 
         // Restart recovery (design doc §3 mode 2): reuse a persisted handle
         // for this Bastion session if the adapter can genuinely reattach.
@@ -663,6 +695,13 @@ impl AgentLoop {
         let (spec, _timeout, _permissions, _env) =
             build_runtime_session_spec(owner, &runtime_id, &self.backend_profile);
 
+        // M4-07: same fail-closed auth check as mode 2 — see its call site
+        // in `run_runtime_backed_turn` for the rationale.
+        self.auth_resolver
+            .resolve(&spec.auth)
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
         let mut session = runtime
             .start(spec)
             .await
@@ -760,8 +799,22 @@ impl AgentLoop {
             .resolve(&handle.runtime_id)
             .await
             .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
-        let (_spec, timeout, permissions, env) =
+        let (spec, timeout, permissions, env) =
             build_runtime_session_spec(owner, &handle.runtime_id, &self.backend_profile);
+
+        // M4-07: same fail-closed auth check as mode 2/delegate — see
+        // `run_runtime_backed_turn`'s call site for the rationale. `spec`
+        // itself isn't otherwise used here (workspace/sandbox are fixed by
+        // the original session, not renegotiated on resume — `ResumeSpec`
+        // only carries timeout/permissions/env), but `auth` still needs
+        // re-verifying: a daemon restart is exactly the moment a
+        // subscription could have expired/been revoked since the session
+        // was first opened.
+        self.auth_resolver
+            .resolve(&spec.auth)
+            .await
+            .map_err(|e| anyhow::Error::new(BastionError::BackendUnavailable(e.to_string())))?;
+
         let resume_spec = bastion_agent_runtime::ResumeSpec {
             timeout,
             permissions,

@@ -162,3 +162,135 @@ async fn a06_runtime_backed_conversation_live() {
         "the runtime-backed response must be persisted to session history, got: {history:?}"
     );
 }
+
+const M4_07_MARKER: &str = "BASTION-M4-07-OK";
+
+/// M4-07 acceptance criterion (`docs/revamp/BACKLOG.md`): "instalação
+/// pessoal funciona SEM API key quando há assinatura suportada". This is
+/// [`a06_runtime_backed_conversation_live`] reconfigured to prove the
+/// specific M4-07 machinery on top of A-06's proof that the runtime-backed
+/// path itself works: a `[auth.host-claude-login]`-shaped config profile is
+/// verified by the real `AuthProfileRegistry` (spawns `claude auth status`,
+/// a read-only, non-secret-revealing check), wired as the `AgentLoop`'s
+/// `AuthResolver`, and a full turn completes successfully — all while this
+/// process has ZERO `*_API_KEY`-suffixed environment variable set. Traditional
+/// API-key auth is never touched or required by this path.
+#[tokio::test]
+#[ignore = "spawns real acpx+claude subprocesses, costs tokens; run manually with --ignored"]
+async fn m4_07_subscription_backend_works_without_api_key_live() {
+    // The acceptance criterion itself, checked first and loudly: this
+    // process must not be carrying any *_API_KEY env var when this proof
+    // runs, or the test would prove nothing about "works without one".
+    let leaked_api_keys: Vec<String> = std::env::vars()
+        .map(|(k, _)| k)
+        .filter(|k| k.to_ascii_uppercase().ends_with("_API_KEY"))
+        .collect();
+    assert!(
+        leaked_api_keys.is_empty(),
+        "M4-07 proof requires a *_API_KEY-free environment to be meaningful; found: {leaked_api_keys:?}"
+    );
+
+    let f = NamedTempFile::new().unwrap();
+    let db_path = f.path().to_str().unwrap().to_owned();
+    let mut agent = make_loop(&db_path).await;
+
+    let acpx = AcpxAgentRuntime::new("claude").expect("acpx on PATH");
+    let health = acpx.health().await.expect("health probe");
+    eprintln!("health: {health:?}");
+    assert!(health.ready, "acpx/claude not ready: {health:?}");
+
+    let mut registry = RuntimeRegistry::new();
+    registry.register(Arc::new(acpx));
+
+    // M4-07: a real, config-shaped subscription auth profile — verified via
+    // the CLI's own read-only status surface, never a token.
+    let profile_id = "host-claude-login";
+    let mut profiles = std::collections::HashMap::new();
+    profiles.insert(
+        profile_id.to_string(),
+        bastion::config::AuthProfileEntry::HostCli {
+            cli: "claude".to_string(),
+        },
+    );
+    let auth_config = bastion::config::AuthConfig { profiles };
+    let auth_registry =
+        bastion::auth_profile_registry::AuthProfileRegistry::build(&auth_config).await;
+
+    agent = agent
+        .with_backend_profile(BackendProfile {
+            conversation: ConversationBackend::Runtime("acpx_claude".to_string()),
+            auth: Some(bastion_agent_runtime::AuthProfileRef(
+                profile_id.to_string(),
+            )),
+            ..Default::default()
+        })
+        .with_runtime_registry(registry)
+        .with_auth_resolver(Arc::new(auth_registry));
+
+    let owner = "m4-07-live-owner";
+    let response = agent
+        .run_turn_for(
+            &format!("Reply with exactly this and nothing else: {M4_07_MARKER}"),
+            owner,
+        )
+        .await
+        .expect(
+            "subscription-backed turn must succeed end-to-end with zero *_API_KEY in the \
+             environment — this is the M4-07 acceptance criterion itself",
+        );
+    eprintln!("response: {response:?}");
+
+    assert!(
+        response.contains(M4_07_MARKER),
+        "expected the marker word in the response, got: {response:?}"
+    );
+}
+
+/// M4-07: an `AuthProfileRef` naming a profile that was never configured (or
+/// failed host verification) must fail the turn with a typed error BEFORE
+/// any harness process is even spawned — never a silent proceed, never a
+/// hang. Uses a fake/never-registered auth profile id against the same
+/// acpx/claude runtime so the ONLY variable under test is auth resolution.
+#[tokio::test]
+#[ignore = "spawns acpx health probe; run manually with --ignored (no LLM tokens spent — \
+            resolution fails before any turn starts)"]
+async fn m4_07_unconfigured_auth_profile_fails_closed_before_session_starts() {
+    let f = NamedTempFile::new().unwrap();
+    let db_path = f.path().to_str().unwrap().to_owned();
+    let mut agent = make_loop(&db_path).await;
+
+    let acpx = AcpxAgentRuntime::new("claude").expect("acpx on PATH");
+    let health = acpx.health().await.expect("health probe");
+    assert!(health.ready, "acpx/claude not ready: {health:?}");
+
+    let mut registry = RuntimeRegistry::new();
+    registry.register(Arc::new(acpx));
+
+    // Empty auth config: nothing verified, so ANY AuthProfileRef fails to
+    // resolve — the fail-closed default this registry establishes.
+    let auth_registry = bastion::auth_profile_registry::AuthProfileRegistry::build(
+        &bastion::config::AuthConfig::default(),
+    )
+    .await;
+
+    agent = agent
+        .with_backend_profile(BackendProfile {
+            conversation: ConversationBackend::Runtime("acpx_claude".to_string()),
+            auth: Some(bastion_agent_runtime::AuthProfileRef(
+                "never-configured-profile".to_string(),
+            )),
+            ..Default::default()
+        })
+        .with_runtime_registry(registry)
+        .with_auth_resolver(Arc::new(auth_registry));
+
+    let err = agent
+        .run_turn_for("this must never reach the model", "m4-07-fail-closed-owner")
+        .await
+        .expect_err("an unresolvable AuthProfileRef must fail the turn, never proceed");
+    let msg = err.to_string();
+    assert!(
+        msg.to_ascii_lowercase().contains("auth") || msg.contains("never-configured-profile"),
+        "error should be attributable to auth resolution, got: {msg}"
+    );
+}

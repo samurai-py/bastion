@@ -299,9 +299,19 @@ async fn main() -> anyhow::Result<()> {
             ),
         }
     }
+    // M4-07 (docs/revamp/BACKLOG.md): verify every configured `[auth.<profile>]`
+    // entry against the live host (by reference only — no token ever read/
+    // logged, see auth_profile_registry.rs) and wire the result as the
+    // AuthResolver a runtime-backed turn checks before start/resume. Cheap
+    // even with zero `[auth.*]` sections: the loop over an empty map does
+    // nothing, and AgentLoop's own NullAuthResolver default (unchanged if
+    // this call is ever removed) already preserves pre-M4-07 behavior.
+    let auth_resolver = bastion::auth_profile_registry::AuthProfileRegistry::build(&cfg.auth).await;
+
     agent = agent
         .with_backend_profile(backend_profile)
         .with_runtime_registry(runtime_registry)
+        .with_auth_resolver(std::sync::Arc::new(auth_resolver))
         // Loop 3-A (6a, docs/revamp/C3-runtime-followups-design.md §6a):
         // owner-scoped, persisted cross-turn permission queue — the same
         // db_path SqliteApprovalGate above already opens. Without this call
