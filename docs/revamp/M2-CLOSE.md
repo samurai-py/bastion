@@ -119,12 +119,12 @@ Wired into `.github/workflows/ci.yml` as a new `crate-deps` job (checkout + scri
 
 | Gate | Result |
 |---|---|
-| `cargo fmt --check` | _(filled at close-out commit)_ |
-| `cargo clippy --all-targets --all-features -- -D warnings` | _(filled at close-out commit)_ |
-| `cargo test --workspace` | _(filled at close-out commit — target: 535, matching M2-06 count)_ |
-| `cargo build --release` (binary size vs. baseline `24183704` bytes) | _(filled at close-out commit)_ |
-| `cargo check -p bastion-runtime` (kernel standalone) | _(filled at close-out commit)_ |
+| `cargo fmt --check` | PASS — clean |
+| `cargo clippy --all-targets --all-features -- -D warnings` | PASS — exit 0; only the known future-incompat notice on transitive dep `proc-macro-error2 v2.0.1` (not our code, tracked for the M3 dep audit, same as baseline) |
+| `cargo test --workspace` | PASS — **535 passed, 0 failed** (38 suites: unit tests across all 9 crates + the app's `src/lib.rs`/`src/main.rs`/`pokedev_cli` + 15 `tests/` integration suites + the `evals` harness) |
+| `cargo build --release` | PASS — binary `target/release/bastion` = **24.345.624 bytes**, vs. baseline `24.183.704` bytes (`v1.1.0-pre-revamp`) → **+161.920 bytes (+0,6695%)**. Consistent with the cumulative deltas reported at each M2 sub-step (+0,16%, +0,19%, ...); the full workspace split (10 Cargo.toml manifests, 19 shim files, crate boundaries) adds a small, expected amount of overhead, well within tolerance — no functional growth. |
+| `cargo check -p bastion-runtime` (kernel standalone) | PASS — the kernel crate (`bastion-runtime`, depending only on `bastion-types` + external deps) compiles in isolation, with no product/cognition/extension code pulled in. Confirms the kernel-alone build works without any of `bastion`'s (app) or the extension crates' features. |
 
 ## 6. GitNexus / aag reindex
 
-_(filled at close-out commit — pass/fail + any `docs/revamp/LOOP-REPORT.md` note)_
+`node .gitnexus/run.cjs analyze` ran successfully (foreground, ~28s, incremental): **6.954 nodes | 14.413 edges | 314 clusters | 300 flows**. No fallback needed; no entry required in `docs/revamp/LOOP-REPORT.md` for this close-out.
