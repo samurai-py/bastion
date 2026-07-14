@@ -22,6 +22,7 @@
 //! - auth is an opaque [`AuthProfileRef`]; errors never carry secrets.
 
 pub mod acpx;
+pub mod codex;
 pub mod conformance;
 mod util;
 
