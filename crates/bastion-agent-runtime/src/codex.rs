@@ -44,38 +44,51 @@
 //!   response genuinely blocks the file write, `accept` lets it through).
 //!   This is a materially stronger bridge than the acpx adapter's
 //!   `HarnessOwned` — a key differentiator, see `docs/revamp/A-05`.
-//! - `policy_coverage.sandbox = Partial`, not `Honored`: on a host without
-//!   working bubblewrap/user-namespaces (verified live in this sandboxed
-//!   dev environment), `workspace-write` sandboxing silently fails to
-//!   engage and EVERY tool call escalates to an approval request under
+//! - `policy_coverage.sandbox`: **detected, not a constant** (Ciclo 2.2,
+//!   A-05 §5.2 / LOOP-REPORT finding #5). On a host without working
+//!   bubblewrap/user-namespaces (verified live in this sandboxed dev
+//!   environment), `workspace-write` sandboxing silently fails to engage
+//!   and EVERY tool call escalates to an approval request under
 //!   `on-request` — the declared sandbox degrades to "ask about
 //!   everything" rather than silently executing unconfined. Declaring
-//!   `Honored` would be dishonest; `Partial` reflects that the intent is
-//!   real but host-dependent.
+//!   `Honored` unconditionally would be dishonest, and so was declaring a
+//!   constant `Partial`: a host that genuinely has no `bwrap` at all is
+//!   `SandboxCoverage::None`, not an optimistic `Partial`. `health()` (and
+//!   therefore `start()`, which always calls it first) now runs
+//!   [`probe_sandbox_coverage`] — a cheap, real probe of whether bubblewrap
+//!   can actually create a user namespace on this host — and caches the
+//!   result for `descriptor()` to report. Before any probe has run, the
+//!   cached value is the fail-closed worst case, `SandboxCoverage::None`.
+//!   Even a working bubblewrap only proves `Partial`, never `Honored`: a
+//!   successful probe shows the *mechanism* is real, not that any specific
+//!   turn's `workspace-write` request was actually confined.
 //! - `supports.concurrent_sessions = false`: one active turn per thread;
 //!   `submit` rejects a second concurrent call.
 //! - `policy_coverage.egress = HarnessOwned`: same reasoning as acpx — once
 //!   a turn runs, the model/tool loop has its own network authority beyond
 //!   what `TaskInput` assembly filtered.
 //!
-//! # Contract gap found in practice
+//! # Contract gap found in practice — RESOLVED (Ciclo 2.2)
 //!
-//! [`AgentRuntime::resume`] receives only a [`SessionHandle`], never a
-//! [`SessionSpec`] — there is no way to recover the original
+//! [`AgentRuntime::resume`] used to receive only a [`SessionHandle`], never
+//! a [`SessionSpec`] — there was no way to recover the original
 //! `EnvPolicy`/`TimeoutPolicy`/`PermissionProfile` purely from the handle.
-//! Codex's `thread/resume` conveniently echoes the thread's own `cwd`, so
-//! workspace confinement survives; environment allowlist and timeouts do
-//! not, and this adapter falls back to conservative, adapter-level
-//! defaults (see [`CodexAppServerRuntime::with_resume_env`]). This is
-//! worth an A-01 addendum: resume should probably accept an optional
-//! `SessionSpec` override.
+//! It now takes a [`ResumeSpec`] (A-01 addendum, A-05 §5.6). Codex's
+//! `thread/resume` conveniently echoes the thread's own `cwd`, so workspace
+//! confinement survives outside the spec entirely; `env`/`timeout` from
+//! `ResumeSpec` are applied for real (spawning the new process, and the
+//! session's timeout watchdog). `permissions` cannot be threaded through
+//! `thread/resume` at all — Codex's reattach protocol takes only a
+//! `threadId`, nothing else — so the resumed session surfaces a
+//! [`RuntimeEvent::Warning`] on the first task submitted after reattach
+//! instead of silently dropping that part of the spec.
 
 use crate::conformance::FaultInjection;
 use crate::util::{parse_structured_line, resolve_on_path, sha256_digest, version_satisfies};
 use crate::*;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -92,9 +105,11 @@ const CODEX_VERSION_REQ: &str = ">=0.144.0, <0.145.0";
 /// Adapter driving `codex app-server` natively. One process per session.
 pub struct CodexAppServerRuntime {
     codex_bin: PathBuf,
-    /// Env applied when [`AgentRuntime::resume`] has no [`SessionSpec`] to
-    /// draw an allowlist from (see module docs — a real A-01 gap).
-    resume_env: BTreeMap<String, String>,
+    /// Cached result of [`probe_sandbox_coverage`] (Ciclo 2.2, A-05 §5.2):
+    /// starts at the fail-closed default `None` and is refreshed every
+    /// `health()` call (which `start()` always calls first) — never an
+    /// optimistic guess before a real probe has actually run.
+    sandbox_coverage: std::sync::Mutex<SandboxCoverage>,
 }
 
 impl CodexAppServerRuntime {
@@ -102,7 +117,7 @@ impl CodexAppServerRuntime {
     pub fn new() -> Result<Self, RuntimeError> {
         Ok(Self {
             codex_bin: resolve_on_path("codex")?,
-            resume_env: BTreeMap::new(),
+            sandbox_coverage: std::sync::Mutex::new(SandboxCoverage::None),
         })
     }
 
@@ -110,15 +125,20 @@ impl CodexAppServerRuntime {
     pub fn with_binary(codex_bin: PathBuf) -> Self {
         Self {
             codex_bin,
-            resume_env: BTreeMap::new(),
+            sandbox_coverage: std::sync::Mutex::new(SandboxCoverage::None),
         }
     }
 
-    /// Sets the environment `resume()` uses in the absence of a
-    /// [`SessionSpec`] (see module docs).
-    pub fn with_resume_env(mut self, env: BTreeMap<String, String>) -> Self {
-        self.resume_env = env;
-        self
+    /// Reads the cached sandbox-coverage detection (see module docs and
+    /// [`probe_sandbox_coverage`]) — worst-case `None` if no probe ran yet.
+    /// Tolerates mutex poisoning (a panic while holding the lock is not
+    /// expected, but recovering the poisoned value is strictly safer than
+    /// panicking again on every subsequent `descriptor()` call).
+    fn cached_sandbox_coverage(&self) -> SandboxCoverage {
+        *self
+            .sandbox_coverage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn base_command(&self) -> Command {
@@ -153,12 +173,21 @@ impl AgentRuntime for CodexAppServerRuntime {
                 approvals: ApprovalCoverage::Bridged,
                 egress: EgressCoverage::HarnessOwned,
                 budget: BudgetCoverage::Reported,
-                sandbox: SandboxCoverage::Partial,
+                sandbox: self.cached_sandbox_coverage(),
             },
         }
     }
 
     async fn health(&self) -> Result<RuntimeHealth, RuntimeError> {
+        // Ciclo 2.2 (A-05 §5.2): detect sandbox coverage on every health
+        // probe rather than declaring a hardcoded constant. `start()` always
+        // calls `health()` first, so both paths stay fresh.
+        let detected = probe_sandbox_coverage().await;
+        *self
+            .sandbox_coverage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = detected;
+
         let mut cmd = Command::new(&self.codex_bin);
         cmd.arg("--version")
             .env_clear()
@@ -250,12 +279,14 @@ impl AgentRuntime for CodexAppServerRuntime {
             next_task_id: 0,
             event_tx: tx,
             event_rx: rx,
+            pending_resume_warning: None,
         }))
     }
 
     async fn resume(
         &self,
         handle: &SessionHandle,
+        spec: ResumeSpec,
     ) -> Result<Box<dyn RuntimeSession>, RuntimeError> {
         if handle.runtime_id != "codex_app_server" {
             return Err(RuntimeError::NotResumable(
@@ -269,7 +300,7 @@ impl AgentRuntime for CodexAppServerRuntime {
 
         let mut cmd = self.base_command();
         cmd.env_clear();
-        for (k, v) in &self.resume_env {
+        for (k, v) in &spec.env.allow {
             cmd.env(k, v);
         }
         let child = cmd.spawn().map_err(|e| {
@@ -317,17 +348,30 @@ impl AgentRuntime for CodexAppServerRuntime {
             handle: new_handle.clone(),
         });
 
-        // Conservative defaults — resume() has no SessionSpec to draw a
-        // real per_task timeout from (see module docs / A-01 gap).
+        // `ResumeSpec` (Ciclo 2.2) is applied for what codex's protocol
+        // actually allows: `env` above (real subprocess env), `timeout`
+        // here (purely client-side watchdog bookkeeping — codex never sees
+        // it). `spec.permissions` CANNOT be threaded through
+        // `thread/resume` at all: the wire request is `{"threadId": ...}`,
+        // nothing else — the resumed thread keeps its original
+        // `approvalPolicy` no matter what `spec.permissions` says. Surfaced
+        // as a `Warning` on the first task submitted after reattach (see
+        // `submit`) rather than silently dropped.
         let _ = thread; // thread metadata available (cwd, etc.) but unused for now.
         Ok(Box::new(CodexSession {
             shared,
             handle: new_handle,
             thread_id: handle.external_ref.clone(),
-            per_task_timeout: Duration::from_secs(300),
+            per_task_timeout: spec.timeout.per_task,
             next_task_id: 0,
             event_tx: tx,
             event_rx: rx,
+            pending_resume_warning: Some(
+                "resume() cannot re-apply a PermissionProfile over codex's thread/resume \
+                 protocol (it takes only a threadId) — the reattached thread keeps its \
+                 original approvalPolicy"
+                    .to_string(),
+            ),
         }))
     }
 }
@@ -343,6 +387,41 @@ fn approval_policy(profile: &PermissionProfile) -> &'static str {
         "never"
     } else {
         "on-request"
+    }
+}
+
+/// Cheap, host-level probe of whether Codex's Linux sandbox mechanism
+/// (bubblewrap unprivileged user namespaces) can actually confine anything
+/// on this host — run from `health()`, never assumed (Ciclo 2.2, A-05 §5.2 /
+/// LOOP-REPORT finding #5).
+///
+/// Mirrors what `codex` itself would observe (it shells out to `bwrap` for
+/// its own sandbox) without needing a live `codex` process: if `bwrap`
+/// cannot even be found on `PATH`, or a minimal `--unshare-user` invocation
+/// fails (exactly the failure mode this dev host hits — "needs access to
+/// create user namespaces"), there is no mechanism to honor any part of the
+/// requested sandbox profile at all — [`SandboxCoverage::None`], the
+/// fail-closed worst case, never an optimistic [`SandboxCoverage::Partial`].
+///
+/// This probe never returns [`SandboxCoverage::Honored`]: even a bubblewrap
+/// that can create user namespaces only makes the *mechanism* real from
+/// outside a live session — it is not proof that a specific turn's
+/// `workspace-write` request was actually confined (see module docs).
+async fn probe_sandbox_coverage() -> SandboxCoverage {
+    let bwrap = match resolve_on_path("bwrap") {
+        Ok(p) => p,
+        Err(_) => return SandboxCoverage::None,
+    };
+    let mut cmd = Command::new(&bwrap);
+    cmd.args(["--unshare-user", "--dev-bind", "/", "/", "true"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    match tokio::time::timeout(Duration::from_secs(3), cmd.status()).await {
+        Ok(Ok(status)) if status.success() => SandboxCoverage::Partial,
+        _ => SandboxCoverage::None,
     }
 }
 
@@ -830,6 +909,11 @@ pub struct CodexSession {
     next_task_id: u64,
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
     event_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
+    /// Set by [`CodexAppServerRuntime::resume`] when a `ResumeSpec` field
+    /// could not be threaded through `thread/resume` (Ciclo 2.2); consumed
+    /// (surfaced as a `Warning`) on the first task `submit` allocates —
+    /// `None` for a session opened via `start()`, which has no such gap.
+    pending_resume_warning: Option<String>,
 }
 
 #[async_trait]
@@ -856,6 +940,17 @@ impl RuntimeSession for CodexSession {
 
         let task_id = TaskId(self.next_task_id);
         self.next_task_id += 1;
+
+        // Ciclo 2.2: surface the resume()-time permission-profile gap (if
+        // any) attached to the first real task, rather than trying to
+        // synthesize a session-level event before any TaskId exists.
+        if let Some(detail) = self.pending_resume_warning.take() {
+            let _ = self.event_tx.send(RuntimeEvent::Warning {
+                task: task_id,
+                code: WarnCode::DegradedTransport,
+                detail,
+            });
+        }
 
         let id = self.shared.alloc_id();
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -1029,14 +1124,29 @@ impl RuntimeSession for CodexSession {
                 "no matching pending permission request".to_string(),
             ));
         };
-        let decision_str = match decision {
-            PermissionDecision::Allow => "accept",
-            PermissionDecision::Deny => "decline",
+        let (decision_str, deny_scope) = match decision {
+            PermissionDecision::Allow => ("accept", None),
+            PermissionDecision::Deny { scope } => ("decline", Some(scope)),
         };
         self.shared
             .write_response(json_id, json!({"decision": decision_str}))
             .await
-            .map_err(RuntimeError::Unavailable)
+            .map_err(RuntimeError::Unavailable)?;
+
+        // Ciclo 2.2 (`docs/revamp/C2-approval-port-design.md` §3, A-05
+        // §5.5 / LOOP-REPORT finding #5.5): a `Turn`-scoped denial closes
+        // the alternate-tool-routing gap at the adapter boundary — the
+        // declined tool call is blocked by the `decline` response above,
+        // and the adapter itself now also cancels the delegated task
+        // gracefully rather than letting the harness try another, ungated
+        // tool call for the same goal this turn.
+        if deny_scope == Some(DenyScope::Turn) {
+            self.cancel(CancelMode::Graceful {
+                grace: Duration::from_millis(500),
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     async fn status(&self) -> Result<SessionStatus, RuntimeError> {

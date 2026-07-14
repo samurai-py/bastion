@@ -47,6 +47,10 @@
 //! - `policy_coverage.sandbox = None`: acpx passes `--cwd` as a hint, not an
 //!   enforced jail (no bubblewrap/chroot observed); nothing stops the
 //!   wrapped agent writing outside the workspace root via an absolute path.
+//!   Unlike [`crate::codex`] (Ciclo 2.2), this is NOT probed at `health()`
+//!   time — acpx itself never invokes any confinement mechanism regardless
+//!   of host capability, so `None` is the honest answer independent of what
+//!   the host could support; there is nothing host-dependent to detect.
 //! - `policy_coverage.egress = HarnessOwned`: once a turn starts, the
 //!   wrapped agent (e.g. Claude Code) has its own model/tool network
 //!   authority; Bastion only filters what enters via `TaskInput`.
@@ -277,6 +281,7 @@ impl AgentRuntime for AcpxAgentRuntime {
     async fn resume(
         &self,
         _handle: &SessionHandle,
+        _spec: ResumeSpec,
     ) -> Result<Box<dyn RuntimeSession>, RuntimeError> {
         Err(RuntimeError::NotResumable(
             "acpx adapter does not support session reattachment across process restarts \

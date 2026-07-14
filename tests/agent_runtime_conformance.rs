@@ -177,6 +177,7 @@ impl AgentRuntime for FakeRuntime {
     async fn resume(
         &self,
         handle: &SessionHandle,
+        _spec: ResumeSpec,
     ) -> Result<Box<dyn RuntimeSession>, RuntimeError> {
         let shared = self.shared.lock().await;
         match &shared.active_session {
@@ -430,11 +431,28 @@ impl RuntimeSession for FakeSession {
                     outcome: TaskOutcome::Success,
                 });
             }
-            PermissionDecision::Deny => {
+            PermissionDecision::Deny {
+                scope: DenyScope::Instance,
+            } => {
+                // Deny this one request; the task still completes normally
+                // (the model just didn't get to do the guarded action).
                 inner.pending_events.push_back(RuntimeEvent::Ended {
                     task: task_id,
                     outcome: TaskOutcome::Success,
                 });
+            }
+            PermissionDecision::Deny {
+                scope: DenyScope::Turn,
+            } => {
+                // Ciclo 2.2: Turn-scoped deny gracefully cancels the task —
+                // mirrors what `cancel(CancelMode::Graceful { .. })` does.
+                inner.pending_events.push_back(RuntimeEvent::Ended {
+                    task: task_id,
+                    outcome: TaskOutcome::Cancelled,
+                });
+                if inner.status != SessionStatus::Crashed {
+                    inner.status = SessionStatus::Cancelled;
+                }
             }
         }
         Ok(())
@@ -499,6 +517,7 @@ fn make_scenarios() -> ConformanceScenarios {
             attachments: Vec::new(),
             expected: TaskExpectation::CodeChange,
         },
+        watchdog: conformance::DEFAULT_WATCHDOG,
     }
 }
 
@@ -532,6 +551,117 @@ async fn agent_runtime_conformance_suite_all_pass() {
         results.len(),
         14,
         "expected all 14 checks to run:\n{report}"
+    );
+}
+
+/// Ciclo 2.2 acceptance criterion: `DenyScope::Turn` makes the adapter
+/// cancel the task gracefully after denying (contract change 4/6 of the
+/// A-01 v2 review — `docs/revamp/C2-approval-port-design.md` §3).
+#[tokio::test]
+async fn deny_turn_scope_cancels_the_task() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let spec = make_spec(workspace.path().to_path_buf());
+    let runtime = FakeRuntime::new();
+    let mut session = runtime.start(spec).await.expect("start");
+
+    assert!(matches!(
+        session.next_event().await,
+        Some(RuntimeEvent::Started { .. })
+    ));
+
+    let task = session
+        .submit(TaskInput {
+            prompt: "emit:permission".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::CodeChange,
+        })
+        .await
+        .expect("submit");
+
+    let req_id = loop {
+        match session.next_event().await.expect("event stream open") {
+            RuntimeEvent::PermissionRequest { task: t, id, .. } if t == task => break id,
+            _ => continue,
+        }
+    };
+
+    session
+        .respond_permission(
+            req_id,
+            PermissionDecision::Deny {
+                scope: DenyScope::Turn,
+            },
+        )
+        .await
+        .expect("respond_permission");
+
+    let outcome = loop {
+        match session.next_event().await.expect("event stream open") {
+            RuntimeEvent::Ended { task: t, outcome } if t == task => break outcome,
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        outcome,
+        TaskOutcome::Cancelled,
+        "DenyScope::Turn must cancel the task, not let it complete normally"
+    );
+    assert_eq!(
+        session.status().await.expect("status"),
+        SessionStatus::Cancelled
+    );
+}
+
+/// Symmetric coverage: `DenyScope::Instance` preserves the pre-Ciclo-2.2
+/// behavior — only the guarded action is blocked, the task still completes.
+#[tokio::test]
+async fn deny_instance_scope_leaves_task_completing_normally() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let spec = make_spec(workspace.path().to_path_buf());
+    let runtime = FakeRuntime::new();
+    let mut session = runtime.start(spec).await.expect("start");
+
+    assert!(matches!(
+        session.next_event().await,
+        Some(RuntimeEvent::Started { .. })
+    ));
+
+    let task = session
+        .submit(TaskInput {
+            prompt: "emit:permission".to_string(),
+            attachments: Vec::new(),
+            expected: TaskExpectation::CodeChange,
+        })
+        .await
+        .expect("submit");
+
+    let req_id = loop {
+        match session.next_event().await.expect("event stream open") {
+            RuntimeEvent::PermissionRequest { task: t, id, .. } if t == task => break id,
+            _ => continue,
+        }
+    };
+
+    session
+        .respond_permission(
+            req_id,
+            PermissionDecision::Deny {
+                scope: DenyScope::Instance,
+            },
+        )
+        .await
+        .expect("respond_permission");
+
+    let outcome = loop {
+        match session.next_event().await.expect("event stream open") {
+            RuntimeEvent::Ended { task: t, outcome } if t == task => break outcome,
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        outcome,
+        TaskOutcome::Success,
+        "DenyScope::Instance must not cancel the task"
     );
 }
 

@@ -96,6 +96,10 @@ fn make_scenarios() -> ConformanceScenarios {
             attachments: Vec::new(),
             expected: TaskExpectation::CodeChange,
         },
+        // Ciclo 2.2 (A-05 §5.1): see acpx_live_claude.rs for the rationale —
+        // 14 cold `start()` calls per `run_all` sweep against a real cloud
+        // harness need more slack than the embedded fake's 5s default.
+        watchdog: Duration::from_secs(30),
     }
 }
 

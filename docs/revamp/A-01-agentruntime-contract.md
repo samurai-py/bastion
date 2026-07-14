@@ -4,6 +4,37 @@
 >
 > Substitui o `TerminalAgentProvider` (`src/provider/terminal_agent.rs`) — hoje um `Provider` falso: achata a conversa em prompt de stdout, retorna `tool_calls: None` por design, e o tool-loop interno do CLI escapa de egress/approval/budget do Bastion (limitação documentada no próprio módulo).
 
+## v2 — Ciclo 2.2 (revisão pós-validação live)
+
+`docs/revamp/A-05-conformance-matrix.md` §5 rodou a suite A-02 contra harnesses
+reais (`acpx`/`claude`, `codex app-server`) e achou 6 furos no contrato/A-02.
+Esta revisão fecha os 6:
+
+1. **Watchdog parametrizável** — `ConformanceScenarios` (A-02,
+   `crates/bastion-agent-runtime/src/conformance.rs`) ganhou o campo
+   `watchdog: Duration`; deixou de ser o `const WATCHDOG = 5s` fixo do crate.
+   Runs live passam um valor maior (30s neste ciclo) para absorver os 14
+   `start()` frios que um `run_all` faz contra um harness cloud de verdade.
+2. **`SandboxCoverage` detectado, não declarado** — ver §3. `CodexAppServerRuntime`
+   agora probe bubblewrap (`bwrap --unshare-user ...`) em `health()`/`start()`;
+   sem bubblewrap funcional = `SandboxCoverage::None` (pior caso honesto),
+   nunca `Partial` otimista sem prova.
+3. **`ResumeSpec`** — `AgentRuntime::resume` ganhou um segundo parâmetro com o
+   subconjunto de `SessionSpec` re-aplicável num reattach (`timeout`,
+   `permissions`, `env`; `workspace`/`sandbox` continuam fixos da sessão
+   original). Ver §2/§5.
+4. **`PermissionDecision::Deny { scope: DenyScope }`** — alinhado ao
+   `DenyScope` do kernel (`bastion_types`, Ciclo 2.1,
+   `docs/revamp/C2-approval-port-design.md` §3). `bastion-agent-runtime`
+   ainda é standalone (sem dependência de `bastion-types`), então este é um
+   espelho local documentado, não um tipo inventado à parte — mesma
+   vocabulário de 2 variantes (`Instance`/`Turn`). `Turn` (default do
+   produto) faz o adapter cancelar a task graciosamente depois de negar.
+5. **Steer race / cancel-vs-timeout ambíguo — já mitigados, agora exigidos
+   pelo contrato** — ver §5, itens 3 e 5.
+
+## Contrato base (v1)
+
 ## 1. Duas abstrações, não uma
 
 | Abstração | Responsabilidade | Contrato |
@@ -45,8 +76,15 @@ pub trait AgentRuntime: Send + Sync {
     async fn start(&self, spec: SessionSpec) -> Result<Box<dyn RuntimeSession>, RuntimeError>;
 
     /// Reatar sessão persistida (pós-restart). `NotResumable` é resposta
-    /// válida e tipada — nunca silenciosamente uma sessão nova.
-    async fn resume(&self, handle: &SessionHandle) -> Result<Box<dyn RuntimeSession>, RuntimeError>;
+    /// válida e tipada — nunca silenciosamente uma sessão nova. `spec` (v2,
+    /// Ciclo 2.2) carrega o subconjunto re-aplicável do `SessionSpec`
+    /// original — ver `ResumeSpec` abaixo; o adapter aplica o que o
+    /// protocolo de reattach permitir e reporta o resto via `Warning`.
+    async fn resume(
+        &self,
+        handle: &SessionHandle,
+        spec: ResumeSpec,
+    ) -> Result<Box<dyn RuntimeSession>, RuntimeError>;
 }
 
 #[async_trait]
@@ -91,6 +129,15 @@ pub struct RuntimeDescriptor {
     pub policy_coverage: PolicyCoverage, // ver §3 — declaração honesta
 }
 
+/// v2 (Ciclo 2.2) — subconjunto de SessionSpec re-aplicável num resume().
+/// `workspace`/`sandbox` ficam de fora: fixos pela sessão original, não
+/// renegociáveis num reattach.
+pub struct ResumeSpec {
+    pub timeout: TimeoutPolicy,
+    pub permissions: PermissionProfile,
+    pub env: EnvPolicy,
+}
+
 pub struct SessionSpec {
     pub workspace: WorkspacePolicy,      // dir raiz + rw/ro + deny-paths
     pub sandbox: SandboxProfile,         // herdado do host; adapter declara o que honra
@@ -122,6 +169,19 @@ pub enum RuntimeEvent {
     Usage(UsageDelta),                                // tokens/custo incremental
     Warning { code: WarnCode, detail: String },
     Ended { task: TaskId, outcome: TaskOutcome },     // Success | Failed | Cancelled | TimedOut
+}
+
+/// v2 (Ciclo 2.2) — espelho do `DenyScope` do kernel (`bastion_types`,
+/// Ciclo 2.1 §3). Duplicado localmente e documentado, não um tipo à parte:
+/// `bastion-agent-runtime` ainda não depende de `bastion-types`.
+pub enum DenyScope {
+    Instance, // nega só esta invocação; task continua normalmente
+    Turn,     // nega E encerra a task (adapter cancela graciosamente) — default do produto
+}
+
+pub enum PermissionDecision {
+    Allow,
+    Deny { scope: DenyScope },   // v2: carrega escopo (era variante unitária)
 }
 
 #[non_exhaustive]
@@ -163,6 +223,17 @@ pub struct PolicyCoverage {
 }
 ```
 
+`sandbox` (v2, Ciclo 2.2 — A-05 §5.2): deixou de ser uma constante estática do
+adapter. Um adapter capaz de sandbox real (ex.: Codex/bubblewrap) DEVE
+detectar em `health()`/`start()` se o mecanismo funciona neste host (probe
+barato, real — não uma heurística de versão) e cachear o resultado para
+`descriptor()` reportar. Sem mecanismo detectável, ou detecção impossível a
+partir das superfícies do binário: `SandboxCoverage::None`, o pior caso
+honesto — nunca `Partial` otimista sem prova de que o mecanismo funciona
+neste host específico. `Honored` continua reservado para quando o adapter
+consegue provar confinamento de um turno específico, não apenas que o
+mecanismo existe.
+
 Integração com os seams existentes (nenhum novo bypass):
 
 | Seam atual | Regra no AgentRuntime |
@@ -195,14 +266,29 @@ Ativos: credenciais de assinatura/API; memória e contexto do owner (tiers); wor
 Todo adapter passa a MESMA suite:
 
 1. start → submit → stream → `Ended{Success}` (happy path).
-2. resume pós-restart do processo hospedeiro (ou `NotResumable` tipado).
-3. steer no meio de task longa (ou declarado não-suportado no descriptor — e então a chamada falha tipada).
+2. resume pós-restart do processo hospedeiro, com `ResumeSpec` (v2) —
+   funciona (aplicando o que o protocolo do adapter permitir e reportando
+   divergência via `Warning`) OU `NotResumable` tipado.
+3. steer no meio de task longa (ou declarado não-suportado no descriptor — e
+   então a chamada falha tipada). **Requisito v2 (A-05 §5.3)**: se o
+   protocolo do harness tiver uma janela de readiness transiente entre
+   aceitar a task e aceitar um steer nela, o adapter DEVE tolerar isso (ex.:
+   retry curto e limitado) em vez de reportar erro tipado na primeira
+   rejeição espúria do próprio harness.
 4. cancel graceful e kill; sem zumbi; sem evento pós-terminal.
-5. timeout → `TimedOut` + cleanup.
+5. timeout → `TimedOut` + cleanup. **Requisito v2 (A-05 §5.4)**: se o
+   protocolo do harness reporta o mesmo status para "cancelado
+   cooperativamente" e "interrompido pelo watchdog de timeout", o adapter
+   DEVE desambiguar client-side (nunca reportar `Cancelled` para um timeout
+   nem vice-versa só porque o wire status bate).
 6. fila: segundo `submit` durante task ativa (rejeita ou enfileira — conforme descriptor, nunca intercala eventos).
 7. streaming: deltas chegam incrementais; ordem total; backpressure não perde evento terminal.
 8. diff/artefatos com proveniência; digest bate com conteúdo.
 9. `PermissionRequest` → ponte de approval → allow e deny ambos exercitados.
+   **v2**: deny carrega `DenyScope`; com `Turn` (default do produto) o
+   adapter cancela a task graciosamente após negar — ver
+   `docs/revamp/C2-approval-port-design.md` §3 (deny gate-a uma tool-call,
+   não a intenção do modelo; `Turn` fecha esse gap no lado do adapter).
 10. crash do harness no meio da task → `Crashed`, sessão Bastion legível depois.
 11. `AuthProfileRef` inválido → `Auth` tipado sem vazamento de secret.
 12. declaração registry-vs-sandbox: relatório final da task lista o que passou pelo `CapabilityRegistry` (MCP bridge) vs. ocorreu dentro do harness.

@@ -38,11 +38,17 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-/// Upper bound on how long any single check waits for an event before
-/// declaring the target unresponsive. Generous enough for an in-process fake
-/// or a local subprocess adapter; a hung target fails the check instead of
-/// hanging the test suite.
-const WATCHDOG: Duration = Duration::from_secs(5);
+/// Default upper bound on how long any single check waits for an event
+/// before declaring the target unresponsive — generous enough for an
+/// in-process fake or a local subprocess adapter. Ciclo 2.2 (A-05 §5.1):
+/// this used to be a crate-wide `const`; a live cloud-backed harness makes
+/// 14 genuine cold `start()` calls in one `run_all` sweep, and real,
+/// variable network/handshake latency can exceed 5s on isolated runs
+/// without anything actually being wrong. It is now
+/// [`ConformanceScenarios::watchdog`] — callers targeting a live adapter
+/// pass something larger (e.g. 30s); this constant is just the suggested
+/// default for embedded/local-subprocess targets.
+pub const DEFAULT_WATCHDOG: Duration = Duration::from_secs(5);
 
 /// Optional side-channel a conformance target may implement to exercise
 /// failure paths that cannot be triggered through the normal
@@ -126,6 +132,13 @@ pub struct ConformanceScenarios {
     /// file under the session's workspace root, then `Ended { outcome:
     /// Success }`.
     pub produces_artifact: TaskInput,
+    /// Upper bound each check waits for an expected event before declaring
+    /// the target unresponsive (Ciclo 2.2, A-05 §5.1). Use
+    /// [`DEFAULT_WATCHDOG`] for an embedded fake or local-subprocess
+    /// adapter; live cloud-backed adapters should pass a larger value (e.g.
+    /// 30s) to absorb genuine cold-start/network latency across the 14
+    /// `start()` calls one `run_all` sweep makes.
+    pub watchdog: Duration,
 }
 
 /// Runs every conformance check in sequence against one `(runtime, spec,
@@ -262,16 +275,17 @@ fn validate_no_post_terminal_events(events: &[RuntimeEvent]) -> Result<(), Strin
     Ok(())
 }
 
-/// Drains events (bounded by [`WATCHDOG`]) until the target task's `Ended`
+/// Drains events (bounded by `watchdog`) until the target task's `Ended`
 /// is observed, returning its outcome and every event seen along the way
 /// (including other tasks', for callers that need to inspect interleaving).
 async fn drain_until_ended(
     session: &mut dyn RuntimeSession,
     task: TaskId,
+    watchdog: Duration,
 ) -> Result<(TaskOutcome, Vec<RuntimeEvent>), String> {
     let mut seen = Vec::new();
     loop {
-        match tokio::time::timeout(WATCHDOG, session.next_event()).await {
+        match tokio::time::timeout(watchdog, session.next_event()).await {
             Ok(Some(evt)) => {
                 let matched = if let RuntimeEvent::Ended { task: t, outcome } = &evt {
                     (*t == task).then(|| outcome.clone())
@@ -289,15 +303,16 @@ async fn drain_until_ended(
     }
 }
 
-/// Drains events (bounded by [`WATCHDOG`]) until a `PermissionRequest` for
+/// Drains events (bounded by `watchdog`) until a `PermissionRequest` for
 /// `task` is observed, returning its id and every event seen so far.
 async fn wait_for_permission_request(
     session: &mut dyn RuntimeSession,
     task: TaskId,
+    watchdog: Duration,
 ) -> Result<(PermissionRequestId, Vec<RuntimeEvent>), String> {
     let mut seen = Vec::new();
     loop {
-        match tokio::time::timeout(WATCHDOG, session.next_event()).await {
+        match tokio::time::timeout(watchdog, session.next_event()).await {
             Ok(Some(evt)) => {
                 let matched_id = if let RuntimeEvent::PermissionRequest { task: t, id, .. } = &evt {
                     (*t == task).then_some(*id)
@@ -345,7 +360,7 @@ pub async fn check_happy_path<R: AgentRuntime>(
         Ok(s) => s,
         Err(e) => return CheckResult::Fail(format!("start failed: {e}")),
     };
-    match tokio::time::timeout(WATCHDOG, session.next_event()).await {
+    match tokio::time::timeout(scenarios.watchdog, session.next_event()).await {
         Ok(Some(RuntimeEvent::Started { .. })) => {}
         Ok(Some(other)) => {
             return CheckResult::Fail(format!("expected Started first, got {other:?}"))
@@ -357,7 +372,7 @@ pub async fn check_happy_path<R: AgentRuntime>(
         Ok(t) => t,
         Err(e) => return CheckResult::Fail(format!("submit failed: {e}")),
     };
-    let (outcome, events) = match drain_until_ended(&mut *session, task).await {
+    let (outcome, events) = match drain_until_ended(&mut *session, task, scenarios.watchdog).await {
         Ok(v) => v,
         Err(detail) => return CheckResult::Fail(detail),
     };
@@ -384,7 +399,15 @@ pub async fn check_resume<R: AgentRuntime>(runtime: &R, spec: &SessionSpec) -> C
     };
     let handle = session.handle();
     drop(session);
-    let result = runtime.resume(&handle).await;
+    // Ciclo 2.2: resume() takes the re-appliable subset of the original
+    // spec (workspace/sandbox stay fixed to the session that's being
+    // reattached — only timeout/permissions/env can plausibly travel).
+    let resume_spec = ResumeSpec {
+        timeout: spec.timeout,
+        permissions: spec.permissions.clone(),
+        env: spec.env.clone(),
+    };
+    let result = runtime.resume(&handle, resume_spec).await;
     if supports_resume {
         match result {
             Ok(_) => CheckResult::Pass,
@@ -456,7 +479,8 @@ async fn check_cancel<R: AgentRuntime>(
     if let Err(e) = session.cancel(mode).await {
         return CheckResult::Fail(format!("first cancel failed: {e}"));
     }
-    let (outcome, _events) = match drain_until_ended(&mut *session, task).await {
+    let (outcome, _events) = match drain_until_ended(&mut *session, task, scenarios.watchdog).await
+    {
         Ok(v) => v,
         Err(detail) => return CheckResult::Fail(detail),
     };
@@ -517,7 +541,8 @@ pub async fn check_timeout<R: AgentRuntime>(
         Ok(t) => t,
         Err(e) => return CheckResult::Fail(format!("submit failed: {e}")),
     };
-    let (outcome, _events) = match drain_until_ended(&mut *session, task).await {
+    let (outcome, _events) = match drain_until_ended(&mut *session, task, scenarios.watchdog).await
+    {
         Ok(v) => v,
         Err(detail) => return CheckResult::Fail(detail),
     };
@@ -577,7 +602,7 @@ pub async fn check_queue_or_reject<R: AgentRuntime>(
     let mut events = Vec::new();
     let (mut done_a, mut done_b) = (false, false);
     loop {
-        match tokio::time::timeout(WATCHDOG, session.next_event()).await {
+        match tokio::time::timeout(scenarios.watchdog, session.next_event()).await {
             Ok(Some(evt)) => {
                 if let RuntimeEvent::Ended { task, outcome } = &evt {
                     if *task == task_a {
@@ -627,10 +652,11 @@ pub async fn check_event_ordering_terminal<R: AgentRuntime>(
         Ok(t) => t,
         Err(e) => return CheckResult::Fail(format!("first submit failed: {e}")),
     };
-    let (outcome1, events1) = match drain_until_ended(&mut *session, task1).await {
-        Ok(v) => v,
-        Err(detail) => return CheckResult::Fail(detail),
-    };
+    let (outcome1, events1) =
+        match drain_until_ended(&mut *session, task1, scenarios.watchdog).await {
+            Ok(v) => v,
+            Err(detail) => return CheckResult::Fail(detail),
+        };
     if outcome1 != TaskOutcome::Success {
         return CheckResult::Fail(format!("expected task1 Success, got {outcome1:?}"));
     }
@@ -645,10 +671,11 @@ pub async fn check_event_ordering_terminal<R: AgentRuntime>(
     if task2 == task1 {
         return CheckResult::Fail("second task reused the first TaskId".to_string());
     }
-    let (outcome2, events2) = match drain_until_ended(&mut *session, task2).await {
-        Ok(v) => v,
-        Err(detail) => return CheckResult::Fail(detail),
-    };
+    let (outcome2, events2) =
+        match drain_until_ended(&mut *session, task2, scenarios.watchdog).await {
+            Ok(v) => v,
+            Err(detail) => return CheckResult::Fail(detail),
+        };
     if outcome2 != TaskOutcome::Success {
         return CheckResult::Fail(format!("expected task2 Success, got {outcome2:?}"));
     }
@@ -680,7 +707,7 @@ pub async fn check_artifact_digest<R: AgentRuntime>(
         Ok(t) => t,
         Err(e) => return CheckResult::Fail(format!("submit failed: {e}")),
     };
-    let (outcome, events) = match drain_until_ended(&mut *session, task).await {
+    let (outcome, events) = match drain_until_ended(&mut *session, task, scenarios.watchdog).await {
         Ok(v) => v,
         Err(detail) => return CheckResult::Fail(detail),
     };
@@ -744,17 +771,18 @@ pub async fn check_permission_bridge_allow<R: AgentRuntime>(
         Ok(t) => t,
         Err(e) => return CheckResult::Fail(format!("submit failed: {e}")),
     };
-    let (req_id, pre_events) = match wait_for_permission_request(&mut *session, task).await {
-        Ok(v) => v,
-        Err(detail) => return CheckResult::Fail(detail),
-    };
+    let (req_id, pre_events) =
+        match wait_for_permission_request(&mut *session, task, scenarios.watchdog).await {
+            Ok(v) => v,
+            Err(detail) => return CheckResult::Fail(detail),
+        };
     if let Err(e) = session
         .respond_permission(req_id, PermissionDecision::Allow)
         .await
     {
         return CheckResult::Fail(format!("respond_permission(Allow) failed: {e}"));
     }
-    let (outcome, events) = match drain_until_ended(&mut *session, task).await {
+    let (outcome, events) = match drain_until_ended(&mut *session, task, scenarios.watchdog).await {
         Ok(v) => v,
         Err(detail) => return CheckResult::Fail(detail),
     };
@@ -772,9 +800,13 @@ pub async fn check_permission_bridge_allow<R: AgentRuntime>(
     CheckResult::Pass
 }
 
-/// #9b — `PermissionRequest` → `respond_permission(Deny)` → the guarded
-/// action does NOT execute. Skipped when `policy_coverage.approvals ==
-/// HarnessOwned`.
+/// #9b — `PermissionRequest` → `respond_permission(Deny{scope: Turn})` → the
+/// guarded action does NOT execute. Uses [`DenyScope::Turn`], the product
+/// default (Ciclo 2.2, `docs/revamp/C2-approval-port-design.md` §3) — the
+/// outcome itself is not asserted (a `Turn` deny may end the task as
+/// `Cancelled` rather than `Success`, which is the whole point of closing
+/// the alternate-tool-routing gap), only that the guarded action never
+/// executed. Skipped when `policy_coverage.approvals == HarnessOwned`.
 pub async fn check_permission_bridge_deny<R: AgentRuntime>(
     runtime: &R,
     spec: &SessionSpec,
@@ -793,17 +825,24 @@ pub async fn check_permission_bridge_deny<R: AgentRuntime>(
         Ok(t) => t,
         Err(e) => return CheckResult::Fail(format!("submit failed: {e}")),
     };
-    let (req_id, pre_events) = match wait_for_permission_request(&mut *session, task).await {
-        Ok(v) => v,
-        Err(detail) => return CheckResult::Fail(detail),
-    };
+    let (req_id, pre_events) =
+        match wait_for_permission_request(&mut *session, task, scenarios.watchdog).await {
+            Ok(v) => v,
+            Err(detail) => return CheckResult::Fail(detail),
+        };
     if let Err(e) = session
-        .respond_permission(req_id, PermissionDecision::Deny)
+        .respond_permission(
+            req_id,
+            PermissionDecision::Deny {
+                scope: DenyScope::Turn,
+            },
+        )
         .await
     {
         return CheckResult::Fail(format!("respond_permission(Deny) failed: {e}"));
     }
-    let (_outcome, events) = match drain_until_ended(&mut *session, task).await {
+    let (_outcome, events) = match drain_until_ended(&mut *session, task, scenarios.watchdog).await
+    {
         Ok(v) => v,
         Err(detail) => return CheckResult::Fail(detail),
     };
@@ -835,7 +874,7 @@ pub async fn check_crash_isolation<R: AgentRuntime + FaultInjection>(
         Err(e) => return CheckResult::Fail(format!("submit failed: {e}")),
     };
     // Make sure the task is actually underway before inducing the crash.
-    match tokio::time::timeout(WATCHDOG, session.next_event()).await {
+    match tokio::time::timeout(scenarios.watchdog, session.next_event()).await {
         Ok(Some(_)) => {}
         Ok(None) => {
             return CheckResult::Fail("event stream closed before crash induction".to_string())
@@ -851,7 +890,7 @@ pub async fn check_crash_isolation<R: AgentRuntime + FaultInjection>(
         return CheckResult::Skip("FaultInjection::induce_crash unsupported".to_string());
     }
     loop {
-        match tokio::time::timeout(WATCHDOG, session.next_event()).await {
+        match tokio::time::timeout(scenarios.watchdog, session.next_event()).await {
             Ok(Some(RuntimeEvent::Ended { task: t, outcome })) if t == task => {
                 if !matches!(outcome, TaskOutcome::Failed { .. }) {
                     return CheckResult::Fail(format!(

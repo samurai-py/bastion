@@ -20,6 +20,28 @@
 //! - egress filtering happens when the [`TaskInput`] is assembled, before
 //!   any content reaches the harness;
 //! - auth is an opaque [`AuthProfileRef`]; errors never carry secrets.
+//!
+//! # v2 (Ciclo 2.2 — contract review against 6 live-validation findings)
+//!
+//! `docs/revamp/A-05-conformance-matrix.md` §5 found six gaps by actually
+//! running the suite against real harnesses. This revision closes them:
+//! 1. [`conformance::ConformanceScenarios::watchdog`] replaces the
+//!    crate-wide `const WATCHDOG` — live cloud adapters need a longer bound
+//!    than the embedded fake.
+//! 2. [`SandboxCoverage`] is now detected (probed in `health()`/`start()`),
+//!    never a hardcoded per-adapter constant — see [`crate::codex`].
+//! 3. [`AgentRuntime::resume`] now takes a [`ResumeSpec`] — the re-appliable
+//!    subset of [`SessionSpec`] (timeout/permissions/env; workspace/sandbox
+//!    stay fixed to the original session).
+//! 4. [`PermissionDecision::Deny`] carries a [`DenyScope`], mirroring the
+//!    kernel's `bastion_types::DenyScope` (`docs/revamp/C2-approval-port-design.md`
+//!    §3): `Turn` makes the adapter cancel the task gracefully after
+//!    denying, closing the "deny one tool call, model reroutes through
+//!    another" gap (A-05 §5.5) at the adapter boundary too.
+//! 5. `turn/steer`'s transient readiness race and `turn/interrupt`'s
+//!    cancel-vs-timeout ambiguity (A-05 §5.3/§5.4) were already mitigated in
+//!    the Codex adapter; this contract now states both as adapter
+//!    requirements (see [`RuntimeSession::steer`], [`RuntimeEvent::Ended`]).
 
 pub mod acpx;
 pub mod codex;
@@ -254,6 +276,30 @@ pub struct OtelContext {
     pub parent_span_id: Option<String>,
 }
 
+/// The subset of [`SessionSpec`] genuinely re-appliable on
+/// [`AgentRuntime::resume`] (Ciclo 2.2, closing A-05 §5.6 / LOOP-REPORT
+/// finding #6: `resume` used to take no spec at all, so an adapter could
+/// not recover the caller's real policy on reattach and fell back to
+/// conservative, adapter-level defaults).
+///
+/// `workspace` and `sandbox` are deliberately excluded: they are fixed by
+/// the original session (a harness session's root/confinement cannot be
+/// renegotiated mid-reattach) — only `timeout`/`permissions`/`env` can
+/// plausibly change across a daemon restart and be re-applied.
+///
+/// Not every adapter can honor every field over its resume protocol (e.g. a
+/// harness's reattach call may only take a session id, with no channel to
+/// change permissions). A conforming adapter applies what its protocol
+/// allows and surfaces the rest as a [`RuntimeEvent::Warning`] rather than
+/// silently dropping the divergence — see [`crate::codex`] for a real
+/// example.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeSpec {
+    pub timeout: TimeoutPolicy,
+    pub permissions: PermissionProfile,
+    pub env: EnvPolicy,
+}
+
 /// Everything needed to open a session. Built by the composition layer —
 /// egress filtering of the payload happens BEFORE this struct is filled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,12 +389,39 @@ pub enum PermissionAction {
     Other(String),
 }
 
+/// Scope of a denied permission request (Ciclo 2.2, mirroring the kernel's
+/// `bastion_types::DenyScope` — `docs/revamp/C2-approval-port-design.md`
+/// §3). `bastion-agent-runtime` is still a standalone crate (no
+/// `bastion-types` dependency; see the M1/M2 substrate split), so this is a
+/// deliberate, documented duplicate of the same two-variant vocabulary, not
+/// an independently invented one — keep it in sync if the kernel's
+/// `DenyScope` ever grows a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DenyScope {
+    /// Deny only this specific permission request; the session/task
+    /// continues — whatever the harness does next with a declined action is
+    /// bounded only by `policy_coverage`, not by this contract.
+    Instance,
+    /// Deny AND end the delegated task: after declining, the adapter
+    /// cancels the active task gracefully (`RuntimeSession::cancel`
+    /// semantics). Product default (mirrors the kernel's `DenyScope::Turn`):
+    /// closes the "deny one tool call, harness reroutes through another
+    /// ungated one" gap (A-05 §5.5 / LOOP-REPORT finding #5.5) at the
+    /// adapter boundary — a denial almost never means "keep trying other
+    /// approaches this task".
+    Turn,
+}
+
 /// Decision returned to the harness for a pending permission request.
 /// Produced by Bastion's approval flow — never synthesized by the adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionDecision {
     Allow,
-    Deny,
+    /// Ciclo 2.2: carries [`DenyScope`] — see its rustdoc for what each
+    /// variant requires of a conforming adapter.
+    Deny {
+        scope: DenyScope,
+    },
 }
 
 /// Cancellation mode for [`RuntimeSession::cancel`].
@@ -429,6 +502,15 @@ pub enum RuntimeEvent {
         detail: String,
     },
     /// Terminal event of a task.
+    ///
+    /// Requirement (Ciclo 2.2, A-05 §5.4): some protocols report the same
+    /// underlying status for a cooperative cancel ([`RuntimeSession::cancel`])
+    /// and for the adapter's own timeout watchdog force-stopping a task. An
+    /// adapter over such a protocol MUST disambiguate the two client-side
+    /// (e.g. tracking which turn ids it interrupted for a timeout) so it
+    /// reports `TaskOutcome::Cancelled` only for a genuine cancel and
+    /// `TaskOutcome::TimedOut` for its own timeout — never conflating them
+    /// because the wire status happens to match.
     Ended {
         task: TaskId,
         outcome: TaskOutcome,
@@ -453,8 +535,15 @@ pub trait AgentRuntime: Send + Sync {
     /// Reattach a persisted session. Must validate `handle.owner` and the
     /// adapter id; returns [`RuntimeError::NotResumable`] instead of ever
     /// silently starting a new session.
-    async fn resume(&self, handle: &SessionHandle)
-        -> Result<Box<dyn RuntimeSession>, RuntimeError>;
+    ///
+    /// `spec` carries the re-appliable policy subset (Ciclo 2.2 — see
+    /// [`ResumeSpec`]); an adapter applies whatever its reattach protocol
+    /// allows and reports the rest via [`RuntimeEvent::Warning`].
+    async fn resume(
+        &self,
+        handle: &SessionHandle,
+        spec: ResumeSpec,
+    ) -> Result<Box<dyn RuntimeSession>, RuntimeError>;
 }
 
 /// One live harness session. Not `Clone`: single ownership mirrors the
@@ -477,6 +566,14 @@ pub trait RuntimeSession: Send {
 
     /// Mid-task steering message. Errors with [`RuntimeError::Protocol`] if
     /// the adapter declared `supports.steer == false`.
+    ///
+    /// Requirement (Ciclo 2.2, A-05 §5.3): a harness's own turn-acceptance
+    /// acknowledgment MAY arrive before its internal state machine is
+    /// actually ready to accept a steer on that turn. An adapter over such a
+    /// protocol MUST tolerate this transient readiness gap (e.g. a short
+    /// bounded retry) rather than surfacing the harness's spurious rejection
+    /// as a hard `Protocol`/`Unavailable` error on the first attempt — only
+    /// a rejection that persists past the retry budget is a real error.
     async fn steer(&mut self, text: &str) -> Result<(), RuntimeError>;
 
     /// Cancel the running task. Idempotent; after completion `status()`

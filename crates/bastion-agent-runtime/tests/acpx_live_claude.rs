@@ -72,6 +72,12 @@ fn make_scenarios() -> ConformanceScenarios {
             attachments: Vec::new(),
             expected: TaskExpectation::CodeChange,
         },
+        // Ciclo 2.2 (A-05 §5.1): a live cloud-backed harness makes 14
+        // genuine cold `start()` calls in one `run_all` sweep; the embedded
+        // fake's 5s default is too tight for real handshake/network
+        // latency, which is what actually caused the spurious watchdog
+        // timeouts noted in A-05 §5.1.
+        watchdog: Duration::from_secs(30),
     }
 }
 
