@@ -148,6 +148,7 @@ mod extension/mod.rs:facade
 mod extension/mod.rs:host
 mod extension/mod.rs:review
 mod extension/mod.rs:subprocess
+mod extension/mod.rs:ui
 mod extension/mod.rs:wasm
 fn extension/review.rs:permission_summary
 fn extension/review.rs:trust_tier_of
@@ -157,6 +158,12 @@ struct extension/subprocess.rs:SubprocessExtension
 const extension/subprocess.rs:WIRE_VERSION
 fn extension/subprocess.rs:new
 fn extension/subprocess.rs:with_secret_resolver
+struct extension/ui.rs:ExtensionUiHost
+struct extension/ui.rs:RegisteredUiExtension
+fn extension/ui.rs:deregister
+fn extension/ui.rs:new
+fn extension/ui.rs:register
+fn extension/ui.rs:router
 const extension/wasm.rs:DEFAULT_FUEL
 struct extension/wasm.rs:WasmCapability
 type extension/wasm.rs:WasmEntry

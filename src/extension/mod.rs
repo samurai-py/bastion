@@ -25,12 +25,16 @@
 //!   an `ExtensionInstance`/`Capability`.
 //! - [`review`] — `permission_summary`, the owner-facing text an install flow
 //!   shows before committing (M4-09).
+//! - [`ui`] — extension UI isolation (Loop 3-D, CLD-08): sandboxed asset
+//!   serving + the one mediated `CapabilityRegistry` bridge a served UI may
+//!   use, gated by that extension's own declared `PermissionSet`.
 
 pub mod declarative;
 pub mod facade;
 pub mod host;
 pub mod review;
 pub mod subprocess;
+pub mod ui;
 pub mod wasm;
 
 pub use facade::{ExtensionInstance, HostFacade};
