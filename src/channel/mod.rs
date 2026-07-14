@@ -1,10 +1,19 @@
 use crate::agent::handle::AgentHandle;
 use std::collections::HashMap;
 
+// M3-05: Discord/Slack/Email carry the heavy transport deps (serenity,
+// slack-morphism, lettre/async-imap) — compiled only under `channels-extra`.
+// `whatsapp` always compiles (its types are threaded through the webhook
+// router signature; no heavy deps) — only its runtime wiring in main.rs is
+// feature-gated. `voice` carries cpal/hound/rustpotter — gated under `voice`.
+#[cfg(feature = "channels-extra")]
 pub mod discord;
+#[cfg(feature = "channels-extra")]
 pub mod email;
+#[cfg(feature = "channels-extra")]
 pub mod slack;
 pub mod telegram;
+#[cfg(feature = "voice")]
 pub mod voice;
 pub mod webhook;
 pub mod whatsapp;

@@ -69,6 +69,7 @@ enum Command {
     Daemon,
     /// Start MCP server over stdio (local subprocess transport).
     /// Used by local agents that control lifecycle (Claude Code, opencode, etc.).
+    #[cfg(feature = "mcp-server")]
     McpStdio,
     /// Export agent identity, memories, goals, personas, and config to .af file
     Export {
@@ -284,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        #[cfg(feature = "mcp-server")]
         Command::McpStdio => {
             use rmcp::ServiceExt;
 
@@ -469,9 +471,13 @@ async fn daemon_loop(
     // routing" claim literally true — one mechanism, not N.
     let webhook_owner_map = bastion::config::owner_map_for_webhook(&cfg.identity);
     let telegram_owner_map = bastion::config::owner_map_for_telegram(&cfg.identity);
+    #[cfg(feature = "channels-extra")]
     let whatsapp_owner_map = bastion::config::owner_map_for_whatsapp(&cfg.identity);
+    #[cfg(feature = "channels-extra")]
     let discord_owner_map = bastion::config::owner_map_for_discord(&cfg.identity);
+    #[cfg(feature = "channels-extra")]
     let slack_owner_map = bastion::config::owner_map_for_slack(&cfg.identity);
+    #[cfg(feature = "channels-extra")]
     let email_owner_map = bastion::config::owner_map_for_email(&cfg.identity);
 
     // Spawn webhook channel if BASTION_WEBHOOK_ADDR is set.
@@ -561,6 +567,9 @@ async fn daemon_loop(
             std::env::var("BASTION_AGENT_NAME").unwrap_or_else(|_| "bastion".to_string());
 
         // Build MCP Streamable HTTP server if enabled.
+        // M3-05: compiled only under the `mcp-server` feature; without it,
+        // `mcp_routes` is always `None` (and an enabled config is warned about).
+        #[cfg(feature = "mcp-server")]
         let mcp_routes = if cfg.mcp_server.enabled {
             // Clone AgentLoop components that BastionMcpServer needs.
             let cap_registry = Arc::new(agent.capability_registry.clone());
@@ -598,6 +607,16 @@ async fn daemon_loop(
             tracing::info!(event = "mcp_server_disabled");
             None
         };
+        #[cfg(not(feature = "mcp-server"))]
+        let mcp_routes: Option<axum::Router> = {
+            if cfg.mcp_server.enabled {
+                tracing::warn!(
+                    event = "mcp_server_not_compiled",
+                    "mcp_server.enabled=true but this binary was built without the `mcp-server` feature"
+                );
+            }
+            None
+        };
 
         // CR-02: create an OtcStore and pass it to serve_with_mesh so skill commands
         // can insert BAST-XXXX codes for /auth/exchange and /mesh/pair.
@@ -616,6 +635,9 @@ async fn daemon_loop(
         // WhatsApp (CHAN-01): reuses this same webhook router (10-RESEARCH.md
         // Pattern 1) — no second axum server. `WHATSAPP_PHONE_NUMBER_ID` presence
         // gates whether we attempt to build a sender at all.
+        // M3-05: runtime wiring gated under `channels-extra` (the module itself
+        // always compiles — its types thread through the webhook router).
+        #[cfg(feature = "channels-extra")]
         let whatsapp_config = if std::env::var("WHATSAPP_PHONE_NUMBER_ID").is_ok() {
             match bastion::channel::whatsapp::WhatsAppSender::from_env() {
                 Ok(sender) => Some(bastion::channel::whatsapp::WhatsAppConfig {
@@ -628,6 +650,16 @@ async fn daemon_loop(
                 }
             }
         } else {
+            None
+        };
+        #[cfg(not(feature = "channels-extra"))]
+        let whatsapp_config: Option<bastion::channel::whatsapp::WhatsAppConfig> = {
+            if std::env::var("WHATSAPP_PHONE_NUMBER_ID").is_ok() {
+                tracing::warn!(
+                    event = "whatsapp_not_compiled",
+                    "WHATSAPP_PHONE_NUMBER_ID is set but this binary was built without the `channels-extra` feature"
+                );
+            }
             None
         };
 
@@ -654,11 +686,14 @@ async fn daemon_loop(
             }
         });
         tracing::info!(event = "webhook_started", addr = %std::env::var("BASTION_WEBHOOK_ADDR").unwrap_or_default());
-    } else if std::env::var("WHATSAPP_PHONE_NUMBER_ID").is_ok() {
-        tracing::warn!(
-            event = "whatsapp_requires_webhook_addr",
-            "WHATSAPP_PHONE_NUMBER_ID is set but BASTION_WEBHOOK_ADDR is not — WhatsApp mounts on the webhook router and cannot start without it"
-        );
+    } else {
+        #[cfg(feature = "channels-extra")]
+        if std::env::var("WHATSAPP_PHONE_NUMBER_ID").is_ok() {
+            tracing::warn!(
+                event = "whatsapp_requires_webhook_addr",
+                "WHATSAPP_PHONE_NUMBER_ID is set but BASTION_WEBHOOK_ADDR is not — WhatsApp mounts on the webhook router and cannot start without it"
+            );
+        }
     }
 
     // Spawn Telegram channel if TELEGRAM_BOT_TOKEN is set.
@@ -682,6 +717,8 @@ async fn daemon_loop(
     }
 
     // Spawn Discord channel if DISCORD_BOT_TOKEN is set (CHAN-03).
+    // M3-05: compiled only under `channels-extra` (serenity dep).
+    #[cfg(feature = "channels-extra")]
     if std::env::var("DISCORD_BOT_TOKEN").is_ok() {
         match bastion::channel::discord::DiscordChannel::from_env() {
             Ok(ch) => {
@@ -702,6 +739,8 @@ async fn daemon_loop(
     }
 
     // Spawn Slack channel if SLACK_BOT_TOKEN and SLACK_APP_TOKEN are set (CHAN-03).
+    // M3-05: compiled only under `channels-extra` (slack-morphism dep).
+    #[cfg(feature = "channels-extra")]
     if std::env::var("SLACK_BOT_TOKEN").is_ok() && std::env::var("SLACK_APP_TOKEN").is_ok() {
         match bastion::channel::slack::SlackChannel::from_env() {
             Ok(ch) => {
@@ -722,6 +761,8 @@ async fn daemon_loop(
     }
 
     // Spawn Email channel if EMAIL_ADDRESS is set (CHAN-03).
+    // M3-05: compiled only under `channels-extra` (lettre/async-imap deps).
+    #[cfg(feature = "channels-extra")]
     if std::env::var("EMAIL_ADDRESS").is_ok() {
         match bastion::channel::email::EmailChannel::from_env() {
             Ok(ch) => {
@@ -747,6 +788,8 @@ async fn daemon_loop(
     // SAME registry AgentLoop::new() populated (auto-classified is_local_override=true
     // by Plan 10-08's [mcp.servers.voice].is_local=true wiring) — no manual
     // registration call is needed here.
+    // M3-05: compiled only under `voice` (cpal/hound/rustpotter deps).
+    #[cfg(feature = "voice")]
     if cfg.channels.voice.enabled {
         let voice_registry = Arc::new(agent.capability_registry.clone());
         let vc = bastion::channel::voice::VoiceChannel::new(
@@ -762,6 +805,13 @@ async fn daemon_loop(
             }
         });
         tracing::info!(event = "voice_started");
+    }
+    #[cfg(not(feature = "voice"))]
+    if cfg.channels.voice.enabled {
+        tracing::warn!(
+            event = "voice_not_compiled",
+            "channels.voice.enabled=true but this binary was built without the `voice` feature"
+        );
     }
 
     // Spawn /api/infer gateway for Python MCP containers (D-08 / D-09).
@@ -1056,6 +1106,7 @@ async fn daemon_loop(
 }
 
 /// Build token permissions map from config (shared between daemon and mcp-stdio paths).
+#[cfg(feature = "mcp-server")]
 fn build_token_perms(
     cfg: &bastion::config::BastionConfig,
 ) -> HashMap<String, bastion::mcp::server::TokenPermissions> {

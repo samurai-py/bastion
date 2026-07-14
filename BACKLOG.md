@@ -112,8 +112,8 @@ Distribuição durante incubação: **path deps no workspace + git deps version-
 - [ ] **M3-01** Reduzir `pub` ao contrato; erros tipados fail-closed nas bordas.
 - [x] **M3-02** Documentar invariantes de segurança: toda invocation passa pelo registry; `privacy_tier` ausente não vira allow; conteúdo não confiável não ganha autoridade; approval não bypassável por adapter; sessions owner-scoped; agente nunca recebe SQL cru. (`docs/SECURITY-INVARIANTS.md`)
 - [ ] **M3-03** Compatibility tests contra a versão anterior suportada; checagem de API breaking no CI.
-- [ ] **M3-04** Exemplos `minimal-agent` e `embedded-host` sem dependência do produto.
-- [ ] **M3-05** Feature flags + matriz de combinações suportadas; build mínimo sem features de produto.
+- [x] **M3-04** Exemplos `minimal-agent` e `embedded-host` sem dependência do produto. (3 furos de API achados — `docs/revamp/M3-CLOSE.md` §3)
+- [x] **M3-05** Feature flags + matriz de combinações suportadas; build mínimo sem features de produto. (`channels-extra`/`voice`/`mcp-server`; mínimo 15,6 MB vs full 24,3 MB; flag `mesh` pulada — webhook refactor, `docs/revamp/M3-CLOSE.md` §4)
 - [ ] **M3-06** Política de semver, MSRV, depreciação; docs de embedding/upgrade. Licença: **source-available restritiva em todas as crates** (decisão #10).
 - [ ] **M3-07** `bastion-extension-protocol` + SDK — **os três mecanismos no primeiro release** (decisão #11): (1) artefatos declarativos; (2) WASM/WASI; (3) processo externo com protocolo versionado. Crate estática permanece caminho para extensão oficial/host embedded. Nunca ABI dinâmica Rust como padrão comunitário.
 - [ ] **M3-08** Conformance de extensão nos três mecanismos: handshake, lifecycle, eventos, health, permissions, secrets, shutdown. Extensão de referência passa sem acesso implícito a processo/secrets/filesystem.

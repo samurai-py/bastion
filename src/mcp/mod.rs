@@ -10,9 +10,15 @@
 //! cycle back into the app crate or a port-based redesign out of scope here.
 //! See `bastion_mcp`'s crate doc for the full rationale.
 
+// M3-05: the MCP *server* surface (BastionMcpServer, MCP-over-HTTP routes,
+// `bastion mcp-stdio`) is product surface, gated behind the `mcp-server`
+// feature (also gates rmcp's server-side cargo features). The MCP *client*
+// re-exports below are substrate and always on.
+#[cfg(feature = "mcp-server")]
 pub mod server;
 
 // TEMPORARY re-export shim (M2). Remove by end of M3 (docs/revamp/M1-ADR-substrate-split.md).
 pub use bastion_mcp::{client, oauth, registry, registry_setup, tool_source};
 pub use bastion_mcp::{ComposioOAuth, McpClient, McpToolSource, ToolRegistry};
+#[cfg(feature = "mcp-server")]
 pub use server::BastionMcpServer;
