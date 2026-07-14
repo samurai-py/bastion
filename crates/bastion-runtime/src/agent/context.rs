@@ -17,6 +17,11 @@ use crate::memory::PrivacyTier;
 /// SECURITY (Pitfall 5): o egress check deve usar `max_tier` do conteúdo injetado,
 /// não apenas o tier da persona — beliefs LocalOnly no system prompt vazam se o
 /// check usar só o tier da persona (que pode ser CloudOk).
+///
+/// Deriva `Debug`/`Clone`/`PartialEq` (achado #1 do Loop 3-E): um segundo consumidor
+/// que injeta blocos via SEAM #2 precisa poder `assert_eq!`/logar o que foi construído
+/// sem destructurar campo a campo. Puramente aditivo — zero mudança de comportamento.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContextBlock {
     pub content: String,
     pub max_tier: PrivacyTier,
